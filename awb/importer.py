@@ -60,7 +60,10 @@ def import_reply(
     data = source.read_bytes()
     atomic.atomic_write_bytes(p["md"], data, mode=0o600)
     atomic.atomic_write_bytes(p["submitted"], b"", mode=0o600)
-    return wait.verify_and_publish(session.path, round_n, agent)
+    out = wait.verify_and_publish(session.path, round_n, agent)
+    target.state = "reply_present"
+    ledger.save(session)
+    return out
 
 
 def cmd_import(args) -> int:
@@ -80,10 +83,6 @@ def cmd_import(args) -> int:
     except (ImportError_, wait.WaitError, ledger.LedgerError) as exc:
         print(f"awb import: {exc}", file=sys.stderr)
         return 2
-
-    target = session.round(round_n).target(args.from_)
-    target.state = "reply_present"
-    ledger.save(session)
 
     ledger.append_event(
         session,

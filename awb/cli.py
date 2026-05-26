@@ -16,6 +16,7 @@ from awb import (
     pack as pack_mod,
     send as send_mod,
     session,
+    synthesize as synth_mod,
     wait as wait_mod,
 )
 
@@ -117,6 +118,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("--replace", action="store_true",
                        help="Archive existing reply before importing.")
 
+    # synthesize
+    p_syn = sub.add_parser("synthesize", help="Generate decision.draft.md, or --publish to close round.")
+    p_syn.add_argument("--project", default=None)
+    p_syn.add_argument("--session", default=None)
+    p_syn.add_argument("--round", type=int, default=None)
+    p_syn.add_argument("--publish", action="store_true",
+                       help="Promote draft to decision.md, close round, open next.")
+    p_syn.add_argument("--no-open", action="store_true",
+                       help="With --publish: do not open a next round.")
+    p_syn.add_argument("--next-target", action="append", default=None,
+                       metavar="AGENT",
+                       help="Targets for next round (default: same as current).")
+
     return parser
 
 
@@ -150,6 +164,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "import":
         return importer.cmd_import(args)
+
+    if args.cmd == "synthesize":
+        return synth_mod.cmd_synthesize(args)
 
     parser.error(f"unknown command: {args.cmd}")
     return 2  # unreachable
