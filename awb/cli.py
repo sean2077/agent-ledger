@@ -9,7 +9,15 @@ import argparse
 import sys
 from pathlib import Path
 
-from awb import __version__, doctor, send as send_mod, session, wait as wait_mod
+from awb import (
+    __version__,
+    doctor,
+    importer,
+    pack as pack_mod,
+    send as send_mod,
+    session,
+    wait as wait_mod,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -85,6 +93,30 @@ def _build_parser() -> argparse.ArgumentParser:
     p_wait.add_argument("--timeout", type=int, default=600)
     p_wait.add_argument("--poll", type=float, default=2.0)
 
+    # pack
+    p_pack = sub.add_parser("pack", help="Bundle repo context + generate prompts for the active round.")
+    p_pack.add_argument("--project", default=None)
+    p_pack.add_argument("--session", default=None)
+    p_pack.add_argument("--round", type=int, default=None)
+    p_pack.add_argument("--repo", default=".", type=Path, help="Repo to pack (default: cwd).")
+    p_pack.add_argument("--max-bundle-bytes", type=int, default=pack_mod.DEFAULT_BUNDLE_BYTES)
+    p_pack.add_argument("--max-file-bytes", type=int, default=pack_mod.DEFAULT_FILE_BYTES)
+    p_pack.add_argument("--max-file-count", type=int, default=pack_mod.DEFAULT_FILE_COUNT)
+    p_pack.add_argument("--include-untracked", action="store_true")
+    p_pack.add_argument("--allow-risk", action="store_true",
+                        help="Proceed even if secret scan finds matches.")
+    p_pack.add_argument("--dry-run", action="store_true")
+
+    # import
+    p_imp = sub.add_parser("import", help="Import an external reply file into the ledger.")
+    p_imp.add_argument("--project", default=None)
+    p_imp.add_argument("--session", default=None)
+    p_imp.add_argument("--round", type=int, default=None)
+    p_imp.add_argument("--from", dest="from_", required=True, metavar="AGENT")
+    p_imp.add_argument("path", help="Local path to the reply file to import.")
+    p_imp.add_argument("--replace", action="store_true",
+                       help="Archive existing reply before importing.")
+
     return parser
 
 
@@ -112,6 +144,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "wait":
         return wait_mod.cmd_wait(args)
+
+    if args.cmd == "pack":
+        return pack_mod.cmd_pack(args)
+
+    if args.cmd == "import":
+        return importer.cmd_import(args)
 
     parser.error(f"unknown command: {args.cmd}")
     return 2  # unreachable
