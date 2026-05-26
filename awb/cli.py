@@ -9,7 +9,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from awb import __version__, doctor
+from awb import __version__, doctor, session
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -17,11 +17,16 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="awb",
         description="Agent workbench CLI for multi-agent ledger collaboration.",
     )
+    parser.add_argument("--version", action="version", version=f"awb {__version__}")
     parser.add_argument(
-        "--version", action="version", version=f"awb {__version__}"
+        "--ledger",
+        default=Path(".shared"),
+        type=Path,
+        help="Ledger root directory (default: .shared).",
     )
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
+    # doctor
     p_doctor = sub.add_parser(
         "doctor",
         help="Run filesystem behavior probes on a ledger path.",
@@ -31,19 +36,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument(
         "path",
         nargs="?",
-        default=Path(".shared"),
+        default=None,
         type=Path,
-        help="Path to probe (default: .shared)",
+        help="Path to probe (default: --ledger).",
     )
-    p_doctor.add_argument(
-        "--json", action="store_true", help="Emit machine-readable JSON output."
+    p_doctor.add_argument("--json", action="store_true")
+    p_doctor.add_argument("--posix-target", default="0700", metavar="MODE")
+
+    # session
+    p_sess = sub.add_parser("session", help="Session lifecycle commands.")
+    sess_sub = p_sess.add_subparsers(dest="session_cmd", required=True, metavar="<subcommand>")
+
+    p_new = sess_sub.add_parser("new", help="Create a new session.")
+    p_new.add_argument("slug", help="Session slug; lowercase [a-z0-9-], <=48 chars.")
+    p_new.add_argument("--project", required=True, help="Project name (top-level dir).")
+    p_new.add_argument("--title", default=None, help="Human-readable title.")
+    p_new.add_argument(
+        "--target",
+        action="append",
+        metavar="AGENT",
+        help="Required target agent for r1 (repeat for multiple).",
     )
-    p_doctor.add_argument(
-        "--posix-target",
-        default="0700",
-        metavar="MODE",
-        help="Expected POSIX mode of the ledger root (octal, default: 0700).",
-    )
+
+    # status
+    p_status = sub.add_parser("status", help="Show session state.")
+    p_status.add_argument("--project", default=None)
+    p_status.add_argument("--session", default=None)
+    p_status.add_argument("--json", action="store_true")
 
     return parser
 
@@ -57,9 +76,15 @@ def main(argv: list[str] | None = None) -> int:
             posix_target = int(args.posix_target, 8)
         except ValueError:
             parser.error(f"--posix-target must be octal, got {args.posix_target!r}")
-        return doctor.run(
-            args.path, as_json=args.json, posix_target=posix_target
-        )
+        path = args.path or args.ledger
+        return doctor.run(path, as_json=args.json, posix_target=posix_target)
+
+    if args.cmd == "session":
+        if args.session_cmd == "new":
+            return session.cmd_session_new(args)
+
+    if args.cmd == "status":
+        return session.cmd_status(args)
 
     parser.error(f"unknown command: {args.cmd}")
     return 2  # unreachable
