@@ -135,6 +135,32 @@ class Round:
 
 
 @dataclass
+class Remote:
+    ssh_host: Optional[str] = None
+    tmux_session: Optional[str] = None
+    remote_root: Optional[str] = None
+    tmux_socket: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "Remote":
+        d = d or {}
+        return cls(
+            ssh_host=d.get("ssh_host"),
+            tmux_session=d.get("tmux_session"),
+            remote_root=d.get("remote_root"),
+            tmux_socket=d.get("tmux_socket"),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "ssh_host": self.ssh_host,
+            "tmux_session": self.tmux_session,
+            "remote_root": self.remote_root,
+            "tmux_socket": self.tmux_socket,
+        }
+
+
+@dataclass
 class Session:
     project: str
     session_id: str
@@ -144,6 +170,7 @@ class Session:
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     rounds: dict[int, Round] = field(default_factory=dict)
+    remote: Remote = field(default_factory=Remote)
     path: Optional[Path] = None
 
     @classmethod
@@ -159,6 +186,7 @@ class Session:
             created_at=d.get("created_at"),
             updated_at=d.get("updated_at"),
             rounds=rounds,
+            remote=Remote.from_dict(d.get("remote")),
             path=path,
         )
 
@@ -172,6 +200,7 @@ class Session:
             "current_round": self.current_round,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "remote": self.remote.to_dict(),
             "rounds": {str(n): r.to_dict() for n, r in sorted(self.rounds.items())},
         }
 
@@ -237,6 +266,7 @@ def create_session(
     target_agents: Iterable[str],
     *,
     when: str | None = None,
+    remote: Remote | None = None,
 ) -> Session:
     if not SLUG_RE.match(slug):
         raise LedgerError(f"slug must match {SLUG_RE.pattern}, got {slug!r}")
@@ -271,6 +301,7 @@ def create_session(
         created_at=when,
         updated_at=when,
         rounds={1: r1},
+        remote=remote or Remote(),
         path=sp,
     )
     save(session)

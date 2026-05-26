@@ -9,7 +9,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from awb import __version__, doctor, session
+from awb import __version__, doctor, send as send_mod, session, wait as wait_mod
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -52,17 +52,38 @@ def _build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--project", required=True, help="Project name (top-level dir).")
     p_new.add_argument("--title", default=None, help="Human-readable title.")
     p_new.add_argument(
-        "--target",
-        action="append",
-        metavar="AGENT",
+        "--target", action="append", metavar="AGENT",
         help="Required target agent for r1 (repeat for multiple).",
     )
+    p_new.add_argument("--ssh-host", default=None)
+    p_new.add_argument("--tmux-session", default=None)
+    p_new.add_argument("--remote-root", default=None, help="Ledger path on the remote machine.")
+    p_new.add_argument("--tmux-socket", default=None)
 
     # status
     p_status = sub.add_parser("status", help="Show session state.")
     p_status.add_argument("--project", default=None)
     p_status.add_argument("--session", default=None)
     p_status.add_argument("--json", action="store_true")
+
+    # send
+    p_send = sub.add_parser("send", help="Send a prompt trigger to remote agent.")
+    p_send.add_argument("--project", default=None)
+    p_send.add_argument("--session", default=None)
+    p_send.add_argument("--round", type=int, default=None)
+    p_send.add_argument("--target", required=True, metavar="AGENT")
+
+    # wait
+    p_wait = sub.add_parser("wait", help="Wait for agent reply, verify, publish .ready.")
+    p_wait.add_argument("--project", default=None)
+    p_wait.add_argument("--session", default=None)
+    p_wait.add_argument("--round", type=int, default=None)
+    p_wait.add_argument(
+        "--target", default=None,
+        help="Specific agent (default: all non-terminal required targets)",
+    )
+    p_wait.add_argument("--timeout", type=int, default=600)
+    p_wait.add_argument("--poll", type=float, default=2.0)
 
     return parser
 
@@ -85,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "status":
         return session.cmd_status(args)
+
+    if args.cmd == "send":
+        return send_mod.cmd_send(args)
+
+    if args.cmd == "wait":
+        return wait_mod.cmd_wait(args)
 
     parser.error(f"unknown command: {args.cmd}")
     return 2  # unreachable

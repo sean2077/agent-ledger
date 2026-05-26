@@ -9,6 +9,12 @@ from awb import ledger
 
 
 def cmd_session_new(args) -> int:
+    remote = ledger.Remote(
+        ssh_host=getattr(args, "ssh_host", None),
+        tmux_session=getattr(args, "tmux_session", None),
+        remote_root=getattr(args, "remote_root", None),
+        tmux_socket=getattr(args, "tmux_socket", None),
+    )
     try:
         session = ledger.create_session(
             ledger_root=args.ledger,
@@ -16,6 +22,7 @@ def cmd_session_new(args) -> int:
             slug=args.slug,
             title=args.title or args.slug,
             target_agents=args.target or (),
+            remote=remote,
         )
     except ledger.LedgerError as exc:
         print(f"awb session new: {exc}", file=sys.stderr)
