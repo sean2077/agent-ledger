@@ -75,7 +75,7 @@ def cmd_status(args) -> int:
     print()
     print("rounds:")
     for n, r in sorted(session.rounds.items()):
-        marker = " <-- active" if n == session.current_round else ""
+        marker = " <-- active" if n == session.current_round and r.state == "active" else ""
         print(f"  r{n} [{r.state}]{marker}")
         for t in r.targets:
             req = "*" if t.required else " "
