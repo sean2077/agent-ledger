@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v1 (2026-05-27).
+> Source spec for the `relay` CLI implementation. v0.3.0 (2026-05-27).
 > Derived from plan v3 §1 (`~/.claude/plans/misty-gliding-muffin.md`) +
 > r6/decision.md (9 patches absorbed) + r7/decision.md (terminal-state correction).
 
@@ -10,27 +10,34 @@
 .shared/
   _relay/
     .sentinel                          # bootstrap creates on the mount; presence proves mount alive
-  <project-slug>/
-    <session-slug>/                    # YYYYMMDD-<topic>
-      session.json                     # minimal session metadata, see §3
-      CLOSED                           # written by `relay close`; contains close meta
-      README.md                        # written by bootstrap; human description
-      .draft/                          # hidden; `relay claim` writes here
-        001-codex-plan.md
-      001-codex-plan.md                # `relay publish` moves from .draft here
-      001-codex-plan.md.sha256
-      001-codex-plan.ready
-      002-claude-review.md
-      002-claude-review.md.sha256
-      002-claude-review.ready
-      ...
-      archive/                         # v1.1 supersede uses this; v1 does not write here
+  .active-session                      # active session slug; see §13
+  <session-slug>/                      # YYYYMMDD-<topic>
+    session.json                       # minimal session metadata, see §3
+    CLOSED                             # written by `relay close`; contains close meta
+    README.md                          # written by bootstrap; human description
+    .draft/                            # hidden; `relay claim` writes here
+      001-codex-plan.md
+    001-codex-plan.md                  # `relay publish` moves from .draft here
+    001-codex-plan.md.sha256
+    001-codex-plan.ready
+    002-claude-review.md
+    002-claude-review.md.sha256
+    002-claude-review.ready
+    ...
+    archive/                           # future supersede support; v0.3 does not write here
 ```
 
 **Slug rules**:
 
-- `project-slug`: lowercase ASCII + digits + `-`, ≤ 48 chars. Default = `basename $(git rev-parse --show-toplevel)`.
 - `session-slug`: `YYYYMMDD-<topic>`, topic same rules. Single date prefix; the day is local time of `relay bootstrap`.
+- `project`: kept only as `session.json.project` metadata. It is not a directory level in v0.3.0.
+
+Old v2 trees shaped as `.shared/<project>/<session>/` must be migrated with:
+
+```bash
+relay migrate v2-to-v3 --dry-run
+relay migrate v2-to-v3 --apply --confirm-quiet
+```
 
 **Hidden vs visible**:
 
@@ -58,7 +65,7 @@ Drafts have no sidecars.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "project": "<project-slug>",
   "session_id": "<YYYYMMDD-topic>",
   "title": "...",
@@ -74,8 +81,8 @@ Drafts have no sidecars.
 
 | field | type | required | notes |
 |---|---|---|---|
-| `schema_version` | int | yes | bump on breaking changes; v1 = `2` |
-| `project` | str | yes | project-slug |
+| `schema_version` | int | yes | bump on breaking changes; v0.3.0 = `3` |
+| `project` | str | yes | project slug for audit/display only; not a path component |
 | `session_id` | str | yes | session-slug |
 | `title` | str | yes | human description |
 | `state` | enum | yes | **only `"active"` or `"closed"`** — no `abandoned`/etc. |
@@ -124,6 +131,7 @@ corrects: null
 | `sync_needed` | bool | yes | true if peer must `relay sync pull` (host) or wait for host to push (remote) before acting |
 | `touched_paths` | str[] | no | list of non-`.shared` paths the author modified |
 | `corrects` | int \| null | no | seq of the artifact this corrects (forward-only); see §6 |
+| `force_reason` | str | no | present iff publish used `--force`; explains the override reason |
 
 ### 4.2 `kind` vocabulary
 
@@ -167,6 +175,8 @@ session is active ⟺
 "Latest published file" = highest `seq` among `*.md` files with companion `.ready` sentinel.
 
 `relay status` evaluates this; `relay close` independently can move session to closed via state transition or sentinel.
+
+If more than one session is active, `relay status`, `relay claim`, and `relay close` without `--session-id` refuse. `relay sessions list` is the discovery fallback and must not fail merely because zero or multiple sessions are active.
 
 ## 6. Append-only invariant
 
@@ -249,6 +259,8 @@ On success:
 5. Touch `<published>.ready`.
 6. fsync the session dir.
 
+`relay publish` refuses inactive sessions by default. The escape hatch is limited to terminal append-only notes: `--force --force-reason TEXT --status <closed|cancelled|failed|timed_out>`. The override reason is recorded as `force_reason: TEXT` in the published frontmatter.
+
 ## 9. Close semantics
 
 `relay close --reason "..." [--outcome <verdict>]`:
@@ -264,7 +276,8 @@ On success:
    ```
 
 3. Update `session.json`: `state = "closed"`, `closed_at = <now>`, `close_reason = <reason>`.
-4. **Do not modify any `NNN-*.md` file.** Append-only.
+4. Clear `.shared/.active-session` if it points at the closed session.
+5. **Do not modify any `NNN-*.md` file.** Append-only.
 
 If user wants a final synthesis on record, they should `relay claim --kind decision` first, fill body and `prompt_for_next`, `relay publish`, then `relay close`.
 
@@ -300,3 +313,16 @@ All text files UTF-8. Frontmatter YAML uses the basic subset (scalars, lists, mu
 Line endings: LF only.
 
 POSIX file modes: `relay` creates files with `0600` and dirs with `0700` to align with the `RELAY_SHARED_ROOT` permission policy. `preflight` warns if `.shared/` is not `0700`.
+
+## 13. Active marker and multi-session recovery
+
+`relay bootstrap` writes `.shared/.active-session` with the session slug. The marker is an advisory fast path, but `preflight` treats mismatch as corruption:
+
+```
+.active-session exists iff exactly one flat session satisfies session_is_active()
+and the marker content equals that session slug
+```
+
+`relay close` and terminal `relay publish --status ...` clear the marker when they make the marked session inactive.
+
+Parallel active sessions are exceptional. `relay bootstrap --force` may create one, but normal operations must then use `--session-id <session-id>`. `relay sessions list` lists all flat sessions and their category (`active`, `terminal`, `closed`, or `inactive`) without trying to resolve a single active session.

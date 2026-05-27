@@ -35,15 +35,17 @@ def test_bootstrap_creates_full_structure(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_bootstrap(args)
     assert rc == 0
 
-    proj_dirs = list((shared / "myproj").iterdir())
-    assert len(proj_dirs) == 1
-    sess = proj_dirs[0]
+    sessions = [p for p in shared.iterdir() if p.is_dir() and p.name != "_relay"]
+    assert len(sessions) == 1
+    sess = sessions[0]
     assert sess.name.endswith("-smoke")
     assert (sess / "session.json").is_file()
     assert (sess / "README.md").is_file()
     assert (sess / ".draft").is_dir()
     assert (shared / "_relay" / ".sentinel").exists()
+    assert (shared / "myproj").exists() is False
     sj = json.loads((sess / "session.json").read_text())
+    assert sj["schema_version"] == 3
     assert sj["state"] == "active"
     assert sj["project"] == "myproj"
     assert sj["participants"] == ["codex", "claude"]
@@ -81,13 +83,13 @@ def test_status_empty_session_active(monkeypatch, tmp_path, capsys):
 
 
 def _write_session(parent: Path, slug: str, *, state: str = "active",
-                    closed_sentinel: bool = False) -> Path:
+                    closed_sentinel: bool = False, project: str = "myproj") -> Path:
     """Create a minimal session dir under `parent`. Returns the session path."""
     sd = parent / slug
     sd.mkdir(parents=True)
     (sd / ".draft").mkdir()
     sd.joinpath("session.json").write_text(json.dumps({
-        "schema_version": 2, "project": parent.name, "session_id": slug,
+        "schema_version": 3, "project": project, "session_id": slug,
         "title": slug, "state": state,
         "created_at": "2026-05-27T00:00:00+08:00", "closed_at": None,
         "close_reason": None, "participants": ["codex", "claude"],
@@ -116,13 +118,11 @@ def _publish_terminal_artifact(session: Path, seq: int = 1, status: str = "close
 def test_resolve_skips_session_with_terminal_latest(monkeypatch, tmp_path):
     """Bug fix MAJOR #1: resolve_active_session must filter through session_is_active."""
     shared = _setup_shared(monkeypatch, tmp_path)
-    proj_dir = shared / "myproj"
-    proj_dir.mkdir(parents=True, exist_ok=True)
     # session A: state=active but latest artifact is closed -> NOT truly active
-    sa = _write_session(proj_dir, "20260527-stale")
+    sa = _write_session(shared, "20260527-stale")
     _publish_terminal_artifact(sa, seq=1, status="closed")
     # session B: state=active, no artifacts yet -> truly active
-    sb = _write_session(proj_dir, "20260527-real")
+    sb = _write_session(shared, "20260527-real")
 
     env = relay.load_env()
     resolved = relay.resolve_active_session(env)
@@ -132,10 +132,8 @@ def test_resolve_skips_session_with_terminal_latest(monkeypatch, tmp_path):
 def test_resolve_skips_session_with_CLOSED_sentinel(monkeypatch, tmp_path):
     """Bug fix MAJOR #1: CLOSED sentinel must filter out stale-active sessions."""
     shared = _setup_shared(monkeypatch, tmp_path)
-    proj_dir = shared / "myproj"
-    proj_dir.mkdir(parents=True, exist_ok=True)
-    _write_session(proj_dir, "20260527-with-closed-file", closed_sentinel=True)
-    sb = _write_session(proj_dir, "20260527-real")
+    _write_session(shared, "20260527-with-closed-file", closed_sentinel=True)
+    sb = _write_session(shared, "20260527-real")
     env = relay.load_env()
     resolved = relay.resolve_active_session(env)
     assert resolved == sb
@@ -147,22 +145,88 @@ def test_bootstrap_creates_dirs_with_0700_mode(monkeypatch, tmp_path):
     shared = _setup_shared(monkeypatch, tmp_path)
     args = type("A", (), {"topic": "perms", "title": None})()
     assert relay.cmd_bootstrap(args) == 0
-    proj_dir = shared / "myproj"
-    assert (proj_dir.stat().st_mode & 0o777) == 0o700, \
-        f"project dir mode is {oct(proj_dir.stat().st_mode & 0o777)}"
-    sess = next(proj_dir.iterdir())
+    sess = next(p for p in shared.iterdir() if p.is_dir() and p.name != "_relay")
     assert (sess.stat().st_mode & 0o777) == 0o700, \
         f"session dir mode is {oct(sess.stat().st_mode & 0o777)}"
+
+
+# -----------------------------------------------------------------------------
+# v3 bundle coverage for D1 + R3 + M3.
+# -----------------------------------------------------------------------------
+
+
+def test_bootstrap_creates_flat_session_layout(monkeypatch, tmp_path):
+    """D1: bootstrap creates .shared/<session>/ (no <project> subdir)."""
+    shared = _setup_shared(monkeypatch, tmp_path)
+    assert relay.cmd_bootstrap(type("A", (), {"topic": "flat", "title": None})()) == 0
+    sessions = [p for p in shared.iterdir() if p.is_dir() and p.name != "_relay"]
+    assert len(sessions) == 1
+    assert sessions[0].name.endswith("-flat")
+    assert not (shared / "myproj").exists()
+
+
+def test_status_resolves_flat_layout(monkeypatch, tmp_path, capsys):
+    """D1: relay status finds sessions directly under .shared/."""
+    _setup_shared(monkeypatch, tmp_path)
+    relay.cmd_bootstrap(type("A", (), {"topic": "flat-status", "title": None})())
+    capsys.readouterr()
+    rc = relay.cmd_status(type("A", (), {"project": None, "session_id": None, "last": 0, "json": True})())
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert Path(data["session_dir"]).parent.name == ".shared"
+    assert data["session"]["session_id"].endswith("-flat-status")
+
+
+def test_bootstrap_creates_active_session_marker(monkeypatch, tmp_path):
+    """R3.a: bootstrap writes .shared/.active-session containing the session slug."""
+    shared = _setup_shared(monkeypatch, tmp_path)
+    assert relay.cmd_bootstrap(type("A", (), {"topic": "marker", "title": None})()) == 0
+    marker = (shared / ".active-session").read_text().strip()
+    assert marker.endswith("-marker")
+    assert (shared / marker / "session.json").is_file()
+
+
+def test_bootstrap_refuses_when_active_session_exists(monkeypatch, tmp_path, capsys):
+    """M3 (a): bootstrap refuses to create a parallel active session by default."""
+    _setup_shared(monkeypatch, tmp_path)
+    assert relay.cmd_bootstrap(type("A", (), {"topic": "one", "title": None})()) == 0
+    rc = relay.cmd_bootstrap(type("A", (), {"topic": "two", "title": None})())
+    assert rc == 2
+    assert "active session already exists" in capsys.readouterr().err
+
+
+def test_bootstrap_force_allows_parallel_active_session(monkeypatch, tmp_path):
+    """M3 (a): bootstrap --force overrides the active-session refusal."""
+    shared = _setup_shared(monkeypatch, tmp_path)
+    assert relay.cmd_bootstrap(type("A", (), {"topic": "one", "title": None})()) == 0
+    assert relay.cmd_bootstrap(type("A", (), {"topic": "two", "title": None, "force": True})()) == 0
+    sessions = [p for p in shared.iterdir() if p.is_dir() and p.name != "_relay"]
+    assert sorted(p.name[-3:] for p in sessions) == ["one", "two"]
+
+
+def test_status_with_session_id_resolves_among_multiple_active(monkeypatch, tmp_path, capsys):
+    """M3 (b): relay status --session-id picks the right session under multiple-active."""
+    shared = _setup_shared(monkeypatch, tmp_path)
+    first = _write_session(shared, "20990101-first")
+    second = _write_session(shared, "20990101-second")
+    (shared / ".active-session").write_text(first.name + "\n")
+    rc = relay.cmd_status(type("A", (), {
+        "project": None, "session_id": second.name, "last": 0, "json": True,
+    })())
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert Path(data["session_dir"]) == second
+    assert data["session"]["session_id"] == "20990101-second"
 
 
 def test_resolve_active_session_multiple_raises(monkeypatch, tmp_path):
     shared = _setup_shared(monkeypatch, tmp_path)
     relay.cmd_bootstrap(type("A", (), {"topic": "a", "title": None})())
     # create a second active session manually (we cannot bootstrap twice on same day same topic)
-    sess2 = shared / "myproj" / "20990101-other"
+    sess2 = shared / "20990101-other"
     sess2.mkdir(parents=True)
     (sess2 / "session.json").write_text(json.dumps({
-        "schema_version": 2, "project": "myproj", "session_id": "20990101-other",
+        "schema_version": 3, "project": "myproj", "session_id": "20990101-other",
         "title": "x", "state": "active",
         "created_at": "2099-01-01T00:00:00+00:00", "closed_at": None,
         "close_reason": None, "participants": [],

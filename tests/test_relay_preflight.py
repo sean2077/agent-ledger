@@ -42,10 +42,12 @@ def test_probes_posix_fail_when_world_writable(tmp_path: Path):
 
 
 def test_preflight_mtime_warning_is_non_blocking(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
         RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+        RELAY_PROJECT="myproj",
     )
     os.chmod(tmp_path, 0o700)
     (tmp_path / "_relay").mkdir()
@@ -66,10 +68,12 @@ def test_preflight_mtime_warning_is_non_blocking(monkeypatch, capsys, tmp_path):
 
 
 def test_preflight_other_warnings_still_return_warning_exit(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
         RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+        RELAY_PROJECT="myproj",
     )
     os.chmod(tmp_path, 0o700)
     (tmp_path / "_relay").mkdir()
@@ -97,10 +101,12 @@ def test_preflight_fails_when_no_env(monkeypatch, capsys):
 
 
 def test_preflight_json_mode(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
         RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+        RELAY_PROJECT="myproj",
     )
     os.chmod(tmp_path, 0o700)
     (tmp_path / "_relay").mkdir()
@@ -115,10 +121,12 @@ def test_preflight_json_mode(monkeypatch, capsys, tmp_path):
 
 
 def test_preflight_sentinel_missing(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
         RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+        RELAY_PROJECT="myproj",
     )
     os.chmod(tmp_path, 0o700)
     args = type("A", (), {"json": True})()
@@ -209,3 +217,86 @@ def test_preflight_project_consistency_mismatch(monkeypatch, capsys, tmp_path):
     pc = next(c for c in data["checks"] if c["name"] == "project.consistency")
     assert pc["status"] == "fail"
     assert "totally-wrong" in pc["detail"]
+
+
+# -----------------------------------------------------------------------------
+# v3 bundle coverage for D1 + R3 preflight semantics.
+# -----------------------------------------------------------------------------
+
+
+def test_preflight_fails_shared_root_outside_git_toplevel(monkeypatch, capsys, tmp_path):
+    """D1: preflight fails if RELAY_SHARED_ROOT is not inside the git toplevel."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = tmp_path / "outside-shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+    )
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    check = next(c for c in data["checks"] if c["name"] == "shared_root.location")
+    assert check["status"] == "fail"
+    assert rc == 2
+
+
+def test_preflight_reports_old_v2_nested_layout_requires_migration(monkeypatch, capsys, tmp_path):
+    """D1: preflight surfaces old .shared/<project>/<session>/ layout as needing migrate."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    legacy = shared / "repo" / "20260527-old"
+    legacy.mkdir(parents=True)
+    (legacy / "session.json").write_text('{"schema_version": 2, "state": "closed"}')
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+    )
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    layout = next(c for c in data["checks"] if c["name"] == "layout.v2_nested")
+    assert layout["status"] == "fail"
+    assert "relay migrate v2-to-v3" in layout["detail"]
+    assert rc == 2
+
+
+def test_preflight_fails_when_marker_mismatches_active_session(monkeypatch, capsys, tmp_path):
+    """R3.a: .shared/.active-session disagreeing with session_is_active is a fail (corruption)."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    session = shared / "20260527-real"
+    session.mkdir()
+    (session / "session.json").write_text(
+        '{"schema_version": 3, "project": "repo", "session_id": "20260527-real", '
+        '"state": "active"}'
+    )
+    (shared / ".active-session").write_text("20260527-wrong\n")
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+    )
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    marker = next(c for c in data["checks"] if c["name"] == "session.active_marker")
+    assert marker["status"] == "fail"
+    assert "20260527-wrong" in marker["detail"]
+    assert rc == 2

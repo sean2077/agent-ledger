@@ -6,7 +6,7 @@ Single-file executable, Python 3.10+, stdlib only. See companion spec:
 
 Commands:
   preflight   env + mount + project + FS probes + POSIX mode
-  bootstrap   create new session directory under .shared/<project>/
+  bootstrap   create new session directory under .shared/
   status      list session artifacts + readiness + session-active rule
   next-seq    print next available NNN (advisory)
   claim       scaffold a new draft under .draft/
@@ -33,8 +33,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-__version__ = "0.1.0"
-SCHEMA_VERSION = 2
+__version__ = "0.3.0"
+SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
 STATUSES = {"draft", "ready", "closed", "cancelled", "failed", "timed_out"}
@@ -453,35 +453,100 @@ def dump_frontmatter(d: dict, body: str = "") -> str:
 # Path helpers
 # ---------------------------------------------------------------------------
 
-def project_dir(env: Env, project: str | None = None) -> Path:
+def session_root(env: Env) -> Path:
     if not env.shared_root:
         raise SystemExit("RELAY_SHARED_ROOT not set")
+    return env.shared_root
+
+
+def project_dir(env: Env, project: str | None = None) -> Path:
+    """Return the legacy v2 project directory for migration-only callers."""
+    root = session_root(env)
     proj = project or derive_project(env)
     if not proj:
         raise SystemExit("cannot determine project (set RELAY_PROJECT or run in a git repo)")
-    return env.shared_root / proj
+    return root / proj
 
 
-def resolve_active_session(env: Env, project: str | None = None) -> Path:
-    pd = project_dir(env, project)
-    if not pd.is_dir():
-        raise SystemExit(f"no project dir: {pd}")
-    candidates: list[Path] = []
-    for sd in sorted(pd.iterdir()):
-        if not sd.is_dir() or sd.name.startswith("."):
+def active_marker_path(root: Path) -> Path:
+    return root / ".active-session"
+
+
+def read_active_marker(root: Path) -> str | None:
+    marker = active_marker_path(root)
+    try:
+        value = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return value or None
+
+
+def write_active_marker(root: Path, session_slug: str) -> None:
+    atomic_write_text(active_marker_path(root), f"{session_slug}\n", mode=0o600)
+
+
+def clear_active_marker(root: Path, session_slug: str | None = None) -> None:
+    marker = active_marker_path(root)
+    current = read_active_marker(root)
+    if session_slug is not None and current != session_slug:
+        return
+    try:
+        marker.unlink()
+        _fsync_dir(root)
+    except FileNotFoundError:
+        pass
+
+
+def iter_session_dirs(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    sessions: list[Path] = []
+    for sd in sorted(root.iterdir()):
+        if not sd.is_dir() or sd.name.startswith(".") or sd.name == "_relay":
             continue
-        if not (sd / "session.json").exists():
-            continue
-        # session_is_active() honors state, CLOSED sentinel, AND latest
-        # artifact status (so a stale-active session with a terminal latest
-        # artifact is excluded). Avoids spurious "multiple active sessions".
-        if session_is_active(sd):
-            candidates.append(sd)
+        if (sd / "session.json").exists():
+            sessions.append(sd)
+    return sessions
+
+
+def active_sessions(root: Path) -> list[Path]:
+    return [sd for sd in iter_session_dirs(root) if session_is_active(sd)]
+
+
+def resolve_session(env: Env, session_id: str | None = None, *,
+                    project: str | None = None, require_active: bool = False) -> Path:
+    root = session_root(env)
+    if not root.is_dir():
+        raise SystemExit(f"no shared root: {root}")
+    if session_id:
+        candidate = root / session_id
+        if not (candidate / "session.json").exists():
+            raise SystemExit(f"no session {session_id!r} under {root}")
+        if require_active and not session_is_active(candidate):
+            raise SystemExit(f"session is not active: {session_id}")
+        return candidate
+    if require_active:
+        return resolve_active_session(env, project)
+    raise SystemExit("session_id is required unless resolving the active session")
+
+
+def resolve_active_session(env: Env, project: str | None = None,
+                           session_id: str | None = None) -> Path:
+    root = session_root(env)
+    if not root.is_dir():
+        raise SystemExit(f"no shared root: {root}")
+    if session_id:
+        return resolve_session(env, session_id, project=project, require_active=True)
+
+    # session_is_active() honors state, CLOSED sentinel, AND latest artifact
+    # status (so stale-active sessions with terminal latest artifacts are
+    # excluded). Avoids spurious "multiple active sessions".
+    candidates = active_sessions(root)
     if not candidates:
-        raise SystemExit(f"no active session under {pd}")
+        raise SystemExit(f"no active session under {root}")
     if len(candidates) > 1:
         names = ", ".join(s.name for s in candidates)
-        raise SystemExit(f"multiple active sessions; specify one: {names}")
+        raise SystemExit(f"multiple active sessions; specify --session-id: {names}")
     return candidates[0]
 
 
@@ -563,6 +628,89 @@ def session_is_active(session: Path) -> bool:
     return True
 
 
+def iter_legacy_v2_sessions(root: Path) -> list[tuple[Path, Path]]:
+    """Return (project_dir, session_dir) pairs from the old v2 nested layout."""
+    if not root.is_dir():
+        return []
+    out: list[tuple[Path, Path]] = []
+    for pd in sorted(root.iterdir()):
+        if not pd.is_dir() or pd.name.startswith(".") or pd.name == "_relay":
+            continue
+        if (pd / "session.json").exists():
+            continue  # already a flat v3 session
+        for sd in sorted(pd.iterdir()):
+            if sd.is_dir() and (sd / "session.json").exists():
+                out.append((pd, sd))
+    return out
+
+
+def latest_artifact(session: Path) -> Path | None:
+    pub = list_published(session)
+    return pub[-1] if pub else None
+
+
+def latest_artifact_frontmatter(session: Path) -> dict | None:
+    latest = latest_artifact(session)
+    if not latest:
+        return None
+    try:
+        fm, _ = parse_frontmatter(latest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return fm
+
+
+def session_category(session: Path) -> str:
+    if session_is_active(session):
+        return "active"
+    if (session / "CLOSED").exists():
+        return "closed"
+    try:
+        sj = json.loads((session / "session.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "invalid"
+    if sj.get("state") == "closed":
+        return "closed"
+    fm = latest_artifact_frontmatter(session)
+    if fm and fm.get("status") in TERMINAL_STATUSES:
+        return "terminal"
+    return "inactive"
+
+
+def _check_active_marker(root: Path) -> dict:
+    marker = read_active_marker(root)
+    actives = active_sessions(root)
+    active_names = [sd.name for sd in actives]
+    if marker is None:
+        if active_names:
+            return {
+                "name": "session.active_marker",
+                "status": "fail",
+                "detail": "missing .active-session for active session(s): "
+                          + ", ".join(active_names),
+            }
+        return {
+            "name": "session.active_marker",
+            "status": "pass",
+            "detail": "no active sessions and no marker",
+        }
+    target = root / marker
+    if not (target / "session.json").exists():
+        return {
+            "name": "session.active_marker",
+            "status": "fail",
+            "detail": f".active-session points at missing session {marker!r}",
+        }
+    if len(active_names) != 1 or active_names[0] != marker:
+        detail = f".active-session={marker!r} but active={active_names or 'none'}"
+        return {"name": "session.active_marker", "status": "fail", "detail": detail}
+    return {
+        "name": "session.active_marker",
+        "status": "pass",
+        "detail": f"active session marker matches {marker}",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -622,6 +770,22 @@ def cmd_preflight(args) -> int:
                 "detail": "shape B (PROJECT_ROOT is local; sync via rsync)",
             })
 
+    if env.shared_root and project_root is not None:
+        top = project_root.resolve()
+        try:
+            env.shared_root.relative_to(top)
+            out["checks"].append({
+                "name": "shared_root.location",
+                "status": "pass",
+                "detail": f"{env.shared_root} is under git toplevel {top}",
+            })
+        except ValueError:
+            out["checks"].append({
+                "name": "shared_root.location",
+                "status": "fail",
+                "detail": f"{env.shared_root} is outside git toplevel {top}",
+            })
+
     if env.shared_root:
         sentinel = env.shared_root / "_relay" / ".sentinel"
         out["checks"].append({
@@ -652,6 +816,25 @@ def cmd_preflight(args) -> int:
             "name": "project.consistency", "status": "warn",
             "detail": "no $RELAY_PROJECT and not in git repo",
         })
+
+    if env.shared_root and env.shared_root.is_dir():
+        legacy_sessions = iter_legacy_v2_sessions(env.shared_root)
+        if legacy_sessions:
+            examples = ", ".join(str(sd.relative_to(env.shared_root)) for _, sd in legacy_sessions[:3])
+            extra = "" if len(legacy_sessions) <= 3 else f" (+{len(legacy_sessions) - 3} more)"
+            out["checks"].append({
+                "name": "layout.v2_nested",
+                "status": "fail",
+                "detail": "old .shared/<project>/<session> layout requires "
+                          f"`relay migrate v2-to-v3`: {examples}{extra}",
+            })
+        else:
+            out["checks"].append({
+                "name": "layout.v3_flat",
+                "status": "pass",
+                "detail": "sessions are flat under RELAY_SHARED_ROOT",
+            })
+        out["checks"].append(_check_active_marker(env.shared_root))
 
     if env.shared_root and env.shared_root.is_dir():
         for r in run_probes(env.shared_root):
@@ -714,14 +897,22 @@ def cmd_bootstrap(args) -> int:
 
     date_prefix = datetime.now().strftime("%Y%m%d")
     session_slug = f"{date_prefix}-{args.topic}"
-    session_dir = env.shared_root / proj / session_slug
+    session_dir = env.shared_root / session_slug
     if session_dir.exists():
         print(f"relay bootstrap: session dir already exists: {session_dir}", file=sys.stderr)
         return 2
 
-    # Explicitly 0700 (file-protocol §12): project/session/.draft all owner-only.
-    proj_dir = env.shared_root / proj
-    proj_dir.mkdir(mode=0o700, exist_ok=True)
+    current_active = active_sessions(env.shared_root)
+    if current_active and not getattr(args, "force", False):
+        names = ", ".join(s.name for s in current_active)
+        print(
+            "relay bootstrap: active session already exists; close it or use "
+            f"--force to create a parallel session: {names}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Explicitly 0700 (file-protocol §12): shared/session/.draft owner-only.
     session_dir.mkdir(mode=0o700)
     (session_dir / ".draft").mkdir(mode=0o700)
 
@@ -743,9 +934,11 @@ def cmd_bootstrap(args) -> int:
         "participants": participants,
     }
     atomic_write_json(session_dir / "session.json", session_json)
+    write_active_marker(env.shared_root, session_slug)
 
     readme = (
-        f"# relay session: {proj}/{session_slug}\n\n"
+        f"# relay session: {session_slug}\n\n"
+        f"Project: {proj}\n"
         f"Title: {session_json['title']}\n"
         f"Created: {session_json['created_at']}\n"
         f"Participants: {', '.join(participants) or '(none)'}\n\n"
@@ -762,7 +955,9 @@ def cmd_bootstrap(args) -> int:
 
 def cmd_status(args) -> int:
     env = load_env()
-    session = resolve_active_session(env, args.project)
+    session_id = getattr(args, "session_id", None)
+    session = (resolve_session(env, session_id, project=getattr(args, "project", None))
+               if session_id else resolve_active_session(env, getattr(args, "project", None)))
     sj = json.loads((session / "session.json").read_text())
 
     pub = list_published(session)
@@ -812,7 +1007,7 @@ def cmd_status(args) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
-    print(f"session: {sj['project']}/{sj['session_id']}")
+    print(f"session: {sj['session_id']}  project={sj.get('project')}")
     print(f"  title:    {sj.get('title')}")
     print(f"  state:    {sj.get('state')}  (is_active={is_active})")
     print(f"  created:  {sj.get('created_at')}")
@@ -842,7 +1037,11 @@ def cmd_status(args) -> int:
 
 def cmd_next_seq(args) -> int:
     env = load_env()
-    session = resolve_active_session(env, args.project)
+    session = resolve_active_session(
+        env,
+        getattr(args, "project", None),
+        getattr(args, "session_id", None),
+    )
     print(latest_seq(session) + 1)
     return 0
 
@@ -869,7 +1068,11 @@ def cmd_claim(args) -> int:
         print(f"relay claim: unknown kind {args.kind!r} (known: {sorted(KINDS)})",
               file=sys.stderr)
         return 2
-    session = resolve_active_session(env, args.project)
+    session = resolve_active_session(
+        env,
+        getattr(args, "project", None),
+        getattr(args, "session_id", None),
+    )
     draft_dir = session / ".draft"
     draft_dir.mkdir(exist_ok=True)
 
@@ -988,6 +1191,25 @@ def cmd_publish(args) -> int:
     if final_status not in STATUSES or final_status == "draft":
         print(f"relay publish: invalid --status: {final_status!r}", file=sys.stderr)
         return 2
+    if not session_is_active(session):
+        if not getattr(args, "force", False):
+            print(
+                f"relay publish: refusing to publish into inactive session: {session}",
+                file=sys.stderr,
+            )
+            return 2
+        force_reason = getattr(args, "force_reason", None)
+        if not force_reason:
+            print("relay publish: --force requires --force-reason", file=sys.stderr)
+            return 2
+        if final_status not in TERMINAL_STATUSES:
+            print(
+                "relay publish: --force requires terminal --status "
+                f"({', '.join(sorted(TERMINAL_STATUSES))})",
+                file=sys.stderr,
+            )
+            return 2
+        fm["force_reason"] = force_reason
     fm["status"] = final_status
     fm["created"] = now_iso()
 
@@ -1009,6 +1231,10 @@ def cmd_publish(args) -> int:
         except FileNotFoundError:
             pass
         _fsync_dir(session)
+        if final_status in TERMINAL_STATUSES:
+            env = load_env()
+            if env.shared_root:
+                clear_active_marker(env.shared_root, session.name)
         print(paths["md"])
         return 0
     print("relay publish: could not allocate published path after retry", file=sys.stderr)
@@ -1018,23 +1244,33 @@ def cmd_publish(args) -> int:
 def cmd_close(args) -> int:
     env = load_env()
     try:
-        session = resolve_active_session(env, args.project)
-    except SystemExit:
+        session = resolve_active_session(
+            env,
+            getattr(args, "project", None),
+            getattr(args, "session_id", None),
+        )
+    except SystemExit as exc:
+        msg = str(exc)
+        if "multiple active sessions" in msg:
+            print(f"relay close: {msg}", file=sys.stderr)
+            return 2
         # Surface "already closed" instead of the generic "no active session"
         # when a session in the project already has a CLOSED sentinel.
-        try:
-            pd = project_dir(env, args.project)
-        except SystemExit:
-            raise
-        if pd.is_dir():
-            for sd in sorted(pd.iterdir()):
-                if sd.is_dir() and (sd / "CLOSED").exists():
+        if "no active session" in msg:
+            try:
+                root = session_root(env)
+            except SystemExit:
+                print(f"relay close: {msg}", file=sys.stderr)
+                return 2
+            for sd in iter_session_dirs(root):
+                if (sd / "CLOSED").exists():
                     print(
                         f"relay close: already closed (sentinel at {sd / 'CLOSED'})",
                         file=sys.stderr,
                     )
                     return 2
-        raise
+        print(f"relay close: {msg}", file=sys.stderr)
+        return 2
     sentinel = session / "CLOSED"
     if sentinel.exists():
         print(f"relay close: already closed (sentinel exists at {sentinel})", file=sys.stderr)
@@ -1053,10 +1289,171 @@ def cmd_close(args) -> int:
     data["closed_at"] = now_iso()
     data["close_reason"] = args.reason
     atomic_write_json(sj_path, data)
+    if env.shared_root:
+        clear_active_marker(env.shared_root, session.name)
 
     print(f"closed: {session}")
     print(f"  reason:   {args.reason}")
     print(f"  outcome:  {args.outcome or '(none)'}")
+    return 0
+
+
+def _session_list_payload(root: Path) -> list[dict]:
+    marker = read_active_marker(root)
+    items: list[dict] = []
+    for sd in iter_session_dirs(root):
+        try:
+            sj = json.loads((sd / "session.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            sj = {}
+        latest = latest_artifact_frontmatter(sd)
+        items.append({
+            "session_id": sd.name,
+            "project": sj.get("project"),
+            "title": sj.get("title"),
+            "state": sj.get("state"),
+            "category": session_category(sd),
+            "is_active": session_is_active(sd),
+            "active_marker": marker == sd.name,
+            "closed_sentinel": (sd / "CLOSED").exists(),
+            "next_seq": latest_seq(sd) + 1,
+            "latest": latest,
+            "path": str(sd),
+        })
+    return items
+
+
+def cmd_sessions_list(args) -> int:
+    env = load_env()
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        print(f"relay sessions list: {exc}", file=sys.stderr)
+        return 2
+    payload = {
+        "shared_root": str(root),
+        "active_marker": read_active_marker(root),
+        "sessions": _session_list_payload(root),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"sessions under {root}:")
+    if not payload["sessions"]:
+        print("  (none)")
+        return 0
+    for item in payload["sessions"]:
+        marker = " marker" if item["active_marker"] else ""
+        latest = item["latest"] or {}
+        latest_desc = ""
+        if latest:
+            latest_desc = f" latest={latest.get('seq')}:{latest.get('status')}"
+        print(
+            f"  {item['session_id']}  {item['category']}{marker}"
+            f" state={item.get('state')}{latest_desc}"
+        )
+    return 0
+
+
+def _session_has_drafts(session: Path) -> bool:
+    draft_dir = session / ".draft"
+    return draft_dir.is_dir() and any(draft_dir.glob("*.md"))
+
+
+def _session_has_unanswered_latest_ready(session: Path) -> bool:
+    fm = latest_artifact_frontmatter(session)
+    return bool(fm and fm.get("status") == "ready" and fm.get("peer"))
+
+
+def _migration_plan(root: Path) -> tuple[list[tuple[Path, Path, Path]], list[str]]:
+    moves: list[tuple[Path, Path, Path]] = []
+    problems: list[str] = []
+    seen_targets: dict[str, Path] = {}
+    for pd, sd in iter_legacy_v2_sessions(root):
+        target = root / sd.name
+        moves.append((pd, sd, target))
+        prior = seen_targets.get(sd.name)
+        if prior is not None:
+            problems.append(f"duplicate session slug {sd.name!r}: {prior} and {sd}")
+        seen_targets[sd.name] = sd
+        if target.exists() and target.resolve() != sd.resolve():
+            problems.append(f"name collision: {target} already exists")
+    return moves, problems
+
+
+def _migration_quiet_problems(moves: list[tuple[Path, Path, Path]]) -> list[str]:
+    problems: list[str] = []
+    active = [sd for _, sd, _ in moves if session_is_active(sd)]
+    if len(active) > 1:
+        problems.append("multiple active v2 sessions: " + ", ".join(sd.name for sd in active))
+    for _, sd, _ in moves:
+        if _session_has_drafts(sd):
+            problems.append(f"drafts exist in {sd}")
+        if _session_has_unanswered_latest_ready(sd):
+            problems.append(f"latest ready artifact is still addressed to peer in {sd}")
+    return problems
+
+
+def cmd_migrate(args) -> int:
+    env = load_env()
+    if getattr(args, "migration", None) != "v2-to-v3":
+        print("relay migrate: only v2-to-v3 is supported", file=sys.stderr)
+        return 2
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        print(f"relay migrate: {exc}", file=sys.stderr)
+        return 2
+    dry_run = getattr(args, "dry_run", False)
+    apply = getattr(args, "apply", False)
+    if not dry_run and not apply:
+        dry_run = True
+    if dry_run and apply:
+        print("relay migrate: choose exactly one of --dry-run or --apply", file=sys.stderr)
+        return 2
+
+    moves, problems = _migration_plan(root)
+    if apply and not getattr(args, "confirm_quiet", False):
+        problems.append("--apply requires --confirm-quiet")
+    if apply:
+        problems.extend(_migration_quiet_problems(moves))
+    if problems:
+        for problem in problems:
+            print(f"relay migrate: {problem}", file=sys.stderr)
+        return 2
+
+    if dry_run:
+        if not moves:
+            print("relay migrate: no v2 sessions found")
+            return 0
+        for _, old, new in moves:
+            print(f"would move: {old} -> {new}")
+        return 0
+
+    for pd, old, new in moves:
+        os.replace(old, new)
+        _fsync_dir(root)
+        try:
+            sj = json.loads((new / "session.json").read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            print(f"relay migrate: malformed session.json after move: {new}: {exc}", file=sys.stderr)
+            return 2
+        sj["schema_version"] = SCHEMA_VERSION
+        sj.setdefault("project", pd.name)
+        sj["session_id"] = new.name
+        atomic_write_json(new / "session.json", sj)
+        try:
+            pd.rmdir()
+            _fsync_dir(root)
+        except OSError:
+            pass
+        print(f"moved: {old} -> {new}")
+
+    actives = active_sessions(root)
+    if len(actives) == 1:
+        write_active_marker(root, actives[0].name)
+    elif not actives:
+        clear_active_marker(root)
     return 0
 
 
@@ -1193,13 +1590,17 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--json", action="store_true")
     pp.set_defaults(func=cmd_preflight)
 
-    pb = sub.add_parser("bootstrap", help="Create a new session under .shared/<project>/.")
+    pb = sub.add_parser("bootstrap", help="Create a new session under .shared/.")
     pb.add_argument("--topic", required=True, help="Session topic slug.")
     pb.add_argument("--title", default=None, help="Human-readable title.")
+    pb.add_argument("--force", action="store_true",
+                    help="Allow creating a parallel active session.")
     pb.set_defaults(func=cmd_bootstrap)
 
     ps = sub.add_parser("status", help="Show active session status.")
     ps.add_argument("--project", default=None)
+    ps.add_argument("--session-id", default=None,
+                    help="Resolve a specific flat .shared/<session-id> session.")
     ps.add_argument("--last", type=int, default=0,
                      help="Show only last N published artifacts (0 = all).")
     ps.add_argument("--json", action="store_true")
@@ -1207,25 +1608,46 @@ def build_parser() -> argparse.ArgumentParser:
 
     pn = sub.add_parser("next-seq", help="Print next available NNN (advisory).")
     pn.add_argument("--project", default=None)
+    pn.add_argument("--session-id", default=None)
     pn.set_defaults(func=cmd_next_seq)
 
     pc = sub.add_parser("claim", help="Scaffold a new draft artifact under .draft/.")
     pc.add_argument("--kind", required=True, choices=sorted(KINDS))
     pc.add_argument("--in-reply-to", type=int, default=None)
     pc.add_argument("--project", default=None)
+    pc.add_argument("--session-id", default=None)
     pc.set_defaults(func=cmd_claim)
 
     ppub = sub.add_parser("publish", help="Validate + atomically promote a draft.")
     ppub.add_argument("draft_path", help="Path to .draft/NNN-author-kind.md")
     ppub.add_argument("--status", default=None, choices=sorted(STATUSES - {"draft"}),
                        help="Publish with this status (default: ready).")
+    ppub.add_argument("--force", action="store_true",
+                      help="Allow terminal publication into an inactive session.")
+    ppub.add_argument("--force-reason", default=None)
     ppub.set_defaults(func=cmd_publish)
 
     pcl = sub.add_parser("close", help="Write CLOSED sentinel + update session.json.")
     pcl.add_argument("--reason", required=True)
     pcl.add_argument("--outcome", default=None)
     pcl.add_argument("--project", default=None)
+    pcl.add_argument("--session-id", default=None)
     pcl.set_defaults(func=cmd_close)
+
+    psessions = sub.add_parser("sessions", help="Session discovery helpers.")
+    ss = psessions.add_subparsers(dest="sessions_cmd", required=True)
+    psl = ss.add_parser("list", help="List all flat sessions without resolving active.")
+    psl.add_argument("--json", action="store_true")
+    psl.set_defaults(func=cmd_sessions_list)
+
+    pmig = sub.add_parser("migrate", help="Migrate relay storage layout.")
+    pmig.add_argument("migration", choices=["v2-to-v3"])
+    mode = pmig.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    pmig.add_argument("--confirm-quiet", action="store_true",
+                      help="Required with --apply after verifying no live turn or drafts.")
+    pmig.set_defaults(func=cmd_migrate)
 
     psync = sub.add_parser("sync", help="Host-only rsync wrapper.")
     psync.add_argument("direction", choices=["push", "pull"])

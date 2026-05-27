@@ -52,7 +52,7 @@ Interpret the exit code as three levels:
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
-`fail` examples that MUST block: missing env vars, missing `.shared/_relay/.sentinel` (mount dead), `project.consistency` mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable).
+`fail` examples that MUST block: missing env vars, missing `.shared/_relay/.sentinel` (mount dead), `project.consistency` mismatch, old `.shared/<project>/<session>/` layout requiring `relay migrate v2-to-v3`, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable).
 
 ## Decide intent from user input
 
@@ -77,6 +77,7 @@ If user input is ambiguous between handoff and something else → prefer handoff
 This is the core 95% case. Take one full turn in the relay.
 
 1. **Read state**: `"$RELAY" status --json` (or text). Note the active session path, latest published file, and `next-seq`.
+   - If it errors with `multiple active sessions`, stop normal handoff, run `"$RELAY" sessions list`, report the candidates, and do not claim/close until a specific `--session-id` is chosen or the state is repaired.
 
 2. **Turn check — STOP HERE IF NOT YOUR TURN**. Of the latest published artifact:
    - If its `peer` field equals `$RELAY_AUTHOR` (i.e. it's addressed to you), **continue** to step 3.
@@ -99,7 +100,20 @@ This is the core 95% case. Take one full turn in the relay.
    ```
    On success: file moves out of `.draft/`, sha256 + ready sidecars appear. On rejection: CLI prints which field failed validation; fix the draft and retry.
 9. **Sync if needed** (host only, see Intent: sync). First time push? **always `--dry-run` first**.
-10. **Report to user** what you did, the published path, and whether sync is pending.
+10. **Report + confirmation gate**. To the user, output:
+    - One-line summary: what was published, where, sync state.
+    - The 2-3 **key open questions** from your `prompt_for_next` — surface them at user-level so they see the decisions without opening the artifact.
+    - An explicit fork — let the user pick the next step. Each option must include the **concrete next command/window** the user runs, not a vague "wait" or "do":
+      - **(a) cross-review** — hand off to the peer agent. Tell the user literally where to go and what to type:
+        - If peer is `codex` (on host): "Switch to your codex CLI and run `$agent-relay`."
+        - If peer is `claude` (on remote / Claude Code): "Switch to Claude Code and run `/agent-relay`."
+        - If peer is `gpt55` or another agent: name the runtime and the exact command.
+        This is the default safeguard.
+      - **(b) execute immediately** — skip peer review; this agent implements the proposals now in the current window. Use when scope is small, well-defined, and the user trusts the call. Record what was executed in a follow-up `kind: decision` or in the next turn's body — "execute" never means "no record".
+      - **(c) discuss further** — stay in the current window and talk it through with the user before anything else moves.
+    - **Stop and wait for user reply.** Do not silently invoke another tool, claim, or start work on (b) until the user confirms.
+
+Applies to every publishing intent (handoff, bootstrap-then-claim, addendum, correction). Skip only for read-only intents (`status`, `preflight`).
 
 ### Writing `prompt_for_next` well
 
@@ -128,9 +142,11 @@ Run this when starting a new project-session, **not** when continuing an existin
 
 `<slug>`: lowercase ASCII + digits + `-`, ≤ 48 chars. Examples: `auth-refactor`, `prod-incident-2026-05`. The CLI prefixes with today's date to form session ID `YYYYMMDD-<slug>`.
 
+Sessions are v0.3 flat directories at `.shared/<session-id>/`. The project slug is metadata in `session.json`, not a parent directory.
+
 After bootstrap, immediately do `handoff` to write the first artifact (typically `kind: plan` or `kind: question`).
 
-If `relay status` already shows an active session, **do not bootstrap silently** — ask the user whether to continue the existing session or close it before starting a new one.
+If `relay status` already shows an active session, **do not bootstrap silently** — continue the existing session or close it before starting a new one. `relay bootstrap --force` is only for intentionally creating parallel active sessions; follow with `relay sessions list` and explicit `--session-id` for later operations.
 
 ---
 
@@ -140,6 +156,8 @@ If `relay status` already shows an active session, **do not bootstrap silently**
 "$RELAY" status            # human-readable
 "$RELAY" status --json     # machine-readable (you can parse)
 "$RELAY" status --last 5   # only most recent 5 artifacts
+"$RELAY" status --session-id 20260527-topic
+"$RELAY" sessions list     # recovery/discovery; works with zero or multiple active sessions
 ```
 
 Report to user:
@@ -189,7 +207,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 
 ## Hard rules
 
-1. **Never edit a file under `.shared/<project>/<session>/` that has a `.ready` sidecar.** Those are append-only published artifacts. Corrections go via `relay claim --kind correction` with the `corrects:` field pointing to the original seq.
+1. **Never edit a file under `.shared/<session>/` that has a `.ready` sidecar.** Those are append-only published artifacts. Corrections go via `relay claim --kind correction` with the `corrects:` field pointing to the original seq.
 2. **Never write `.sha256` or `.ready` sidecars yourself.** `relay publish` does that. If a sidecar is missing on a `.md` you published, something failed — re-run publish or escalate.
 3. **Never ls `.draft/` from peer's side.** Drafts are hidden by convention. `relay status` correctly excludes them.
 4. **Never bypass `relay preflight`.** If it fails, the mount is broken or env is wrong; writing anywhere risks data loss.
@@ -200,6 +218,8 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 
 - **`relay preflight` fails `mount.sentinel`**: the sshfs mount is broken or you're running outside a relay-bootstrapped project. Tell user; do not write.
 - **`relay preflight` fails `project.consistency`**: `$RELAY_PROJECT` env var doesn't match the git toplevel. Tell user the two values; ask which is correct.
+- **`relay preflight` fails `layout.v2_nested`**: old nested sessions exist. Run `relay migrate v2-to-v3 --dry-run`; only apply with `--apply --confirm-quiet` after active relay sessions are closed or otherwise quiet.
+- **`relay status` reports `multiple active sessions`**: use `relay sessions list`, then rerun the intended command with `--session-id <session-id>` or repair the state before claiming.
 - **`relay publish` rejects with "prompt_for_next still contains placeholder"**: you forgot to replace the `TODO: ...` line. Edit the draft and retry.
 - **`relay publish` rejects with "body is empty"**: scaffold body is the placeholder comment; replace it with real content.
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.

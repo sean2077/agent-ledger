@@ -4,7 +4,7 @@ A skill + CLI for relaying work between a local Codex CLI agent (host) and a
 remote interactive Claude Code agent (remote), through a shared `.shared/`
 directory plus host-side rsync.
 
-## v0.2.0+: skill + `relay` single-file CLI
+## v0.3.0: skill + `relay` single-file CLI
 
 Active implementation lives in `skills/agent-relay/`:
 
@@ -14,11 +14,21 @@ Active implementation lives in `skills/agent-relay/`:
 - `skills/agent-relay/templates/` — env and brief templates
 - `tests/test_relay_*.py` — pytest coverage
 
+Protocol v0.3.0 stores sessions directly under `.shared/<session-id>/`.
+The project name remains in `session.json` for audit context; old
+`.shared/<project>/<session-id>/` trees must be moved with:
+
+```bash
+relay migrate v2-to-v3 --dry-run
+relay migrate v2-to-v3 --apply --confirm-quiet
+```
+
 Install (host):
 
 ```bash
 ln -s "$PWD/skills/agent-relay/bin/relay" ~/.local/bin/relay
 ln -s "$PWD/skills/agent-relay" ~/.codex/skills/agent-relay
+ln -s "$PWD/skills/agent-relay" ~/.agents/skills/agent-relay  # optional legacy path
 ```
 
 Install (remote, where Claude Code runs):

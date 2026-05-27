@@ -221,3 +221,96 @@ def test_publish_refuses_non_draft_path(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_publish(type("A", (), {"draft_path": str(fake), "status": None})())
     assert rc == 2
     assert "under .draft" in capsys.readouterr().err
+
+
+# -----------------------------------------------------------------------------
+# v3 bundle coverage for M3 --session-id + R1 publish guard.
+# -----------------------------------------------------------------------------
+
+
+def _claim_filled(session: Path, capsys, *, kind: str = "note") -> Path:
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": kind, "in_reply_to": None, "project": None, "session_id": session.name,
+    })())
+    assert rc == 0
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft, prompt="record this terminal note\n", body="body.")
+    return draft
+
+
+def test_claim_with_session_id_resolves_among_multiple_active(monkeypatch, tmp_path, capsys):
+    """M3 (b): relay claim --session-id picks the right session under multiple-active."""
+    first = _bootstrap(monkeypatch, tmp_path, topic="first")
+    capsys.readouterr()
+    assert relay.cmd_bootstrap(type("A", (), {"topic": "second", "title": None, "force": True})()) == 0
+    capsys.readouterr()
+    second = next(
+        p for p in first.parent.iterdir()
+        if p.is_dir() and p.name.endswith("-second")
+    )
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": "plan", "in_reply_to": None, "project": None, "session_id": first.name,
+    })())
+    draft = Path(capsys.readouterr().out.strip())
+    assert rc == 0
+    assert draft.parent == first / ".draft"
+    assert second != first
+
+
+def test_publish_refuses_draft_when_session_inactive(monkeypatch, tmp_path, capsys):
+    """R1: cmd_publish blocks publishing into a session whose latest is terminal or CLOSED."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_filled(session, capsys)
+    (session / "CLOSED").write_text('reason = "already done"\n')
+    rc = relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
+    assert rc == 2
+    assert "inactive session" in capsys.readouterr().err
+    assert draft.exists()
+
+
+def test_publish_force_requires_force_reason(monkeypatch, tmp_path, capsys):
+    """R1 escape hatch: --force without --force-reason is rejected."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_filled(session, capsys)
+    (session / "CLOSED").write_text('reason = "already done"\n')
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": "closed", "force": True,
+    })())
+    assert rc == 2
+    assert "--force-reason" in capsys.readouterr().err
+
+
+def test_publish_force_requires_terminal_status(monkeypatch, tmp_path, capsys):
+    """R1 escape hatch: --force --force-reason TEXT requires --status in TERMINAL_STATUSES."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_filled(session, capsys)
+    (session / "CLOSED").write_text('reason = "already done"\n')
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None, "force": True,
+        "force_reason": "append terminal note after close",
+    })())
+    assert rc == 2
+    assert "terminal --status" in capsys.readouterr().err
+
+
+def test_publish_force_note_preserves_inactive_session(monkeypatch, tmp_path, capsys):
+    """R1 escape hatch: kind:note --status closed --force lands without resurrecting the session."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_filled(session, capsys, kind="note")
+    (session / "CLOSED").write_text('reason = "already done"\n')
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": "closed", "force": True,
+        "force_reason": "record post-close note",
+    })())
+    pub = Path(capsys.readouterr().out.strip())
+    assert rc == 0
+    assert pub.exists()
+    fm, _ = relay.parse_frontmatter(pub.read_text())
+    assert fm["status"] == "closed"
+    assert fm["force_reason"] == "record post-close note"
+    assert (session / "CLOSED").exists()
+    assert relay.session_is_active(session) is False

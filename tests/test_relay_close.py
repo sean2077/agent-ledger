@@ -77,3 +77,47 @@ def test_close_refuses_when_already_closed(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_close(type("A", (), {"reason": "x", "outcome": None, "project": None})())
     assert rc == 2
     assert "already closed" in capsys.readouterr().err
+
+
+# -----------------------------------------------------------------------------
+# v3 bundle coverage for R2 close-error masking + R3.a marker clear.
+# -----------------------------------------------------------------------------
+
+
+def test_close_clears_active_session_marker(monkeypatch, tmp_path, capsys):
+    """R3.a: cmd_close clears .shared/.active-session iff it points at the session being closed."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    shared = session.parent
+    assert (shared / ".active-session").read_text().strip() == session.name
+    rc = relay.cmd_close(type("A", (), {"reason": "done", "outcome": None, "project": None})())
+    assert rc == 0
+    assert not (shared / ".active-session").exists()
+
+
+def test_close_preserves_multiple_active_error_when_closed_sentinel_exists(monkeypatch, tmp_path, capsys):
+    """R2: cmd_close does not mask 'multiple active sessions' with the 'already closed' message."""
+    first = _bootstrap(monkeypatch, tmp_path)
+    shared = first.parent
+    second = shared / "20990101-second"
+    second.mkdir()
+    (second / "session.json").write_text(json.dumps({
+        "schema_version": 3, "project": "myproj", "session_id": second.name,
+        "title": "second", "state": "active",
+        "created_at": "2099-01-01T00:00:00+00:00",
+        "closed_at": None, "close_reason": None, "participants": [],
+    }))
+    closed = shared / "20990101-closed"
+    closed.mkdir()
+    (closed / "session.json").write_text(json.dumps({
+        "schema_version": 3, "project": "myproj", "session_id": closed.name,
+        "title": "closed", "state": "closed",
+        "created_at": "2099-01-01T00:00:00+00:00",
+        "closed_at": "2099-01-01T00:00:00+00:00",
+        "close_reason": "preexisting", "participants": [],
+    }))
+    (closed / "CLOSED").write_text('reason = "preexisting"\n')
+    rc = relay.cmd_close(type("A", (), {"reason": "done", "outcome": None, "project": None})())
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "multiple active sessions" in err
+    assert "already closed" not in err
