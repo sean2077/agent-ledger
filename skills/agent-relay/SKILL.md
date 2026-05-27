@@ -12,12 +12,31 @@ You are part of a relay between local Codex CLI (`host` role) and remote interac
 
 The `relay` CLI does mechanical operations (atomic writes, sequence numbers, validation, rsync). **You** do everything that requires judgment: read peer's last message, decide what to do, write substantive content and clear instructions for the peer.
 
+## Resolve `relay` once per turn
+
+`relay` may not be on `$PATH`. Walk this chain at the start of each turn (project-local wins over global) and use `"$RELAY"` everywhere below:
+
+```bash
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+for cand in \
+    "$ROOT/.agents/skills/agent-relay/bin/relay" \
+    "$ROOT/.claude/skills/agent-relay/bin/relay" \
+    "$(command -v relay 2>/dev/null)" \
+    "$HOME/.agents/skills/agent-relay/bin/relay" \
+    "$HOME/.claude/skills/agent-relay/bin/relay" \
+    "$HOME/.codex/skills/agent-relay/bin/relay" ; do
+  [ -n "$cand" ] && [ -x "$cand" ] && { RELAY="$cand"; break; }
+done
+[ -n "$RELAY" ] || { echo "cannot locate relay CLI" >&2; exit 2; }
+export RELAY
+```
+
 ## Critical: every turn starts with preflight
 
 Before any other action:
 
 ```bash
-relay preflight
+"$RELAY" preflight
 ```
 
 Exit code 0: continue. Non-zero: **stop and report to user**. Do not bootstrap, claim, publish, sync, or close until env, mount sentinel, project consistency, and FS probes all pass. The CLI prints an env template if RELAY_* vars are missing.
@@ -47,14 +66,14 @@ This is the core 95% case. Take one full turn in the relay.
 3. **Do the work**: this is the part the CLI cannot do. Plan / review / write code / debug / investigate. Use Read, Edit, Bash, Grep, Glob as needed. Keep track of any non-`.shared/` files you change (you'll list them under `touched_paths`).
 4. **Claim a draft**:
    ```bash
-   DRAFT=$(relay claim --kind <kind> --in-reply-to <peer-seq>)
+   DRAFT=$("$RELAY" claim --kind <kind> --in-reply-to <peer-seq>)
    ```
    `kind` is one of: `plan | review | fix | note | question | decision | correction | addendum`. The CLI creates a hidden `.draft/NNN-<you>-<kind>.md` with frontmatter scaffold; body is a placeholder.
 5. **Fill the draft**: use your Edit tool on `$DRAFT`. Replace the placeholder body with your substantive content. **Critical**: replace the `prompt_for_next: |` block — the scaffold has `TODO: ...` and `publish` will reject anything still containing `TODO:`. See "Writing prompt_for_next" below.
 6. **Set `sync_needed: true`** in frontmatter if you modified any non-`.shared/` files. List them under `touched_paths`.
 7. **Publish**:
    ```bash
-   relay publish "$DRAFT"
+   "$RELAY" publish "$DRAFT"
    ```
    On success: file moves out of `.draft/`, sha256 + ready sidecars appear. On rejection: CLI prints which field failed validation; fix the draft and retry.
 8. **Sync if needed** (host only, see Intent: sync). First time push? **always `--dry-run` first**.
@@ -82,7 +101,7 @@ Avoid:
 Run this when starting a new project-session, **not** when continuing an existing one.
 
 ```bash
-relay bootstrap --topic <slug> [--title "Human readable"]
+"$RELAY" bootstrap --topic <slug> [--title "Human readable"]
 ```
 
 `<slug>`: lowercase ASCII + digits + `-`, ≤ 48 chars. Examples: `auth-refactor`, `prod-incident-2026-05`. The CLI prefixes with today's date to form session ID `YYYYMMDD-<slug>`.
@@ -96,9 +115,9 @@ If `relay status` already shows an active session, **do not bootstrap silently**
 ## Intent: status
 
 ```bash
-relay status            # human-readable
-relay status --json     # machine-readable (you can parse)
-relay status --last 5   # only most recent 5 artifacts
+"$RELAY" status            # human-readable
+"$RELAY" status --json     # machine-readable (you can parse)
+"$RELAY" status --last 5   # only most recent 5 artifacts
 ```
 
 Report to user:
@@ -115,15 +134,15 @@ Report to user:
 Only on `host` role. Remote cannot SSH back to host, so all rsync originates from host.
 
 ```bash
-relay sync push --dry-run    # ALWAYS first
-relay sync push              # then real push
+"$RELAY" sync push --dry-run    # ALWAYS first
+"$RELAY" sync push              # then real push
 ```
 
 Pull works the same way:
 
 ```bash
-relay sync pull --dry-run
-relay sync pull
+"$RELAY" sync pull --dry-run
+"$RELAY" sync pull
 ```
 
 `--strict-gitignore` switches to git-backed file list (honors `!path` reverse rules; required if `.gitignore` uses them). Use when the default-mode banner warns about negation rules.
@@ -137,7 +156,7 @@ If `cmd_sync` reports "this project root is a fuse mount" → that's shape A (wh
 ## Intent: close
 
 ```bash
-relay close --reason "what concluded" --outcome approve
+"$RELAY" close --reason "what concluded" --outcome approve
 ```
 
 Writes `CLOSED` sentinel and updates `session.json` state to closed. **Does not modify prior published files** (append-only invariant).
