@@ -1,0 +1,1142 @@
+#!/usr/bin/env python3
+"""relay — agent-relay file protocol CLI.
+
+Single-file executable, Python 3.10+, stdlib only. See companion spec:
+  skills/agent-relay/references/file-protocol.md
+
+Commands:
+  preflight   env + mount + project + FS probes + POSIX mode
+  bootstrap   create new session directory under .shared/<project>/
+  status      list session artifacts + readiness + session-active rule
+  next-seq    print next available NNN (advisory)
+  claim       scaffold a new draft under .draft/
+  publish     validate draft, atomically promote to published + sha256 + ready
+  close       write CLOSED sentinel + update session.json (no edit to prior files)
+  sync        host-only rsync wrapper (push/pull, default and strict modes)
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import hashlib
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+
+__version__ = "0.1.0"
+SCHEMA_VERSION = 2
+
+KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
+STATUSES = {"draft", "ready", "closed", "cancelled", "failed", "timed_out"}
+TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
+SESSION_STATES = {"active", "closed"}
+PLACEHOLDER_MARKER = "TODO:"
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+
+
+# ---------------------------------------------------------------------------
+# atomic primitives
+# ---------------------------------------------------------------------------
+
+def atomic_write_bytes(target: Path, data: bytes, *, mode: int = 0o600) -> None:
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f".{target.name}.relay-{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, target)
+        _fsync_dir(target.parent)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_write_text(target: Path, text: str, *, mode: int = 0o600) -> None:
+    atomic_write_bytes(target, text.encode("utf-8"), mode=mode)
+
+
+def atomic_write_json(target: Path, obj: dict, *, mode: int = 0o600) -> None:
+    atomic_write_text(
+        target,
+        json.dumps(obj, indent=2, ensure_ascii=False) + "\n",
+        mode=mode,
+    )
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_DIRECTORY)
+    except (OSError, AttributeError):
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def sha256_of_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def now_iso() -> str:
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# FS behavior probes
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class ProbeResult:
+    name: str
+    status: str
+    detail: str
+    elapsed_ms: int
+
+
+def _probe_tmp_rename(root: Path) -> tuple[str, str]:
+    tmp = root / ".relay-probe.tmp"
+    target = root / ".relay-probe.target"
+    try:
+        payload = os.urandom(32)
+        tmp.write_bytes(payload)
+        os.replace(tmp, target)
+        if target.read_bytes() != payload:
+            return "fail", "readback mismatch after rename"
+        return "pass", "tmp+rename atomic; readback matches"
+    finally:
+        for p in (tmp, target):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _probe_mtime_monotonic(root: Path) -> tuple[str, str]:
+    target = root / ".relay-probe-mtime"
+    try:
+        target.write_bytes(b"v1")
+        m1 = target.stat().st_mtime_ns
+        time.sleep(0.05)
+        target.write_bytes(b"v2")
+        m2 = target.stat().st_mtime_ns
+        if m2 < m1:
+            return "fail", f"mtime regressed: {m1} -> {m2}"
+        if m2 == m1:
+            return "warn", f"mtime unchanged ({m1}); coarse resolution"
+        return "pass", f"mtime advanced {m2 - m1}ns"
+    finally:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _probe_symlink_ops(root: Path) -> tuple[str, str]:
+    target = root / ".relay-probe-symlink-target"
+    link = root / ".relay-probe-symlink"
+    try:
+        target.write_bytes(b"x")
+        try:
+            os.symlink(target.name, link)
+        except OSError as e:
+            return "fail", f"symlink create unsupported: {e}"
+        if os.readlink(link) != target.name:
+            return "fail", "readlink mismatch"
+        return "pass", "create / readlink ok"
+    finally:
+        for p in (link, target):
+            try:
+                if p.is_symlink() or p.exists():
+                    p.unlink()
+            except (FileNotFoundError, IsADirectoryError):
+                pass
+
+
+def _probe_sha256_stable(root: Path) -> tuple[str, str]:
+    target = root / ".relay-probe-sha"
+    try:
+        payload = os.urandom(8192)
+        target.write_bytes(payload)
+        h1 = hashlib.sha256(target.read_bytes()).hexdigest()
+        h2 = hashlib.sha256(target.read_bytes()).hexdigest()
+        if h1 != h2:
+            return "fail", "hash mismatch across reopen"
+        return "pass", f"sha256 stable ({h1[:16]}..)"
+    finally:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _probe_fsync_readback(root: Path) -> tuple[str, str]:
+    target = root / ".relay-probe-fsync"
+    try:
+        payload = os.urandom(1024)
+        with open(target, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        if target.read_bytes() != payload:
+            return "fail", "fsync readback mismatch"
+        return "pass", "fsync ok"
+    finally:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _probe_posix_mode(root: Path, target_mode: int = 0o700) -> tuple[str, str]:
+    actual = stat.S_IMODE(root.stat().st_mode)
+    if actual == target_mode:
+        return "pass", f"mode {actual:04o} matches target {target_mode:04o}"
+    if actual & 0o002:
+        return "fail", f"mode {actual:04o} world-writable"
+    if actual & 0o077:
+        return "warn", f"mode {actual:04o} exceeds target {target_mode:04o}"
+    return "warn", f"mode {actual:04o} differs from target {target_mode:04o}"
+
+
+_FS_PROBES: list[tuple[str, Callable[[Path], tuple[str, str]]]] = [
+    ("tmp_rename", _probe_tmp_rename),
+    ("mtime_monotonic", _probe_mtime_monotonic),
+    ("symlink_ops", _probe_symlink_ops),
+    ("sha256_stable", _probe_sha256_stable),
+    ("fsync_readback", _probe_fsync_readback),
+]
+
+
+def run_probes(root: Path, posix_target: int = 0o700) -> list[ProbeResult]:
+    out: list[ProbeResult] = []
+    for name, fn in _FS_PROBES:
+        t = time.monotonic()
+        try:
+            s, d = fn(root)
+        except Exception as exc:
+            s, d = "fail", f"{type(exc).__name__}: {exc}"
+        out.append(ProbeResult(name, s, d, int((time.monotonic() - t) * 1000)))
+    t = time.monotonic()
+    try:
+        s, d = _probe_posix_mode(root, posix_target)
+    except Exception as exc:
+        s, d = "fail", f"{type(exc).__name__}: {exc}"
+    out.append(ProbeResult("posix_mode", s, d, int((time.monotonic() - t) * 1000)))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Env loading
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class Env:
+    role: Optional[str]
+    author: Optional[str]
+    peer: Optional[str]
+    shared_root: Optional[Path]
+    project: Optional[str]
+    remote_ssh: Optional[str]
+    remote_path: Optional[str]
+
+
+_DEFAULT_PEER = {"codex": "claude", "claude": "codex", "host": "claude", "remote": "codex"}
+
+
+def load_env() -> Env:
+    role = os.environ.get("RELAY_ROLE") or None
+    author = os.environ.get("RELAY_AUTHOR") or role
+    peer = os.environ.get("RELAY_PEER")
+    if not peer and author:
+        peer = _DEFAULT_PEER.get(author)
+    shared = os.environ.get("RELAY_SHARED_ROOT")
+    shared_path = Path(shared).expanduser().resolve() if shared else None
+    return Env(
+        role=role,
+        author=author,
+        peer=peer,
+        shared_root=shared_path,
+        project=os.environ.get("RELAY_PROJECT") or None,
+        remote_ssh=os.environ.get("RELAY_REMOTE_SSH") or None,
+        remote_path=os.environ.get("RELAY_REMOTE_PATH") or None,
+    )
+
+
+def git_toplevel(start: Path | None = None) -> Optional[Path]:
+    start = start or Path.cwd()
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False,
+        )
+        if res.returncode != 0:
+            return None
+        return Path(res.stdout.strip())
+    except FileNotFoundError:
+        return None
+
+
+def derive_project(env: Env) -> Optional[str]:
+    if env.project:
+        return env.project
+    top = git_toplevel()
+    return top.name if top else None
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter (minimal YAML subset)
+# ---------------------------------------------------------------------------
+
+_FM_RE = re.compile(r"^---\n(.*?\n)---\n?(.*)$", re.DOTALL)
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    m = _FM_RE.match(text)
+    if not m:
+        raise ValueError("no frontmatter found (expected --- ... --- at start)")
+    return _parse_yaml_subset(m.group(1)), m.group(2)
+
+
+def _parse_yaml_subset(text: str) -> dict:
+    out: dict = {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
+            continue
+        if ":" not in line:
+            raise ValueError(f"bad frontmatter line: {line!r}")
+        key, _, rest = line.partition(":")
+        key = key.strip()
+        rest = rest.rstrip()
+        if rest.strip() == "|":
+            block: list[str] = []
+            i += 1
+            indent: Optional[int] = None
+            while i < len(lines):
+                ln = lines[i]
+                if not ln.strip():
+                    block.append("")
+                    i += 1
+                    continue
+                lead = len(ln) - len(ln.lstrip())
+                if indent is None:
+                    indent = lead
+                if lead < indent:
+                    break
+                block.append(ln[indent:])
+                i += 1
+            out[key] = "\n".join(block).rstrip() + ("\n" if block else "")
+            continue
+        if rest.strip() == "[]":
+            out[key] = []
+            i += 1
+            continue
+        if rest.strip() == "":
+            items: list = []
+            i += 1
+            while i < len(lines):
+                ln = lines[i]
+                if not ln.strip():
+                    i += 1
+                    continue
+                stripped = ln.lstrip()
+                if stripped.startswith("- "):
+                    items.append(_scalar(stripped[2:].strip()))
+                    i += 1
+                    continue
+                break
+            out[key] = items
+            continue
+        out[key] = _scalar(rest.strip())
+        i += 1
+    return out
+
+
+def _scalar(s: str):
+    if s in ("", "null", "~"):
+        return None
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        return s[1:-1]
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
+def dump_frontmatter(d: dict, body: str = "") -> str:
+    lines = ["---"]
+    for k, v in d.items():
+        if v is None:
+            lines.append(f"{k}: null")
+        elif v is True:
+            lines.append(f"{k}: true")
+        elif v is False:
+            lines.append(f"{k}: false")
+        elif isinstance(v, list):
+            if not v:
+                lines.append(f"{k}: []")
+            else:
+                lines.append(f"{k}:")
+                for it in v:
+                    lines.append(f"  - {it}")
+        elif isinstance(v, str) and "\n" in v:
+            lines.append(f"{k}: |")
+            for ln in v.rstrip("\n").splitlines():
+                lines.append(f"  {ln}")
+        else:
+            lines.append(f"{k}: {v}")
+    lines.append("---")
+    if body and not body.startswith("\n"):
+        lines.append("")
+    return "\n".join(lines) + "\n" + body
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+def project_dir(env: Env, project: str | None = None) -> Path:
+    if not env.shared_root:
+        raise SystemExit("RELAY_SHARED_ROOT not set")
+    proj = project or derive_project(env)
+    if not proj:
+        raise SystemExit("cannot determine project (set RELAY_PROJECT or run in a git repo)")
+    return env.shared_root / proj
+
+
+def resolve_active_session(env: Env, project: str | None = None) -> Path:
+    pd = project_dir(env, project)
+    if not pd.is_dir():
+        raise SystemExit(f"no project dir: {pd}")
+    candidates: list[Path] = []
+    for sd in sorted(pd.iterdir()):
+        if not sd.is_dir() or sd.name.startswith("."):
+            continue
+        sj = sd / "session.json"
+        if not sj.exists():
+            continue
+        try:
+            data = json.loads(sj.read_text())
+        except json.JSONDecodeError:
+            continue
+        if data.get("state") == "active":
+            candidates.append(sd)
+    if not candidates:
+        raise SystemExit(f"no active session under {pd}")
+    if len(candidates) > 1:
+        names = ", ".join(s.name for s in candidates)
+        raise SystemExit(f"multiple active sessions; specify one: {names}")
+    return candidates[0]
+
+
+def list_published(session: Path) -> list[Path]:
+    out: list[Path] = []
+    for f in sorted(session.glob("[0-9][0-9][0-9]-*.md")):
+        ready = session / f"{f.stem.split('-')[0]}-{'-'.join(f.stem.split('-')[1:])}.ready"
+        ready = session / f"{f.name[:-3]}.ready" if False else session / (f.stem + ".ready")
+        # actually: NNN-author-kind.ready (no .md)
+        ready_path = session / (f.name.rsplit(".md", 1)[0] + ".ready")
+        sha_path = session / f"{f.name}.sha256"
+        if ready_path.exists() and sha_path.exists():
+            out.append(f)
+    return out
+
+
+def latest_seq(session: Path) -> int:
+    seqs: list[int] = []
+    for f in session.glob("[0-9][0-9][0-9]-*.md"):
+        try:
+            seqs.append(int(f.name[:3]))
+        except ValueError:
+            pass
+    draft = session / ".draft"
+    if draft.is_dir():
+        for f in draft.glob("[0-9][0-9][0-9]-*.md"):
+            try:
+                seqs.append(int(f.name[:3]))
+            except ValueError:
+                pass
+    return max(seqs) if seqs else 0
+
+
+def published_paths(session: Path, base: str) -> dict[str, Path]:
+    """base = 'NNN-author-kind' (no .md). Returns dict of expected paths."""
+    return {
+        "md": session / f"{base}.md",
+        "sha256": session / f"{base}.md.sha256",
+        "ready": session / f"{base}.ready",
+    }
+
+
+def session_is_active(session: Path) -> bool:
+    """Implements the session-active rule from file-protocol.md §5."""
+    sj = session / "session.json"
+    if not sj.exists():
+        return False
+    try:
+        data = json.loads(sj.read_text())
+    except json.JSONDecodeError:
+        return False
+    if data.get("state") != "active":
+        return False
+    if (session / "CLOSED").exists():
+        return False
+    pub = list_published(session)
+    if not pub:
+        return True  # bootstrapped, no artifacts yet
+    latest = pub[-1]
+    try:
+        fm, _ = parse_frontmatter(latest.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return True  # malformed; conservatively keep active
+    status = fm.get("status")
+    if status in TERMINAL_STATUSES:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def _print_env_template() -> None:
+    sys.stderr.write(
+        "\nenvironment template (write to .relay.env and `source` it):\n\n"
+        "export RELAY_ROLE=host          # or remote\n"
+        "export RELAY_AUTHOR=codex       # or claude\n"
+        "export RELAY_PEER=claude        # the other side\n"
+        "export RELAY_SHARED_ROOT=\"$PWD/.shared\"\n"
+        "export RELAY_REMOTE_SSH=user@remote\n"
+        "export RELAY_REMOTE_PATH=/path/on/remote\n"
+    )
+
+
+def cmd_preflight(args) -> int:
+    env = load_env()
+    out: dict = {"exit_code": 0, "env": {}, "checks": []}
+
+    required = ["RELAY_ROLE", "RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT"]
+    if env.role == "host":
+        required += ["RELAY_REMOTE_SSH", "RELAY_REMOTE_PATH"]
+    for var in required:
+        val = os.environ.get(var)
+        out["env"][var] = bool(val)
+        out["checks"].append({
+            "name": f"env.{var}",
+            "status": "pass" if val else "fail",
+            "detail": "set" if val else "not set",
+        })
+
+    if env.shared_root:
+        sentinel = env.shared_root / "_relay" / ".sentinel"
+        out["checks"].append({
+            "name": "mount.sentinel",
+            "status": "pass" if sentinel.exists() else "fail",
+            "detail": str(sentinel) if sentinel.exists() else
+                      f"missing {sentinel}; run `relay bootstrap` or check mount",
+        })
+    else:
+        out["checks"].append({"name": "mount.sentinel", "status": "fail",
+                               "detail": "RELAY_SHARED_ROOT not set"})
+
+    declared = env.project
+    derived = git_toplevel()
+    derived_name = derived.name if derived else None
+    if declared and derived_name and declared != derived_name:
+        out["checks"].append({
+            "name": "project.consistency", "status": "fail",
+            "detail": f"$RELAY_PROJECT={declared!r} but git toplevel basename={derived_name!r}",
+        })
+    elif declared or derived_name:
+        out["checks"].append({
+            "name": "project.consistency", "status": "pass",
+            "detail": f"project={declared or derived_name}",
+        })
+    else:
+        out["checks"].append({
+            "name": "project.consistency", "status": "warn",
+            "detail": "no $RELAY_PROJECT and not in git repo",
+        })
+
+    if env.shared_root and env.shared_root.is_dir():
+        for r in run_probes(env.shared_root):
+            out["checks"].append({
+                "name": f"fs.{r.name}", "status": r.status,
+                "detail": r.detail, "elapsed_ms": r.elapsed_ms,
+            })
+    else:
+        out["checks"].append({
+            "name": "fs.probes", "status": "fail",
+            "detail": f"shared_root not accessible: {env.shared_root}",
+        })
+
+    for c in out["checks"]:
+        if c["status"] == "fail":
+            out["exit_code"] = 2
+            break
+        if c["status"] == "warn" and out["exit_code"] < 1:
+            out["exit_code"] = 1
+
+    if args.json:
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+    else:
+        print(f"relay preflight :: {env.shared_root or '(unset)'}")
+        print()
+        icon = {"pass": "[ok]  ", "warn": "[warn]", "fail": "[fail]"}
+        for c in out["checks"]:
+            el = f" ({c.get('elapsed_ms', 0):>4d}ms)" if "elapsed_ms" in c else ""
+            print(f"  {icon[c['status']]} {c['name']:24s}{el}  {c['detail']}")
+        print()
+        cnt = {"pass": 0, "warn": 0, "fail": 0}
+        for c in out["checks"]:
+            cnt[c["status"]] += 1
+        print(f"summary: {cnt['pass']} pass, {cnt['warn']} warn, {cnt['fail']} fail "
+              f"(exit {out['exit_code']})")
+        if out["exit_code"] != 0 and not all(out["env"].get(v, False) for v in required):
+            _print_env_template()
+    return out["exit_code"]
+
+
+def cmd_bootstrap(args) -> int:
+    env = load_env()
+    if not env.shared_root:
+        print("relay bootstrap: RELAY_SHARED_ROOT not set", file=sys.stderr)
+        return 2
+    if not SLUG_RE.match(args.topic):
+        print(f"relay bootstrap: topic must match {SLUG_RE.pattern}", file=sys.stderr)
+        return 2
+
+    proj = derive_project(env)
+    if not proj:
+        print("relay bootstrap: cannot determine project (set RELAY_PROJECT or run in a git repo)",
+              file=sys.stderr)
+        return 2
+    if not SLUG_RE.match(proj):
+        print(f"relay bootstrap: derived project {proj!r} not a valid slug", file=sys.stderr)
+        return 2
+
+    # ensure mount sentinel
+    relay_meta = env.shared_root / "_relay"
+    relay_meta.mkdir(parents=True, exist_ok=True)
+    sentinel = relay_meta / ".sentinel"
+    if not sentinel.exists():
+        atomic_write_text(sentinel, f"relay mount sentinel\ncreated_at: {now_iso()}\n", mode=0o644)
+
+    date_prefix = datetime.now().strftime("%Y%m%d")
+    session_slug = f"{date_prefix}-{args.topic}"
+    session_dir = env.shared_root / proj / session_slug
+    if session_dir.exists():
+        print(f"relay bootstrap: session dir already exists: {session_dir}", file=sys.stderr)
+        return 2
+
+    session_dir.mkdir(parents=True)
+    (session_dir / ".draft").mkdir(mode=0o700)
+
+    participants = []
+    if env.author:
+        participants.append(env.author)
+    if env.peer and env.peer not in participants:
+        participants.append(env.peer)
+
+    session_json = {
+        "schema_version": SCHEMA_VERSION,
+        "project": proj,
+        "session_id": session_slug,
+        "title": args.title or args.topic,
+        "state": "active",
+        "created_at": now_iso(),
+        "closed_at": None,
+        "close_reason": None,
+        "participants": participants,
+    }
+    atomic_write_json(session_dir / "session.json", session_json)
+
+    readme = (
+        f"# relay session: {proj}/{session_slug}\n\n"
+        f"Title: {session_json['title']}\n"
+        f"Created: {session_json['created_at']}\n"
+        f"Participants: {', '.join(participants) or '(none)'}\n\n"
+        f"Use `relay status` to see current state, `relay claim` to start an artifact.\n"
+    )
+    atomic_write_text(session_dir / "README.md", readme, mode=0o644)
+
+    print(f"created session: {session_dir}")
+    print(f"  project:      {proj}")
+    print(f"  session_id:   {session_slug}")
+    print(f"  participants: {', '.join(participants) or '(none)'}")
+    return 0
+
+
+def cmd_status(args) -> int:
+    env = load_env()
+    session = resolve_active_session(env, args.project)
+    sj = json.loads((session / "session.json").read_text())
+
+    pub = list_published(session)
+    if args.last and args.last > 0:
+        pub = pub[-args.last:]
+
+    artifacts = []
+    for f in pub:
+        try:
+            fm, body = parse_frontmatter(f.read_text(encoding="utf-8"))
+        except ValueError:
+            artifacts.append({"path": str(f.relative_to(session)), "error": "malformed frontmatter"})
+            continue
+        first_line = next((ln for ln in body.splitlines() if ln.strip()), "")
+        artifacts.append({
+            "seq": fm.get("seq"),
+            "author": fm.get("author"),
+            "peer": fm.get("peer"),
+            "kind": fm.get("kind"),
+            "status": fm.get("status"),
+            "created": fm.get("created"),
+            "in_reply_to": fm.get("in_reply_to"),
+            "sync_needed": fm.get("sync_needed"),
+            "corrects": fm.get("corrects"),
+            "path": str(f.relative_to(session)),
+            "first_line": first_line[:120],
+        })
+
+    drafts: list[str] = []
+    draft_dir = session / ".draft"
+    if draft_dir.is_dir():
+        drafts = sorted(p.name for p in draft_dir.glob("*.md"))
+
+    is_active = session_is_active(session)
+
+    payload = {
+        "session": sj,
+        "session_dir": str(session),
+        "is_active": is_active,
+        "next_seq": latest_seq(session) + 1,
+        "published": artifacts,
+        "drafts": drafts,
+        "closed_sentinel": (session / "CLOSED").exists(),
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
+    print(f"session: {sj['project']}/{sj['session_id']}")
+    print(f"  title:    {sj.get('title')}")
+    print(f"  state:    {sj.get('state')}  (is_active={is_active})")
+    print(f"  created:  {sj.get('created_at')}")
+    if sj.get("closed_at"):
+        print(f"  closed:   {sj['closed_at']}  reason={sj.get('close_reason')!r}")
+    print(f"  next-seq: {payload['next_seq']}")
+    print()
+    if artifacts:
+        print("published artifacts:")
+        for a in artifacts:
+            if "error" in a:
+                print(f"  ! {a['path']}  ({a['error']})")
+                continue
+            print(f"  {a['seq']:>3}  [{a['status']:<10}]  {a['author']} -> {a['peer']:<8} "
+                  f"{a['kind']:<11}  {a['path']}")
+            if a["first_line"]:
+                print(f"       | {a['first_line']}")
+    else:
+        print("(no published artifacts yet)")
+    if drafts:
+        print()
+        print("drafts (hidden):")
+        for d in drafts:
+            print(f"  .draft/{d}")
+    return 0
+
+
+def cmd_next_seq(args) -> int:
+    env = load_env()
+    session = resolve_active_session(env, args.project)
+    print(latest_seq(session) + 1)
+    return 0
+
+
+def _scaffold_frontmatter(env: Env, seq: int, kind: str, in_reply_to: int | None) -> dict:
+    return {
+        "seq": seq,
+        "author": env.author or "unknown",
+        "peer": env.peer or "unknown",
+        "kind": kind,
+        "status": "draft",
+        "created": now_iso(),
+        "in_reply_to": in_reply_to if in_reply_to is not None else (seq - 1 if seq > 1 else None),
+        "prompt_for_next": "TODO: write actionable instructions for the peer\n",
+        "sync_needed": False,
+        "touched_paths": [],
+        "corrects": None,
+    }
+
+
+def cmd_claim(args) -> int:
+    env = load_env()
+    if args.kind not in KINDS:
+        print(f"relay claim: unknown kind {args.kind!r} (known: {sorted(KINDS)})",
+              file=sys.stderr)
+        return 2
+    session = resolve_active_session(env, args.project)
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+
+    seq = latest_seq(session) + 1
+    author = env.author or "unknown"
+    for attempt in range(2):
+        draft_name = f"{seq:03d}-{author}-{args.kind}.md"
+        draft_path = draft_dir / draft_name
+        if draft_path.exists():
+            seq += 1
+            continue
+        fm = _scaffold_frontmatter(env, seq, args.kind, args.in_reply_to)
+        body = (
+            f"\n# {args.kind} by {author}, seq {seq}\n\n"
+            "<!-- write your substantive content here. delete this comment. -->\n"
+        )
+        try:
+            text = dump_frontmatter(fm, body)
+            data = text.encode("utf-8")
+            tmp = draft_dir / f".{draft_name}.relay-{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                tmp.unlink(missing_ok=True)
+                raise
+            try:
+                os.link(tmp, draft_path)  # atomic O_EXCL via link
+            except FileExistsError:
+                tmp.unlink(missing_ok=True)
+                seq += 1
+                continue
+            finally:
+                tmp.unlink(missing_ok=True)
+            _fsync_dir(draft_dir)
+            print(draft_path)
+            return 0
+        except OSError as exc:
+            print(f"relay claim: io error: {exc}", file=sys.stderr)
+            return 2
+    print("relay claim: could not allocate sequence after retry", file=sys.stderr)
+    return 2
+
+
+def _validate_draft(draft_path: Path) -> tuple[dict, str]:
+    if not draft_path.exists():
+        raise ValueError(f"draft not found: {draft_path}")
+    if draft_path.parent.name != ".draft":
+        raise ValueError(f"draft not under .draft/: {draft_path}")
+    try:
+        fm, body = parse_frontmatter(draft_path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"frontmatter parse error: {exc}") from exc
+    required = ["seq", "author", "peer", "kind", "status", "prompt_for_next", "sync_needed"]
+    missing = [k for k in required if k not in fm or fm[k] in (None, "")]
+    if missing:
+        raise ValueError(f"missing required frontmatter fields: {missing}")
+    if fm["status"] != "draft":
+        raise ValueError(f"draft status must be 'draft' before publish, got {fm['status']!r}")
+    pfn = fm["prompt_for_next"]
+    if not isinstance(pfn, str) or not pfn.strip():
+        raise ValueError("prompt_for_next is empty or whitespace")
+    if PLACEHOLDER_MARKER in pfn:
+        raise ValueError(f"prompt_for_next still contains placeholder marker {PLACEHOLDER_MARKER!r}")
+    if not body.strip():
+        raise ValueError("body is empty or whitespace")
+    if fm["kind"] not in KINDS:
+        raise ValueError(f"unknown kind: {fm['kind']!r}")
+    return fm, body
+
+
+def cmd_publish(args) -> int:
+    draft_path = Path(args.draft_path).resolve()
+    try:
+        fm, body = _validate_draft(draft_path)
+    except ValueError as exc:
+        print(f"relay publish: {exc}", file=sys.stderr)
+        return 2
+
+    session = draft_path.parent.parent
+    base = draft_path.name[:-3]  # strip .md
+    final_status = args.status if args.status else "ready"
+    if final_status not in STATUSES or final_status == "draft":
+        print(f"relay publish: invalid --status: {final_status!r}", file=sys.stderr)
+        return 2
+    fm["status"] = final_status
+    fm["created"] = now_iso()
+
+    seq = int(fm["seq"])
+    for attempt in range(2):
+        paths = published_paths(session, base)
+        if paths["md"].exists():
+            seq += 1
+            base = f"{seq:03d}-{fm['author']}-{fm['kind']}"
+            fm["seq"] = seq
+            continue
+        text = dump_frontmatter(fm, body)
+        atomic_write_text(paths["md"], text, mode=0o600)
+        digest = sha256_of_file(paths["md"])
+        atomic_write_text(paths["sha256"], f"{digest}  {paths['md'].name}\n", mode=0o644)
+        atomic_write_bytes(paths["ready"], b"", mode=0o644)
+        try:
+            draft_path.unlink()
+        except FileNotFoundError:
+            pass
+        _fsync_dir(session)
+        print(paths["md"])
+        return 0
+    print("relay publish: could not allocate published path after retry", file=sys.stderr)
+    return 2
+
+
+def cmd_close(args) -> int:
+    env = load_env()
+    session = resolve_active_session(env, args.project)
+    sentinel = session / "CLOSED"
+    if sentinel.exists():
+        print(f"relay close: already closed (sentinel exists at {sentinel})", file=sys.stderr)
+        return 2
+    close_meta = (
+        f'reason = {json.dumps(args.reason)}\n'
+        f'outcome = {json.dumps(args.outcome or "")}\n'
+        f'closed_by = {json.dumps(env.author or "unknown")}\n'
+        f'closed_at = {json.dumps(now_iso())}\n'
+    )
+    atomic_write_text(sentinel, close_meta, mode=0o644)
+
+    sj_path = session / "session.json"
+    data = json.loads(sj_path.read_text())
+    data["state"] = "closed"
+    data["closed_at"] = now_iso()
+    data["close_reason"] = args.reason
+    atomic_write_json(sj_path, data)
+
+    print(f"closed: {session}")
+    print(f"  reason:   {args.reason}")
+    print(f"  outcome:  {args.outcome or '(none)'}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Sync
+# ---------------------------------------------------------------------------
+
+def _is_fuse_mount(path: Path) -> bool:
+    try:
+        res = subprocess.run(
+            ["stat", "-f", "-c", "%T", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        if res.returncode == 0:
+            t = res.stdout.strip()
+            return t.startswith("fuse") or t == "fuseblk"
+    except FileNotFoundError:
+        pass
+    return False
+
+
+def _gitignore_has_negation(repo: Path) -> bool:
+    gi = repo / ".gitignore"
+    if not gi.exists():
+        return False
+    for ln in gi.read_text(errors="replace").splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("!"):
+            return True
+    return False
+
+
+def cmd_sync(args) -> int:
+    env = load_env()
+    if env.role != "host":
+        print(f"relay sync: must run on host (RELAY_ROLE={env.role!r}); remote cannot SSH back",
+              file=sys.stderr)
+        return 2
+    if not env.remote_ssh or not env.remote_path:
+        print("relay sync: RELAY_REMOTE_SSH and RELAY_REMOTE_PATH must be set", file=sys.stderr)
+        return 2
+    top = git_toplevel()
+    if not top:
+        print("relay sync: not in a git repo (need project root)", file=sys.stderr)
+        return 2
+    project_root = top
+    if _is_fuse_mount(project_root):
+        print(f"relay sync: $PROJECT_ROOT={project_root} is a fuse mount; "
+              "no sync needed (shape-A: edits land on remote directly)", file=sys.stderr)
+        return 2
+
+    direction = args.direction
+    rsync_cmd: list[str] = ["rsync", "-avh", "--progress"]
+    if args.dry_run:
+        rsync_cmd.append("-n")
+    if args.delete:
+        rsync_cmd.append("--delete")
+
+    if args.strict_gitignore:
+        # build file list via git
+        files_list = subprocess.run(
+            ["git", "-C", str(project_root), "ls-files", "--cached", "--others",
+             "--exclude-standard", "-z"],
+            capture_output=True, check=False,
+        )
+        if files_list.returncode != 0:
+            print(f"relay sync: git ls-files failed: {files_list.stderr.decode()}",
+                  file=sys.stderr)
+            return 2
+        tmpfile = Path(f"/tmp/relay-sync-{os.getpid()}-{uuid.uuid4().hex[:8]}.lst")
+        tmpfile.write_bytes(files_list.stdout)
+        rsync_cmd += ["--files-from", str(tmpfile), "--from0",
+                       "--exclude=.git", "--exclude=.shared"]
+    else:
+        # default mode: --filter=':- .gitignore'
+        print("WARNING: --filter=':- .gitignore' does NOT honor reverse !path rules.", file=sys.stderr)
+        if _gitignore_has_negation(project_root):
+            print("  Your .gitignore contains !path rules — STRONGLY recommend "
+                  "--strict-gitignore.", file=sys.stderr)
+        if not args.dry_run:
+            print("  First sync? Run with --dry-run first.", file=sys.stderr)
+        rsync_cmd += [
+            "--filter=:- .gitignore",
+            "--exclude=.git",
+            "--exclude=.shared",
+        ]
+
+    src = f"{project_root}/"
+    dst = f"{env.remote_ssh}:{env.remote_path}/"
+    if direction == "push":
+        rsync_cmd += [src, dst]
+    elif direction == "pull":
+        rsync_cmd += [dst, src]
+    else:
+        print(f"relay sync: unknown direction {direction!r}", file=sys.stderr)
+        return 2
+
+    print(f"$ {shlex.join(rsync_cmd)}", file=sys.stderr)
+    res = subprocess.run(rsync_cmd, check=False)
+    if args.strict_gitignore:
+        try:
+            tmpfile.unlink()
+        except (NameError, FileNotFoundError):
+            pass
+    return res.returncode
+
+
+# ---------------------------------------------------------------------------
+# CLI dispatch
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="relay",
+        description="agent-relay file protocol CLI.")
+    p.add_argument("--version", action="version", version=f"relay {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
+
+    pp = sub.add_parser("preflight", help="Check env, mount, project, FS probes.")
+    pp.add_argument("--json", action="store_true")
+    pp.set_defaults(func=cmd_preflight)
+
+    pb = sub.add_parser("bootstrap", help="Create a new session under .shared/<project>/.")
+    pb.add_argument("--topic", required=True, help="Session topic slug.")
+    pb.add_argument("--title", default=None, help="Human-readable title.")
+    pb.set_defaults(func=cmd_bootstrap)
+
+    ps = sub.add_parser("status", help="Show active session status.")
+    ps.add_argument("--project", default=None)
+    ps.add_argument("--last", type=int, default=0,
+                     help="Show only last N published artifacts (0 = all).")
+    ps.add_argument("--json", action="store_true")
+    ps.set_defaults(func=cmd_status)
+
+    pn = sub.add_parser("next-seq", help="Print next available NNN (advisory).")
+    pn.add_argument("--project", default=None)
+    pn.set_defaults(func=cmd_next_seq)
+
+    pc = sub.add_parser("claim", help="Scaffold a new draft artifact under .draft/.")
+    pc.add_argument("--kind", required=True, choices=sorted(KINDS))
+    pc.add_argument("--in-reply-to", type=int, default=None)
+    pc.add_argument("--project", default=None)
+    pc.set_defaults(func=cmd_claim)
+
+    ppub = sub.add_parser("publish", help="Validate + atomically promote a draft.")
+    ppub.add_argument("draft_path", help="Path to .draft/NNN-author-kind.md")
+    ppub.add_argument("--status", default=None, choices=sorted(STATUSES - {"draft"}),
+                       help="Publish with this status (default: ready).")
+    ppub.set_defaults(func=cmd_publish)
+
+    pcl = sub.add_parser("close", help="Write CLOSED sentinel + update session.json.")
+    pcl.add_argument("--reason", required=True)
+    pcl.add_argument("--outcome", default=None)
+    pcl.add_argument("--project", default=None)
+    pcl.set_defaults(func=cmd_close)
+
+    psync = sub.add_parser("sync", help="Host-only rsync wrapper.")
+    psync.add_argument("direction", choices=["push", "pull"])
+    psync.add_argument("--dry-run", action="store_true")
+    psync.add_argument("--strict-gitignore", action="store_true",
+                        help="Use git ls-files instead of rsync --filter (exact gitignore semantics).")
+    psync.add_argument("--delete", action="store_true",
+                        help="Pass --delete to rsync (off by default).")
+    psync.set_defaults(func=cmd_sync)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
