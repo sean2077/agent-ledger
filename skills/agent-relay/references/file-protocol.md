@@ -159,7 +159,6 @@ session is active ⟺
     AND (
         no published files yet (just bootstrapped)
         OR latest published file's status NOT IN {closed, cancelled, failed, timed_out}
-        OR latest published file's prompt_for_next demands further peer action
     )
 ```
 
