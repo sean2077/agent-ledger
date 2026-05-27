@@ -52,7 +52,7 @@ Interpret the exit code as three levels:
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
-`fail` examples that MUST block: missing env vars, missing `.shared/_relay/.sentinel` (mount dead), `project.consistency` mismatch, old `.shared/<project>/<session>/` layout requiring `relay migrate v2-to-v3`, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable).
+`fail` examples that MUST block: missing env vars, missing `.shared/_relay/.sentinel` (mount dead), `project.consistency` mismatch, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable).
 
 ## Decide intent from user input
 
@@ -218,7 +218,6 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 
 - **`relay preflight` fails `mount.sentinel`**: the sshfs mount is broken or you're running outside a relay-bootstrapped project. Tell user; do not write.
 - **`relay preflight` fails `project.consistency`**: `$RELAY_PROJECT` env var doesn't match the git toplevel. Tell user the two values; ask which is correct.
-- **`relay preflight` fails `layout.v2_nested`**: old nested sessions exist. Run `relay migrate v2-to-v3 --dry-run`; only apply with `--apply --confirm-quiet` after active relay sessions are closed or otherwise quiet.
 - **`relay status` reports `multiple active sessions`**: use `relay sessions list`, then rerun the intended command with `--session-id <session-id>` or repair the state before claiming.
 - **`relay publish` rejects with "prompt_for_next still contains placeholder"**: you forgot to replace the `TODO: ...` line. Edit the draft and retry.
 - **`relay publish` rejects with "body is empty"**: scaffold body is the placeholder comment; replace it with real content.

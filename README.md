@@ -15,13 +15,7 @@ Active implementation lives in `skills/agent-relay/`:
 - `tests/test_relay_*.py` — pytest coverage
 
 Protocol v0.3.0 stores sessions directly under `.shared/<session-id>/`.
-The project name remains in `session.json` for audit context; old
-`.shared/<project>/<session-id>/` trees must be moved with:
-
-```bash
-relay migrate v2-to-v3 --dry-run
-relay migrate v2-to-v3 --apply --confirm-quiet
-```
+The project name remains in `session.json` for audit context.
 
 Install (host):
 

@@ -628,22 +628,6 @@ def session_is_active(session: Path) -> bool:
     return True
 
 
-def iter_legacy_v2_sessions(root: Path) -> list[tuple[Path, Path]]:
-    """Return (project_dir, session_dir) pairs from the old v2 nested layout."""
-    if not root.is_dir():
-        return []
-    out: list[tuple[Path, Path]] = []
-    for pd in sorted(root.iterdir()):
-        if not pd.is_dir() or pd.name.startswith(".") or pd.name == "_relay":
-            continue
-        if (pd / "session.json").exists():
-            continue  # already a flat v3 session
-        for sd in sorted(pd.iterdir()):
-            if sd.is_dir() and (sd / "session.json").exists():
-                out.append((pd, sd))
-    return out
-
-
 def latest_artifact(session: Path) -> Path | None:
     pub = list_published(session)
     return pub[-1] if pub else None
@@ -818,22 +802,6 @@ def cmd_preflight(args) -> int:
         })
 
     if env.shared_root and env.shared_root.is_dir():
-        legacy_sessions = iter_legacy_v2_sessions(env.shared_root)
-        if legacy_sessions:
-            examples = ", ".join(str(sd.relative_to(env.shared_root)) for _, sd in legacy_sessions[:3])
-            extra = "" if len(legacy_sessions) <= 3 else f" (+{len(legacy_sessions) - 3} more)"
-            out["checks"].append({
-                "name": "layout.v2_nested",
-                "status": "fail",
-                "detail": "old .shared/<project>/<session> layout requires "
-                          f"`relay migrate v2-to-v3`: {examples}{extra}",
-            })
-        else:
-            out["checks"].append({
-                "name": "layout.v3_flat",
-                "status": "pass",
-                "detail": "sessions are flat under RELAY_SHARED_ROOT",
-            })
         out["checks"].append(_check_active_marker(env.shared_root))
 
     if env.shared_root and env.shared_root.is_dir():
@@ -1355,108 +1323,6 @@ def cmd_sessions_list(args) -> int:
     return 0
 
 
-def _session_has_drafts(session: Path) -> bool:
-    draft_dir = session / ".draft"
-    return draft_dir.is_dir() and any(draft_dir.glob("*.md"))
-
-
-def _session_has_unanswered_latest_ready(session: Path) -> bool:
-    fm = latest_artifact_frontmatter(session)
-    return bool(fm and fm.get("status") == "ready" and fm.get("peer"))
-
-
-def _migration_plan(root: Path) -> tuple[list[tuple[Path, Path, Path]], list[str]]:
-    moves: list[tuple[Path, Path, Path]] = []
-    problems: list[str] = []
-    seen_targets: dict[str, Path] = {}
-    for pd, sd in iter_legacy_v2_sessions(root):
-        target = root / sd.name
-        moves.append((pd, sd, target))
-        prior = seen_targets.get(sd.name)
-        if prior is not None:
-            problems.append(f"duplicate session slug {sd.name!r}: {prior} and {sd}")
-        seen_targets[sd.name] = sd
-        if target.exists() and target.resolve() != sd.resolve():
-            problems.append(f"name collision: {target} already exists")
-    return moves, problems
-
-
-def _migration_quiet_problems(moves: list[tuple[Path, Path, Path]]) -> list[str]:
-    problems: list[str] = []
-    active = [sd for _, sd, _ in moves if session_is_active(sd)]
-    if len(active) > 1:
-        problems.append("multiple active v2 sessions: " + ", ".join(sd.name for sd in active))
-    for _, sd, _ in moves:
-        if _session_has_drafts(sd):
-            problems.append(f"drafts exist in {sd}")
-        if _session_has_unanswered_latest_ready(sd):
-            problems.append(f"latest ready artifact is still addressed to peer in {sd}")
-    return problems
-
-
-def cmd_migrate(args) -> int:
-    env = load_env()
-    if getattr(args, "migration", None) != "v2-to-v3":
-        print("relay migrate: only v2-to-v3 is supported", file=sys.stderr)
-        return 2
-    try:
-        root = session_root(env)
-    except SystemExit as exc:
-        print(f"relay migrate: {exc}", file=sys.stderr)
-        return 2
-    dry_run = getattr(args, "dry_run", False)
-    apply = getattr(args, "apply", False)
-    if not dry_run and not apply:
-        dry_run = True
-    if dry_run and apply:
-        print("relay migrate: choose exactly one of --dry-run or --apply", file=sys.stderr)
-        return 2
-
-    moves, problems = _migration_plan(root)
-    if apply and not getattr(args, "confirm_quiet", False):
-        problems.append("--apply requires --confirm-quiet")
-    if apply:
-        problems.extend(_migration_quiet_problems(moves))
-    if problems:
-        for problem in problems:
-            print(f"relay migrate: {problem}", file=sys.stderr)
-        return 2
-
-    if dry_run:
-        if not moves:
-            print("relay migrate: no v2 sessions found")
-            return 0
-        for _, old, new in moves:
-            print(f"would move: {old} -> {new}")
-        return 0
-
-    for pd, old, new in moves:
-        os.replace(old, new)
-        _fsync_dir(root)
-        try:
-            sj = json.loads((new / "session.json").read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            print(f"relay migrate: malformed session.json after move: {new}: {exc}", file=sys.stderr)
-            return 2
-        sj["schema_version"] = SCHEMA_VERSION
-        sj.setdefault("project", pd.name)
-        sj["session_id"] = new.name
-        atomic_write_json(new / "session.json", sj)
-        try:
-            pd.rmdir()
-            _fsync_dir(root)
-        except OSError:
-            pass
-        print(f"moved: {old} -> {new}")
-
-    actives = active_sessions(root)
-    if len(actives) == 1:
-        write_active_marker(root, actives[0].name)
-    elif not actives:
-        clear_active_marker(root)
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # Sync
 # ---------------------------------------------------------------------------
@@ -1639,15 +1505,6 @@ def build_parser() -> argparse.ArgumentParser:
     psl = ss.add_parser("list", help="List all flat sessions without resolving active.")
     psl.add_argument("--json", action="store_true")
     psl.set_defaults(func=cmd_sessions_list)
-
-    pmig = sub.add_parser("migrate", help="Migrate relay storage layout.")
-    pmig.add_argument("migration", choices=["v2-to-v3"])
-    mode = pmig.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true")
-    mode.add_argument("--apply", action="store_true")
-    pmig.add_argument("--confirm-quiet", action="store_true",
-                      help="Required with --apply after verifying no live turn or drafts.")
-    pmig.set_defaults(func=cmd_migrate)
 
     psync = sub.add_parser("sync", help="Host-only rsync wrapper.")
     psync.add_argument("direction", choices=["push", "pull"])

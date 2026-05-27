@@ -32,13 +32,6 @@
 - `session-slug`: `YYYYMMDD-<topic>`, topic same rules. Single date prefix; the day is local time of `relay bootstrap`.
 - `project`: kept only as `session.json.project` metadata. It is not a directory level in v0.3.0.
 
-Old v2 trees shaped as `.shared/<project>/<session>/` must be migrated with:
-
-```bash
-relay migrate v2-to-v3 --dry-run
-relay migrate v2-to-v3 --apply --confirm-quiet
-```
-
 **Hidden vs visible**:
 
 - `.draft/` is hidden; peers and `relay status` do not list its contents.

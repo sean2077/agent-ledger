@@ -246,32 +246,6 @@ def test_preflight_fails_shared_root_outside_git_toplevel(monkeypatch, capsys, t
     assert rc == 2
 
 
-def test_preflight_reports_old_v2_nested_layout_requires_migration(monkeypatch, capsys, tmp_path):
-    """D1: preflight surfaces old .shared/<project>/<session>/ layout as needing migrate."""
-    repo = tmp_path / "repo"
-    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-    monkeypatch.chdir(repo)
-    shared = repo / ".shared"
-    shared.mkdir(mode=0o700)
-    (shared / "_relay").mkdir()
-    (shared / "_relay" / ".sentinel").touch()
-    legacy = shared / "repo" / "20260527-old"
-    legacy.mkdir(parents=True)
-    (legacy / "session.json").write_text('{"schema_version": 2, "state": "closed"}')
-    _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
-        RELAY_SHARED_ROOT=str(shared),
-        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
-    )
-    rc = relay.cmd_preflight(type("A", (), {"json": True})())
-    import json
-    data = json.loads(capsys.readouterr().out)
-    layout = next(c for c in data["checks"] if c["name"] == "layout.v2_nested")
-    assert layout["status"] == "fail"
-    assert "relay migrate v2-to-v3" in layout["detail"]
-    assert rc == 2
-
-
 def test_preflight_fails_when_marker_mismatches_active_session(monkeypatch, capsys, tmp_path):
     """R3.a: .shared/.active-session disagreeing with session_is_active is a fail (corruption)."""
     repo = tmp_path / "repo"
