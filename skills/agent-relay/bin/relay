@@ -562,8 +562,18 @@ def cmd_preflight(args) -> int:
     env = load_env()
     out: dict = {"exit_code": 0, "env": {}, "checks": []}
 
+    # Detect project shape (only meaningful on host):
+    #   shape A: PROJECT_ROOT is itself a fuse mount → no rsync needed
+    #            → RELAY_REMOTE_SSH / RELAY_REMOTE_PATH are irrelevant
+    #   shape B: PROJECT_ROOT is local; only .shared/ is mounted
+    #            → RELAY_REMOTE_SSH / RELAY_REMOTE_PATH required for `relay sync`
+    is_shape_a = False
+    project_root = git_toplevel()
+    if env.role == "host" and project_root is not None:
+        is_shape_a = _is_fuse_mount(project_root)
+
     required = ["RELAY_ROLE", "RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT"]
-    if env.role == "host":
+    if env.role == "host" and not is_shape_a:
         required += ["RELAY_REMOTE_SSH", "RELAY_REMOTE_PATH"]
     for var in required:
         val = os.environ.get(var)
@@ -573,6 +583,18 @@ def cmd_preflight(args) -> int:
             "status": "pass" if val else "fail",
             "detail": "set" if val else "not set",
         })
+
+    if env.role == "host":
+        if is_shape_a:
+            out["checks"].append({
+                "name": "project.shape", "status": "pass",
+                "detail": "shape A (PROJECT_ROOT is a fuse mount; rsync not needed)",
+            })
+        elif project_root is not None:
+            out["checks"].append({
+                "name": "project.shape", "status": "pass",
+                "detail": "shape B (PROJECT_ROOT is local; sync via rsync)",
+            })
 
     if env.shared_root:
         sentinel = env.shared_root / "_relay" / ".sentinel"

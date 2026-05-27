@@ -86,6 +86,61 @@ def test_preflight_sentinel_missing(monkeypatch, capsys, tmp_path):
     assert rc == 2
 
 
+def test_preflight_shape_a_does_not_require_remote_vars(monkeypatch, capsys, tmp_path):
+    """Host on a fuse-mounted project root (shape A) should not require RELAY_REMOTE_*."""
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path / "repo")], check=True)
+    repo = tmp_path / "repo"
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        # Deliberately omitting RELAY_REMOTE_SSH / RELAY_REMOTE_PATH.
+    )
+    # Force fuse-mount detection to return True
+    import relay as _relay
+    monkeypatch.setattr(_relay, "_is_fuse_mount", lambda p: True)
+    args = type("A", (), {"json": True})()
+    rc = _relay.cmd_preflight(args)
+    out = capsys.readouterr().out
+    import json
+    data = json.loads(out)
+    env_keys = set(data["env"].keys())
+    assert "RELAY_REMOTE_SSH" not in env_keys
+    assert "RELAY_REMOTE_PATH" not in env_keys
+    shape = next(c for c in data["checks"] if c["name"] == "project.shape")
+    assert "shape A" in shape["detail"]
+    # exit 0 expected (sentinel exists, env complete for shape A)
+    assert rc == 0
+
+
+def test_preflight_shape_b_still_requires_remote_vars(monkeypatch, capsys, tmp_path):
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path / "repo")], check=True)
+    repo = tmp_path / "repo"
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+    )
+    import relay as _relay
+    monkeypatch.setattr(_relay, "_is_fuse_mount", lambda p: False)
+    args = type("A", (), {"json": True})()
+    rc = _relay.cmd_preflight(args)
+    out = capsys.readouterr().out
+    import json
+    data = json.loads(out)
+    # RELAY_REMOTE_* required, missing → fail
+    assert data["env"].get("RELAY_REMOTE_SSH") is False
+    assert rc == 2
+
+
 def test_preflight_project_consistency_mismatch(monkeypatch, capsys, tmp_path):
     # set up a git repo to derive project name
     subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path / "repo")], check=True)
