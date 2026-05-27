@@ -1,0 +1,11 @@
+# Per-host relay config for the REMOTE machine (Claude Code side).
+# Copy to .envrc.$(hostname -s) at the project root and source.
+# Gitignored — not committed.
+
+export RELAY_ROLE=remote
+export RELAY_AUTHOR=claude
+export RELAY_PEER=codex
+export RELAY_SHARED_ROOT="$PWD/.shared"
+
+# Remote cannot SSH back to host; sync vars not needed.
+unset RELAY_REMOTE_SSH RELAY_REMOTE_PATH

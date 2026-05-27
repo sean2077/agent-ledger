@@ -29,9 +29,23 @@ ssh remote chmod +x ~/.local/bin/relay
 ssh remote ln -s /path/on/remote/skills/agent-relay ~/.agents/skills/agent-relay
 ```
 
-Configure (per project): copy `skills/agent-relay/templates/relay.env.example`
-to project root as `.relay.env`, fill in values, `source .relay.env` (or use
-direnv).
+Configure (per project): the repo ships a committed dispatcher `.envrc` that
+sources `.envrc.$(hostname -s)`. Each machine maintains its own per-host
+file (gitignored):
+
+```bash
+# on host (Codex side)
+cp skills/agent-relay/templates/envrc.host.example   ".envrc.$(hostname -s)"
+$EDITOR ".envrc.$(hostname -s)"                # fill RELAY_REMOTE_SSH/PATH
+source .envrc                                  # or `direnv allow` if installed
+
+# on remote (Claude Code side)
+cp skills/agent-relay/templates/envrc.remote.example ".envrc.$(hostname -s)"
+source .envrc
+```
+
+Both per-host files coexist on the shared mount; the dispatcher picks the
+right one by hostname. Works with or without direnv.
 
 ## v0.1.x: `awb` (deprecated)
 

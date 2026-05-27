@@ -543,13 +543,18 @@ def session_is_active(session: Path) -> bool:
 
 def _print_env_template() -> None:
     sys.stderr.write(
-        "\nenvironment template (write to .relay.env and `source` it):\n\n"
-        "export RELAY_ROLE=host          # or remote\n"
-        "export RELAY_AUTHOR=codex       # or claude\n"
-        "export RELAY_PEER=claude        # the other side\n"
-        "export RELAY_SHARED_ROOT=\"$PWD/.shared\"\n"
-        "export RELAY_REMOTE_SSH=user@remote\n"
-        "export RELAY_REMOTE_PATH=/path/on/remote\n"
+        "\nenvironment setup:\n"
+        "  This project uses a per-host .envrc.<hostname> file dispatched\n"
+        "  by the committed .envrc. Copy the appropriate template and source:\n\n"
+        "    # on host (Codex CLI side):\n"
+        "    cp skills/agent-relay/templates/envrc.host.example \\\n"
+        "       \".envrc.$(hostname -s)\"\n"
+        "    $EDITOR \".envrc.$(hostname -s)\"   # fill RELAY_REMOTE_SSH/PATH\n"
+        "    source .envrc\n\n"
+        "    # on remote (Claude Code side):\n"
+        "    cp skills/agent-relay/templates/envrc.remote.example \\\n"
+        "       \".envrc.$(hostname -s)\"\n"
+        "    source .envrc\n"
     )
 
 

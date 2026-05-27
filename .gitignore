@@ -1,6 +1,9 @@
 .shared
 .omx/
 
+# per-host direnv files; the dispatcher .envrc itself is committed
+.envrc.*
+
 # Python
 __pycache__/
 *.py[cod]
