@@ -42,6 +42,7 @@ TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
 SESSION_STATES = {"active", "closed"}
 PLACEHOLDER_MARKER = "TODO:"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+NON_BLOCKING_PREFLIGHT_WARNS = {"fs.mtime_monotonic"}
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +254,21 @@ def run_probes(root: Path, posix_target: int = 0o700) -> list[ProbeResult]:
         s, d = "fail", f"{type(exc).__name__}: {exc}"
     out.append(ProbeResult("posix_mode", s, d, int((time.monotonic() - t) * 1000)))
     return out
+
+
+def _preflight_exit_code(checks: list[dict]) -> int:
+    exit_code = 0
+    for c in checks:
+        status = c["status"]
+        if status == "fail":
+            return 2
+        if (
+            status == "warn"
+            and c["name"] not in NON_BLOCKING_PREFLIGHT_WARNS
+            and exit_code < 1
+        ):
+            exit_code = 1
+    return exit_code
 
 
 # ---------------------------------------------------------------------------
@@ -639,12 +655,7 @@ def cmd_preflight(args) -> int:
             "detail": f"shared_root not accessible: {env.shared_root}",
         })
 
-    for c in out["checks"]:
-        if c["status"] == "fail":
-            out["exit_code"] = 2
-            break
-        if c["status"] == "warn" and out["exit_code"] < 1:
-            out["exit_code"] = 1
+    out["exit_code"] = _preflight_exit_code(out["checks"])
 
     if args.json:
         print(json.dumps(out, indent=2, ensure_ascii=False))

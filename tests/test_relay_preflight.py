@@ -41,6 +41,51 @@ def test_probes_posix_fail_when_world_writable(tmp_path: Path):
     assert pm.status == "fail"
 
 
+def test_preflight_mtime_warning_is_non_blocking(monkeypatch, capsys, tmp_path):
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(tmp_path),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+    )
+    os.chmod(tmp_path, 0o700)
+    (tmp_path / "_relay").mkdir()
+    (tmp_path / "_relay" / ".sentinel").touch()
+    monkeypatch.setattr(relay, "run_probes", lambda root: [
+        relay.ProbeResult("mtime_monotonic", "warn", "mtime unchanged (1); coarse resolution", 1),
+        relay.ProbeResult("posix_mode", "pass", "mode 0700 matches target 0700", 0),
+    ])
+    args = type("A", (), {"json": True})()
+    rc = relay.cmd_preflight(args)
+    out = capsys.readouterr().out
+    import json
+    data = json.loads(out)
+    mtime = next(c for c in data["checks"] if c["name"] == "fs.mtime_monotonic")
+    assert mtime["status"] == "warn"
+    assert data["exit_code"] == 0
+    assert rc == 0
+
+
+def test_preflight_other_warnings_still_return_warning_exit(monkeypatch, capsys, tmp_path):
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(tmp_path),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+    )
+    os.chmod(tmp_path, 0o700)
+    (tmp_path / "_relay").mkdir()
+    (tmp_path / "_relay" / ".sentinel").touch()
+    monkeypatch.setattr(relay, "run_probes", lambda root: [
+        relay.ProbeResult("posix_mode", "warn", "mode 0750 exceeds target 0700", 0),
+    ])
+    args = type("A", (), {"json": True})()
+    rc = relay.cmd_preflight(args)
+    out = capsys.readouterr().out
+    import json
+    data = json.loads(out)
+    assert data["exit_code"] == 1
+    assert rc == 1
+
+
 def test_preflight_fails_when_no_env(monkeypatch, capsys):
     _isolated_env(monkeypatch)
     args = type("A", (), {"json": False})()

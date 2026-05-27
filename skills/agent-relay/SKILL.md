@@ -43,13 +43,14 @@ Interpret the exit code as three levels:
 
 | exit | meaning | what to do |
 |---|---|---|
-| `0` | all green | continue |
-| `1` | warnings only | **continue**; note the warn lines in your final report so the user sees them |
+| `0` | no blocking issues | **continue**; the `checks` array may still contain non-blocking `warn` lines — surface any you see in your final report |
+| `1` | blocking warnings | **continue**; emphasize the warn lines in your report so the user can decide |
 | `2` | fail | **stop and report**; do not bootstrap / claim / publish / sync / close |
 
-Common `warn`s that are safe to proceed past:
-- `fs.mtime_monotonic` "mtime unchanged …coarse resolution" — typical on sshfs with attribute caching; the protocol uses `.sha256` + `.ready` sentinels, not mtime, so this does not affect correctness.
-- `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking.
+`warn`s currently classified as **non-blocking** (still appear in `checks`, do not bump exit to 1):
+- `fs.mtime_monotonic` "mtime unchanged …coarse resolution" — typical on sshfs with attribute caching; the protocol uses `.sha256` + `.ready` sentinels, not mtime.
+
+Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
 `fail` examples that MUST block: missing env vars, missing `.shared/_relay/.sentinel` (mount dead), `project.consistency` mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable).
 
