@@ -39,7 +39,19 @@ Before any other action:
 "$RELAY" preflight
 ```
 
-Exit code 0: continue. Non-zero: **stop and report to user**. Do not bootstrap, claim, publish, sync, or close until env, mount sentinel, project consistency, and FS probes all pass. The CLI prints an env template if RELAY_* vars are missing.
+Interpret the exit code as three levels:
+
+| exit | meaning | what to do |
+|---|---|---|
+| `0` | all green | continue |
+| `1` | warnings only | **continue**; note the warn lines in your final report so the user sees them |
+| `2` | fail | **stop and report**; do not bootstrap / claim / publish / sync / close |
+
+Common `warn`s that are safe to proceed past:
+- `fs.mtime_monotonic` "mtime unchanged …coarse resolution" — typical on sshfs with attribute caching; the protocol uses `.sha256` + `.ready` sentinels, not mtime, so this does not affect correctness.
+- `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking.
+
+`fail` examples that MUST block: missing env vars, missing `.shared/_relay/.sentinel` (mount dead), `project.consistency` mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable).
 
 ## Decide intent from user input
 
