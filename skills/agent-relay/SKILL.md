@@ -58,15 +58,17 @@ Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds targ
 
 Read `{{ARGUMENTS}}` and the most recent user message. Pick exactly one intent. **Default is `handoff`.**
 
+**Zero-argument invocation** (just `$agent-relay` / `/agent-relay` with no following text) MUST be treated as `handoff`. Do not ask the user what to do — go run `handoff` immediately. The turn-check at the start of `handoff` will decide whether to act or report-and-stop.
+
 | Intent | User phrasing examples |
 |---|---|
-| `handoff` (default) | "continue the relay", "respond to claude", "review the plan", "fix what they asked", anything implying "do the next round" |
-| `bootstrap` | "start a relay session about X", "set up relay for this project", or when `relay status` shows no active session |
-| `status` | "what's the relay state", "show me the session", "who needs to act next" |
+| `handoff` (default) | "continue the relay", "respond to claude", "review the plan", "fix what they asked", anything implying "do the next round", **OR no arguments at all** |
+| `bootstrap` | "start a relay session about X", "set up relay for this project", or when `relay status` shows no active session AND user wants to start one |
+| `status` | "what's the relay state", "show me the session", "who needs to act next" — only when the user is explicitly read-only |
 | `sync` | "push to remote", "pull from remote", "sync the code" |
 | `close` | "close the session", "we're done", "wrap up the relay" |
 
-If user input is ambiguous → ask once, then proceed.
+If user input is ambiguous between handoff and something else → prefer handoff; the turn-check makes it safe.
 
 ---
 
@@ -74,23 +76,30 @@ If user input is ambiguous → ask once, then proceed.
 
 This is the core 95% case. Take one full turn in the relay.
 
-1. **Read state**: `relay status` (use `--json` if you need to parse). Note the active session path, latest published file, and `next-seq`.
-2. **Read the peer's latest message**: use your Read tool on the latest published `.md` whose `peer` field is you (or `author` is the other side). Pay attention to its `prompt_for_next` block — that's what the peer wants from you.
-3. **Do the work**: this is the part the CLI cannot do. Plan / review / write code / debug / investigate. Use Read, Edit, Bash, Grep, Glob as needed. Keep track of any non-`.shared/` files you change (you'll list them under `touched_paths`).
-4. **Claim a draft**:
+1. **Read state**: `"$RELAY" status --json` (or text). Note the active session path, latest published file, and `next-seq`.
+
+2. **Turn check — STOP HERE IF NOT YOUR TURN**. Of the latest published artifact:
+   - If its `peer` field equals `$RELAY_AUTHOR` (i.e. it's addressed to you), **continue** to step 3.
+   - If its `peer` is someone else, the relay is waiting on them — **report state to the user and stop**. Example: "Latest is `002-gpt55-review.md` (gpt55 -> claude). Nothing pending for codex. Run `$agent-relay` again after claude publishes."
+   - If there are no published artifacts yet, this session is freshly bootstrapped. Suggest bootstrap intent or ask the user what to write first; **do not silently claim**.
+   - If the latest artifact's `status` is terminal (`closed | cancelled | failed | timed_out`), the session is effectively over. Report and stop.
+
+3. **Read the peer's latest message**: use your Read tool on that latest `.md`. Pay attention to its `prompt_for_next` block — that is your task.
+4. **Do the work**: this is the part the CLI cannot do. Plan / review / write code / debug / investigate. Use Read, Edit, Bash, Grep, Glob as needed. Keep track of any non-`.shared/` files you change (you'll list them under `touched_paths`).
+5. **Claim a draft**:
    ```bash
    DRAFT=$("$RELAY" claim --kind <kind> --in-reply-to <peer-seq>)
    ```
    `kind` is one of: `plan | review | fix | note | question | decision | correction | addendum`. The CLI creates a hidden `.draft/NNN-<you>-<kind>.md` with frontmatter scaffold; body is a placeholder.
-5. **Fill the draft**: use your Edit tool on `$DRAFT`. Replace the placeholder body with your substantive content. **Critical**: replace the `prompt_for_next: |` block — the scaffold has `TODO: ...` and `publish` will reject anything still containing `TODO:`. See "Writing prompt_for_next" below.
-6. **Set `sync_needed: true`** in frontmatter if you modified any non-`.shared/` files. List them under `touched_paths`.
-7. **Publish**:
+6. **Fill the draft**: use your Edit tool on `$DRAFT`. Replace the placeholder body with your substantive content. **Critical**: replace the `prompt_for_next: |` block — the scaffold has `TODO: ...` and `publish` will reject anything still containing `TODO:`. See "Writing prompt_for_next" below.
+7. **Set `sync_needed: true`** in frontmatter if you modified any non-`.shared/` files. List them under `touched_paths`.
+8. **Publish**:
    ```bash
    "$RELAY" publish "$DRAFT"
    ```
    On success: file moves out of `.draft/`, sha256 + ready sidecars appear. On rejection: CLI prints which field failed validation; fix the draft and retry.
-8. **Sync if needed** (host only, see Intent: sync). First time push? **always `--dry-run` first**.
-9. **Report to user** what you did, the published path, and whether sync is pending.
+9. **Sync if needed** (host only, see Intent: sync). First time push? **always `--dry-run` first**.
+10. **Report to user** what you did, the published path, and whether sync is pending.
 
 ### Writing `prompt_for_next` well
 
