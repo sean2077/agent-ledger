@@ -40,7 +40,9 @@ Before any other action:
 "$RELAY" preflight
 ```
 
-`init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. It needs only `RELAY_SHARED_ROOT` set; if the env vars aren't sourced yet, `init` itself fails clearly.
+`init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. If `RELAY_SHARED_ROOT` is unset, `init` defaults to `<git_toplevel>/.shared`; outside a git repo it fails clearly.
+
+For the first time on a machine, `relay init --role host` (or `--role remote`) also copies the matching `envrc.<role>.example` template to `.envrc.<hostname>` if absent. The skill prelude runs the no-arg form; if init prints a `--role` hint, surface it to the user — that's the only path the prelude can't auto-resolve.
 
 Interpret the preflight exit code as three levels:
 

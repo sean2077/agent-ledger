@@ -1,7 +1,7 @@
 # agent-ledger
 
 A skill + CLI for relaying work between a local Codex CLI agent (host) and a
-remote interactive Claude Code agent (remote). Current: **v0.3.1** (pre-1.0).
+remote interactive Claude Code agent (remote). Current: **v0.3.2** (pre-1.0).
 
 The package lives in `skills/agent-relay/`:
 
@@ -31,18 +31,21 @@ ssh remote ln -s /path/on/remote/skills/agent-relay ~/.agents/skills/agent-relay
 
 The repo ships a committed dispatcher `.envrc` that sources
 `.envrc.$(hostname -s)`. Each machine maintains its own per-host file
-(gitignored):
+(gitignored). `relay init` bootstraps the per-host file from the template:
 
 ```bash
 # on host
-cp skills/agent-relay/templates/envrc.host.example   ".envrc.$(hostname -s)"
-$EDITOR ".envrc.$(hostname -s)"                # fill RELAY_REMOTE_SSH/PATH
-source .envrc                                  # or `direnv allow`
+relay init --role host
+$EDITOR ".envrc.$(hostname -s)"      # fill RELAY_REMOTE_SSH/PATH
+source .envrc                         # or `direnv allow` — init's output tells you
 
 # on remote
-cp skills/agent-relay/templates/envrc.remote.example ".envrc.$(hostname -s)"
+relay init --role remote
 source .envrc
 ```
 
-Both per-host files coexist on the shared mount; the dispatcher picks the
-right one by hostname. Works with or without direnv.
+`relay init` is idempotent: re-running won't overwrite a customized
+`.envrc.<hostname>` or rewrite `.shared/_relay/.sentinel`. It also creates
+`.shared/` (default `$git_toplevel/.shared`) the first time. Both per-host
+files coexist on the shared mount; the dispatcher picks the right one by
+hostname. Works with or without direnv.

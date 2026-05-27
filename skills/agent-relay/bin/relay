@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -33,7 +34,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-__version__ = "0.3.1"
+
+RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
+
+__version__ = "0.3.2"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -815,9 +819,8 @@ def cmd_preflight(args) -> int:
     return out["exit_code"]
 
 
-def _ensure_shared_root(env: Env) -> tuple[list[str], list[str]]:
+def _ensure_shared_root(root: Path) -> tuple[list[str], list[str]]:
     """Idempotently create RELAY_SHARED_ROOT + _relay/.sentinel. Returns (created, existed)."""
-    root = env.shared_root
     created: list[str] = []
     existed: list[str] = []
 
@@ -844,24 +847,74 @@ def _ensure_shared_root(env: Env) -> tuple[list[str], list[str]]:
     return created, existed
 
 
+def _hostname_short() -> str:
+    """Match dispatcher .envrc's `$(hostname -s)` short hostname."""
+    try:
+        res = subprocess.run(["hostname", "-s"], capture_output=True, text=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return os.uname().nodename.split(".")[0]
+
+
+def _copy_envrc_template(role: str, project_root: Path) -> tuple[Path, bool]:
+    """Copy envrc.<role>.example to <project>/.envrc.<hostname>. Returns (target, created)."""
+    template = RELAY_PACKAGE_DIR / "templates" / f"envrc.{role}.example"
+    if not template.exists():
+        raise SystemExit(f"relay init: template not found: {template}")
+    target = project_root / f".envrc.{_hostname_short()}"
+    if target.exists():
+        return target, False
+    target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    return target, True
+
+
 def cmd_init(args) -> int:
     env = load_env()
-    if not env.shared_root:
-        print("relay init: RELAY_SHARED_ROOT not set", file=sys.stderr)
-        return 2
+    project_root = git_toplevel()
+    root = env.shared_root
+    if root is None:
+        if project_root is None:
+            print("relay init: RELAY_SHARED_ROOT not set; either export it or run inside a git repo",
+                  file=sys.stderr)
+            return 2
+        root = project_root / ".shared"
+        print(f"relay init: RELAY_SHARED_ROOT not set, defaulting to {root}", file=sys.stderr)
 
-    created, existed = _ensure_shared_root(env)
-
+    created, existed = _ensure_shared_root(root)
     if created:
         print("relay init: created:")
         for p in created:
             print(f"  {p}")
-    if existed and not created:
-        print(f"relay init: already initialized at {env.shared_root}")
     elif existed:
-        print("relay init: already present:")
-        for p in existed:
-            print(f"  {p}")
+        print(f"relay init: shared root already initialized at {root}")
+
+    role = getattr(args, "role", None)
+    envrc_just_created = False
+    if role and project_root:
+        envrc_target, envrc_just_created = _copy_envrc_template(role, project_root)
+        if envrc_just_created:
+            print(f"relay init: created {envrc_target} (from envrc.{role}.example)")
+        else:
+            print(f"relay init: {envrc_target} already present")
+
+    if project_root and not role:
+        # Only nag when there's no .envrc.<hostname> yet
+        hostname = _hostname_short()
+        if not (project_root / f".envrc.{hostname}").exists():
+            print(f"\nhint: .envrc.{hostname} not found.")
+            print(f"  run `relay init --role host` or `relay init --role remote` to copy the template.")
+
+    if envrc_just_created and project_root:
+        has_direnv = shutil.which("direnv") is not None
+        print()
+        if has_direnv:
+            print(f"next: cd {project_root} && direnv allow")
+        else:
+            print(f"next: cd {project_root} && source .envrc")
+            print("  (install direnv for auto-load on cd)")
+
     return 0
 
 
@@ -883,7 +936,7 @@ def cmd_bootstrap(args) -> int:
         print(f"relay bootstrap: derived project {proj!r} not a valid slug", file=sys.stderr)
         return 2
 
-    _ensure_shared_root(env)
+    _ensure_shared_root(env.shared_root)
 
     date_prefix = datetime.now().strftime("%Y%m%d")
     session_slug = f"{date_prefix}-{args.topic}"
@@ -1479,6 +1532,8 @@ def build_parser() -> argparse.ArgumentParser:
     pp.set_defaults(func=cmd_preflight)
 
     pi = sub.add_parser("init", help="Idempotently create RELAY_SHARED_ROOT + sentinel.")
+    pi.add_argument("--role", choices=["host", "remote"], default=None,
+                    help="Also copy envrc.<role>.example to .envrc.<hostname> if absent.")
     pi.set_defaults(func=cmd_init)
 
     pb = sub.add_parser("bootstrap", help="Create a new session under .shared/.")
