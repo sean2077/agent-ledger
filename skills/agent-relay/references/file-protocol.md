@@ -1,8 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.3.0 (2026-05-27).
-> Derived from plan v3 §1 (`~/.claude/plans/misty-gliding-muffin.md`) +
-> r6/decision.md (9 patches absorbed) + r7/decision.md (terminal-state correction).
+> Source spec for the `relay` CLI implementation. v0.3.0.
 
 ## 1. Directory layout
 
@@ -74,17 +72,17 @@ Drafts have no sidecars.
 
 | field | type | required | notes |
 |---|---|---|---|
-| `schema_version` | int | yes | bump on breaking changes; v0.3.0 = `3` |
+| `schema_version` | int | yes | currently `3`; bump on breaking changes |
 | `project` | str | yes | project slug for audit/display only; not a path component |
 | `session_id` | str | yes | session-slug |
 | `title` | str | yes | human description |
-| `state` | enum | yes | **only `"active"` or `"closed"`** — no `abandoned`/etc. |
+| `state` | enum | yes | `"active"` or `"closed"` |
 | `created_at` | ISO 8601 | yes | bootstrap time |
 | `closed_at` | ISO 8601 \| null | yes | null while active; filled by `relay close` |
 | `close_reason` | str \| null | yes | null while active; free-form by `relay close --reason` |
 | `participants` | str[] | yes | agent identities expected to write in this session |
 
-No `rounds[]`, no `targets[]`, no `events[]` (that was r5 awb's overhead; r7 simplification). Per-file frontmatter (§4) is the round structure.
+Per-file frontmatter (§4) carries the round structure; `session.json` itself stays minimal.
 
 ## 4. Per-file frontmatter
 
@@ -150,7 +148,7 @@ Free-form short ASCII, but the well-known values are:
 | `failed` | publish validation failed; or peer flagged content as broken | **terminal** | ✓ |
 | `timed_out` | long elapsed time without peer response | **terminal** | ✓ |
 
-**All four terminal statuses (`closed`/`cancelled`/`failed`/`timed_out`) signal that THIS artifact no longer requires peer response.** This closes the ghost-peer loophole flagged in GPT r4 review.
+**All four terminal statuses (`closed`/`cancelled`/`failed`/`timed_out`) signal that THIS artifact no longer requires peer response.**
 
 ## 5. Session-active rule (CLI must hard-code this)
 
@@ -202,10 +200,6 @@ The new file references the old via `corrects`. Both files remain on disk. Reade
 ### 6.2 Status transition via new artifact
 
 If you need to mark something as closed/cancelled/failed/timed_out, write a *new* artifact (often `kind: decision` or `kind: note`) declaring that fact. Don't edit the original.
-
-### 6.3 supersede (v1.1, not v1)
-
-Deferred. v1 cannot move already-published files. If a published file is truly broken, use correction.
 
 ## 7. Concurrency
 

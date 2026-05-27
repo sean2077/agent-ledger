@@ -39,7 +39,6 @@ SCHEMA_VERSION = 3
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
 STATUSES = {"draft", "ready", "closed", "cancelled", "failed", "timed_out"}
 TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
-SESSION_STATES = {"active", "closed"}
 PLACEHOLDER_MARKER = "TODO:"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 NON_BLOCKING_PREFLIGHT_WARNS = {"fs.mtime_monotonic"}
@@ -286,21 +285,13 @@ class Env:
     remote_path: Optional[str]
 
 
-_DEFAULT_PEER = {"codex": "claude", "claude": "codex", "host": "claude", "remote": "codex"}
-
-
 def load_env() -> Env:
-    role = os.environ.get("RELAY_ROLE") or None
-    author = os.environ.get("RELAY_AUTHOR") or role
-    peer = os.environ.get("RELAY_PEER")
-    if not peer and author:
-        peer = _DEFAULT_PEER.get(author)
     shared = os.environ.get("RELAY_SHARED_ROOT")
     shared_path = Path(shared).expanduser().resolve() if shared else None
     return Env(
-        role=role,
-        author=author,
-        peer=peer,
+        role=os.environ.get("RELAY_ROLE") or None,
+        author=os.environ.get("RELAY_AUTHOR") or None,
+        peer=os.environ.get("RELAY_PEER") or None,
         shared_root=shared_path,
         project=os.environ.get("RELAY_PROJECT") or None,
         remote_ssh=os.environ.get("RELAY_REMOTE_SSH") or None,
@@ -457,15 +448,6 @@ def session_root(env: Env) -> Path:
     if not env.shared_root:
         raise SystemExit("RELAY_SHARED_ROOT not set")
     return env.shared_root
-
-
-def project_dir(env: Env, project: str | None = None) -> Path:
-    """Return the legacy v2 project directory for migration-only callers."""
-    root = session_root(env)
-    proj = project or derive_project(env)
-    if not proj:
-        raise SystemExit("cannot determine project (set RELAY_PROJECT or run in a git repo)")
-    return root / proj
 
 
 def active_marker_path(root: Path) -> Path:
@@ -628,17 +610,12 @@ def session_is_active(session: Path) -> bool:
     return True
 
 
-def latest_artifact(session: Path) -> Path | None:
-    pub = list_published(session)
-    return pub[-1] if pub else None
-
-
 def latest_artifact_frontmatter(session: Path) -> dict | None:
-    latest = latest_artifact(session)
-    if not latest:
+    pub = list_published(session)
+    if not pub:
         return None
     try:
-        fm, _ = parse_frontmatter(latest.read_text(encoding="utf-8"))
+        fm, _ = parse_frontmatter(pub[-1].read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return fm
