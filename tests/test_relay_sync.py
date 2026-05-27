@@ -103,6 +103,26 @@ def test_sync_default_banner_escalates_with_negation_rules(monkeypatch, tmp_path
     assert "STRONGLY recommend" in err
 
 
+def test_sync_pull_strict_gitignore_refused(monkeypatch, tmp_path, capsys):
+    """Bug fix MAJOR #4: strict pull would use LOCAL git ls-files for a REMOTE-
+    sourced rsync, missing files only on the remote. v1 refuses; v1.1 may add
+    remote-side ls-files via ssh."""
+    repo = _setup(monkeypatch, tmp_path)
+    (repo / "a.py").write_text("x")
+    subprocess.run(["git", "-C", str(repo), "add", "a.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "commit", "-q", "-m", "i"], check=True)
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
+    captured = _mock_rsync(monkeypatch)
+    rc = relay.cmd_sync(_args(direction="pull", strict_gitignore=True))
+    assert rc == 2
+    err = capsys.readouterr().err
+    # we want a clear signal that this isn't supported in v1
+    assert "strict" in err.lower() and "pull" in err.lower()
+    # rsync should NOT have been invoked
+    assert captured == []
+
+
 def test_sync_strict_uses_git_ls_files(monkeypatch, tmp_path, capsys):
     repo = _setup(monkeypatch, tmp_path)
     (repo / "a.py").write_text("x")

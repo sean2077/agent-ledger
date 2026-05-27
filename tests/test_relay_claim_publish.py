@@ -131,6 +131,85 @@ def test_publish_with_status_override(monkeypatch, tmp_path, capsys):
     assert fm["status"] == "closed"
 
 
+def test_list_published_rejects_tampered_sha256(monkeypatch, tmp_path, capsys):
+    """Bug fix MAJOR #2: a .md whose content no longer matches its .sha256 sidecar
+    must not appear in list_published() — silent tampering breaks append-only trust."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    # publish one good artifact
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+    relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
+    capsys.readouterr()
+    pub = next(session.glob("001-codex-plan.md"))
+    # tamper: edit the published md AFTER its sha256 was written
+    pub.write_text(pub.read_text() + "\nsneaky tamper line\n")
+    listed = relay.list_published(session)
+    assert pub not in listed, f"tampered artifact must not be returned: {listed}"
+
+
+def test_list_published_accepts_intact(monkeypatch, tmp_path, capsys):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+    relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
+    listed = relay.list_published(session)
+    assert len(listed) == 1
+
+
+def test_publish_rejects_seq_mismatch(monkeypatch, tmp_path, capsys):
+    """Bug fix MAJOR #3: frontmatter seq must match filename NNN prefix."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    # filename is 001-codex-plan.md; tamper frontmatter seq
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    fm["seq"] = 99
+    fm["prompt_for_next"] = "real instructions\n"
+    draft.write_text(relay.dump_frontmatter(fm, "\nbody.\n"))
+    rc = relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "seq" in err.lower() and ("mismatch" in err.lower() or "filename" in err.lower())
+    assert draft.exists()  # preserved
+
+
+def test_publish_rejects_author_mismatch(monkeypatch, tmp_path, capsys):
+    """Bug fix MAJOR #3: frontmatter author must match filename."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    fm["author"] = "imposter"
+    fm["prompt_for_next"] = "real instructions\n"
+    draft.write_text(relay.dump_frontmatter(fm, "\nbody.\n"))
+    rc = relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "author" in err.lower()
+
+
+def test_publish_rejects_kind_mismatch(monkeypatch, tmp_path, capsys):
+    """Bug fix MAJOR #3: frontmatter kind must match filename."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    fm["kind"] = "review"
+    fm["prompt_for_next"] = "real instructions\n"
+    draft.write_text(relay.dump_frontmatter(fm, "\nbody.\n"))
+    rc = relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "kind" in err.lower()
+
+
 def test_publish_refuses_non_draft_path(monkeypatch, tmp_path, capsys):
     session = _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()

@@ -470,14 +470,12 @@ def resolve_active_session(env: Env, project: str | None = None) -> Path:
     for sd in sorted(pd.iterdir()):
         if not sd.is_dir() or sd.name.startswith("."):
             continue
-        sj = sd / "session.json"
-        if not sj.exists():
+        if not (sd / "session.json").exists():
             continue
-        try:
-            data = json.loads(sj.read_text())
-        except json.JSONDecodeError:
-            continue
-        if data.get("state") == "active":
+        # session_is_active() honors state, CLOSED sentinel, AND latest
+        # artifact status (so a stale-active session with a terminal latest
+        # artifact is excluded). Avoids spurious "multiple active sessions".
+        if session_is_active(sd):
             candidates.append(sd)
     if not candidates:
         raise SystemExit(f"no active session under {pd}")
@@ -488,15 +486,27 @@ def resolve_active_session(env: Env, project: str | None = None) -> Path:
 
 
 def list_published(session: Path) -> list[Path]:
+    """Return published artifacts whose sidecars are present AND sha256 matches.
+
+    Sidecar mere existence is not enough — a stale `.sha256` after post-publish
+    tampering would otherwise silently pass consumers. We re-hash the .md and
+    compare against the sidecar's first field (sha256sum format: '<hex>  <name>').
+    """
     out: list[Path] = []
     for f in sorted(session.glob("[0-9][0-9][0-9]-*.md")):
-        ready = session / f"{f.stem.split('-')[0]}-{'-'.join(f.stem.split('-')[1:])}.ready"
-        ready = session / f"{f.name[:-3]}.ready" if False else session / (f.stem + ".ready")
-        # actually: NNN-author-kind.ready (no .md)
-        ready_path = session / (f.name.rsplit(".md", 1)[0] + ".ready")
+        base = f.name[:-3]  # drop .md → NNN-author-kind
+        ready_path = session / f"{base}.ready"
         sha_path = session / f"{f.name}.sha256"
-        if ready_path.exists() and sha_path.exists():
-            out.append(f)
+        if not (ready_path.exists() and sha_path.exists()):
+            continue
+        try:
+            expected = sha_path.read_text().split()[0].strip()
+            actual = sha256_of_file(f)
+        except (OSError, IndexError):
+            continue
+        if expected.lower() != actual.lower():
+            continue  # tampered or partial; treat as not published
+        out.append(f)
     return out
 
 
@@ -709,7 +719,10 @@ def cmd_bootstrap(args) -> int:
         print(f"relay bootstrap: session dir already exists: {session_dir}", file=sys.stderr)
         return 2
 
-    session_dir.mkdir(parents=True)
+    # Explicitly 0700 (file-protocol §12): project/session/.draft all owner-only.
+    proj_dir = env.shared_root / proj
+    proj_dir.mkdir(mode=0o700, exist_ok=True)
+    session_dir.mkdir(mode=0o700)
     (session_dir / ".draft").mkdir(mode=0o700)
 
     participants = []
@@ -908,6 +921,9 @@ def cmd_claim(args) -> int:
     return 2
 
 
+_DRAFT_NAME_RE = re.compile(r"^(\d{3})-([a-z0-9-]+)-([a-z0-9-]+)\.md$")
+
+
 def _validate_draft(draft_path: Path) -> tuple[dict, str]:
     if not draft_path.exists():
         raise ValueError(f"draft not found: {draft_path}")
@@ -932,6 +948,29 @@ def _validate_draft(draft_path: Path) -> tuple[dict, str]:
         raise ValueError("body is empty or whitespace")
     if fm["kind"] not in KINDS:
         raise ValueError(f"unknown kind: {fm['kind']!r}")
+    # filename ↔ frontmatter identity (file-protocol §2/§4): NNN-author-kind.md
+    m = _DRAFT_NAME_RE.match(draft_path.name)
+    if not m:
+        raise ValueError(
+            f"draft filename does not match NNN-author-kind.md pattern: {draft_path.name}"
+        )
+    file_seq, file_author, file_kind = int(m.group(1)), m.group(2), m.group(3)
+    fm_seq = fm.get("seq")
+    if not isinstance(fm_seq, int) or fm_seq != file_seq:
+        raise ValueError(
+            f"frontmatter/filename seq mismatch: filename={file_seq:03d} "
+            f"frontmatter={fm_seq!r}"
+        )
+    if fm.get("author") != file_author:
+        raise ValueError(
+            f"frontmatter/filename author mismatch: filename={file_author!r} "
+            f"frontmatter={fm.get('author')!r}"
+        )
+    if fm.get("kind") != file_kind:
+        raise ValueError(
+            f"frontmatter/filename kind mismatch: filename={file_kind!r} "
+            f"frontmatter={fm.get('kind')!r}"
+        )
     return fm, body
 
 
@@ -978,7 +1017,24 @@ def cmd_publish(args) -> int:
 
 def cmd_close(args) -> int:
     env = load_env()
-    session = resolve_active_session(env, args.project)
+    try:
+        session = resolve_active_session(env, args.project)
+    except SystemExit:
+        # Surface "already closed" instead of the generic "no active session"
+        # when a session in the project already has a CLOSED sentinel.
+        try:
+            pd = project_dir(env, args.project)
+        except SystemExit:
+            raise
+        if pd.is_dir():
+            for sd in sorted(pd.iterdir()):
+                if sd.is_dir() and (sd / "CLOSED").exists():
+                    print(
+                        f"relay close: already closed (sentinel at {sd / 'CLOSED'})",
+                        file=sys.stderr,
+                    )
+                    return 2
+        raise
     sentinel = session / "CLOSED"
     if sentinel.exists():
         print(f"relay close: already closed (sentinel exists at {sentinel})", file=sys.stderr)
@@ -1061,8 +1117,21 @@ def cmd_sync(args) -> int:
     if args.delete:
         rsync_cmd.append("--delete")
 
+    if args.strict_gitignore and direction == "pull":
+        # v1 only builds the file list from LOCAL git ls-files, which on pull
+        # misses remote-only files — exactly what pull must recover. Rather
+        # than silently lose data, refuse. v1.1 backlog: run ls-files on the
+        # remote via ssh in $RELAY_REMOTE_PATH for honest strict pull.
+        print(
+            "relay sync: --strict-gitignore is not supported for pull in v1 "
+            "(would use LOCAL file list and miss remote-only files). Use the "
+            "default mode `relay sync pull` instead, or wait for v1.1.",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.strict_gitignore:
-        # build file list via git
+        # build file list via git (push only — local is the source of truth)
         files_list = subprocess.run(
             ["git", "-C", str(project_root), "ls-files", "--cached", "--others",
              "--exclude-standard", "-z"],
