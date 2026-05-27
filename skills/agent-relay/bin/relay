@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -815,6 +815,56 @@ def cmd_preflight(args) -> int:
     return out["exit_code"]
 
 
+def _ensure_shared_root(env: Env) -> tuple[list[str], list[str]]:
+    """Idempotently create RELAY_SHARED_ROOT + _relay/.sentinel. Returns (created, existed)."""
+    root = env.shared_root
+    created: list[str] = []
+    existed: list[str] = []
+
+    if not root.exists():
+        root.mkdir(mode=0o700, parents=True)
+        created.append(str(root))
+    else:
+        existed.append(str(root))
+
+    relay_meta = root / "_relay"
+    if not relay_meta.exists():
+        relay_meta.mkdir(mode=0o700)
+        created.append(str(relay_meta))
+    else:
+        existed.append(str(relay_meta))
+
+    sentinel = relay_meta / ".sentinel"
+    if not sentinel.exists():
+        atomic_write_text(sentinel, f"relay mount sentinel\ncreated_at: {now_iso()}\n", mode=0o644)
+        created.append(str(sentinel))
+    else:
+        existed.append(str(sentinel))
+
+    return created, existed
+
+
+def cmd_init(args) -> int:
+    env = load_env()
+    if not env.shared_root:
+        print("relay init: RELAY_SHARED_ROOT not set", file=sys.stderr)
+        return 2
+
+    created, existed = _ensure_shared_root(env)
+
+    if created:
+        print("relay init: created:")
+        for p in created:
+            print(f"  {p}")
+    if existed and not created:
+        print(f"relay init: already initialized at {env.shared_root}")
+    elif existed:
+        print("relay init: already present:")
+        for p in existed:
+            print(f"  {p}")
+    return 0
+
+
 def cmd_bootstrap(args) -> int:
     env = load_env()
     if not env.shared_root:
@@ -833,12 +883,7 @@ def cmd_bootstrap(args) -> int:
         print(f"relay bootstrap: derived project {proj!r} not a valid slug", file=sys.stderr)
         return 2
 
-    # ensure mount sentinel
-    relay_meta = env.shared_root / "_relay"
-    relay_meta.mkdir(parents=True, exist_ok=True)
-    sentinel = relay_meta / ".sentinel"
-    if not sentinel.exists():
-        atomic_write_text(sentinel, f"relay mount sentinel\ncreated_at: {now_iso()}\n", mode=0o644)
+    _ensure_shared_root(env)
 
     date_prefix = datetime.now().strftime("%Y%m%d")
     session_slug = f"{date_prefix}-{args.topic}"
@@ -1432,6 +1477,9 @@ def build_parser() -> argparse.ArgumentParser:
     pp = sub.add_parser("preflight", help="Check env, mount, project, FS probes.")
     pp.add_argument("--json", action="store_true")
     pp.set_defaults(func=cmd_preflight)
+
+    pi = sub.add_parser("init", help="Idempotently create RELAY_SHARED_ROOT + sentinel.")
+    pi.set_defaults(func=cmd_init)
 
     pb = sub.add_parser("bootstrap", help="Create a new session under .shared/.")
     pb.add_argument("--topic", required=True, help="Session topic slug.")

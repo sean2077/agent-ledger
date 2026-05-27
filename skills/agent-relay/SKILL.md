@@ -31,15 +31,18 @@ done
 export RELAY
 ```
 
-## Critical: every turn starts with preflight
+## Critical: every turn starts with init + preflight
 
 Before any other action:
 
 ```bash
+"$RELAY" init        # idempotent: creates RELAY_SHARED_ROOT + _relay/.sentinel if missing
 "$RELAY" preflight
 ```
 
-Interpret the exit code as three levels:
+`init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. It needs only `RELAY_SHARED_ROOT` set; if the env vars aren't sourced yet, `init` itself fails clearly.
+
+Interpret the preflight exit code as three levels:
 
 | exit | meaning | what to do |
 |---|---|---|
@@ -52,7 +55,7 @@ Interpret the exit code as three levels:
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
-`fail` examples that MUST block: missing env vars, missing `.shared/_relay/.sentinel` (mount dead), `project.consistency` mismatch, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable).
+`fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which `init` handles), `project.consistency` mismatch, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken.
 
 ## Decide intent from user input
 
@@ -216,7 +219,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 
 ## When things go wrong
 
-- **`relay preflight` fails `mount.sentinel`**: the sshfs mount is broken or you're running outside a relay-bootstrapped project. Tell user; do not write.
+- **`relay preflight` fails `mount.sentinel` after `init` ran clean**: the sshfs mount is broken or `RELAY_SHARED_ROOT` points somewhere `init` can't write. Tell user; do not write further.
 - **`relay preflight` fails `project.consistency`**: `$RELAY_PROJECT` env var doesn't match the git toplevel. Tell user the two values; ask which is correct.
 - **`relay status` reports `multiple active sessions`**: use `relay sessions list`, then rerun the intended command with `--session-id <session-id>` or repair the state before claiming.
 - **`relay publish` rejects with "prompt_for_next still contains placeholder"**: you forgot to replace the `TODO: ...` line. Edit the draft and retry.
