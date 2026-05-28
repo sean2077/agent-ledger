@@ -1,0 +1,494 @@
+"""Tests for skills/agent-relay/hooks/relay-hook.py — cross-platform hook
+dispatcher. Covers the 13 scenarios specified in the v2 plan
+(`.shared/20260529-hook-layer-design/003-claude-plan.md`) plus installer
+merge byte-stability.
+
+The hook script is exercised via subprocess (it's the same shape the host
+runs). The relay CLI is reused by setting RELAY_BIN.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+import relay
+
+
+HOOK_SCRIPT = (
+    Path(__file__).resolve().parent.parent
+    / "skills" / "agent-relay" / "hooks" / "relay-hook.py"
+)
+RELAY_BIN = (
+    Path(__file__).resolve().parent.parent
+    / "skills" / "agent-relay" / "bin" / "relay"
+)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def _new_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "myproj"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    return repo
+
+
+def _bootstrap_relay_project(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Create a real relay project with sentinel + active session."""
+    repo = _new_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_SYNC", "none")
+    monkeypatch.setenv("RELAY_AUTHOR", "claude")
+    monkeypatch.setenv("RELAY_PEER", "codex")
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
+    relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
+    session = relay.resolve_active_session(relay.load_env())
+    return repo, session
+
+
+def _run_hook(stdin_json: dict, env_overrides: dict | None = None,
+              cwd: Path | None = None) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["RELAY_BIN"] = str(RELAY_BIN)
+    if env_overrides:
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+    r = subprocess.run(
+        ["python3", str(HOOK_SCRIPT)],
+        input=json.dumps(stdin_json),
+        capture_output=True, text=True, env=env, timeout=10,
+        cwd=str(cwd) if cwd else None,
+    )
+    return r
+
+
+def _claude_stop(cwd: Path, **extra) -> dict:
+    return {
+        "session_id": "test",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": str(cwd),
+        "permission_mode": "default",
+        "effort": {"level": "high"},
+        "hook_event_name": "Stop",
+        **extra,
+    }
+
+
+def _codex_stop(cwd: Path, **extra) -> dict:
+    return {
+        "session_id": "test",
+        "transcript_path": None,
+        "cwd": str(cwd),
+        "hook_event_name": "Stop",
+        "model": "codex",
+        "permission_mode": "default",
+        "turn_id": "t1",
+        "stop_hook_active": False,
+        "last_assistant_message": "last text",
+        **extra,
+    }
+
+
+def _claude_pretool(cwd: Path, tool_name: str, tool_input: dict) -> dict:
+    return {
+        "session_id": "test",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": str(cwd),
+        "permission_mode": "default",
+        "effort": {"level": "high"},
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+    }
+
+
+def _codex_pretool(cwd: Path, tool_name: str, tool_input: dict) -> dict:
+    return {
+        "session_id": "test",
+        "transcript_path": None,
+        "cwd": str(cwd),
+        "hook_event_name": "PreToolUse",
+        "model": "codex",
+        "permission_mode": "default",
+        "turn_id": "t1",
+        "tool_name": tool_name,
+        "tool_use_id": "u1",
+        "tool_input": tool_input,
+    }
+
+
+def _claude_session_start(cwd: Path) -> dict:
+    return {
+        "session_id": "test",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": str(cwd),
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "model": "claude",
+    }
+
+
+def _publish_artifact(session: Path, seq: int, author: str, peer: str,
+                      kind: str, env) -> Path:
+    """Create + publish an artifact via the real relay CLI (test the real path)."""
+    # Use the test relay module directly
+    args = type("A", (), {
+        "kind": kind, "in_reply_to": None, "project": None, "session_id": None,
+    })()
+    # we want author=<author>, swap env
+    os.environ["RELAY_AUTHOR"] = author
+    os.environ["RELAY_PEER"] = peer
+    relay.cmd_claim(args)
+    # Find the new draft
+    drafts = sorted((session / ".draft").glob(f"*-{author}-{kind}.md"))
+    draft = drafts[-1]
+    # Fill body with valid content
+    text = draft.read_text()
+    text = text.replace("TODO: write actionable instructions for the peer",
+                        "do the thing")
+    text = text.replace(
+        "<!-- write your substantive content here. delete this comment. -->",
+        "real body here",
+    )
+    draft.write_text(text)
+    pub_args = type("A", (), {
+        "draft_path": str(draft),
+        "status": None,
+        "force": False,
+        "force_reason": None,
+    })()
+    relay.cmd_publish(pub_args)
+    return session / draft.name
+
+
+# ---------------------------------------------------------------------------
+# 1-3. fast-path skip
+# ---------------------------------------------------------------------------
+
+def test_01_fastpath_no_sentinel_no_shared(monkeypatch, tmp_path):
+    """No .shared/, no sentinel, no env — silent skip."""
+    monkeypatch.chdir(tmp_path)
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    payload = _claude_session_start(tmp_path)
+    r = _run_hook(payload, env_overrides={"RELAY_SHARED_ROOT": None,
+                                          "RELAY_AUTHOR": None,
+                                          "RELAY_PEER": None})
+    assert r.returncode == 0
+    assert r.stdout == "", f"expected silent, got: {r.stdout!r}"
+
+
+def test_02_fastpath_shared_exists_no_sentinel(monkeypatch, tmp_path):
+    """.shared/ exists but no _relay/.sentinel — must still skip (codex fix)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".shared").mkdir()  # no _relay subdir
+    payload = _claude_session_start(tmp_path)
+    r = _run_hook(payload, env_overrides={"RELAY_SHARED_ROOT": None,
+                                          "RELAY_AUTHOR": None})
+    assert r.returncode == 0
+    assert r.stdout == ""
+
+
+def test_03_fastpath_RELAY_AUTHOR_set_but_no_sentinel(monkeypatch, tmp_path):
+    """RELAY_AUTHOR exported but no sentinel — must skip (codex fix)."""
+    monkeypatch.chdir(tmp_path)
+    payload = _claude_session_start(tmp_path)
+    r = _run_hook(payload, env_overrides={"RELAY_AUTHOR": "claude",
+                                          "RELAY_SHARED_ROOT": None})
+    assert r.returncode == 0
+    assert r.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# 4. SessionStart in relay project — silent OK + trail log line
+# ---------------------------------------------------------------------------
+
+def test_04_session_start_relay_project_silent_with_log(monkeypatch, tmp_path):
+    repo, _session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    payload = _claude_session_start(repo)
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    assert r.stdout == ""  # clean session => no surface
+    trail = repo / ".shared" / "_relay" / "hook-trail.log"
+    assert trail.exists(), "expected trail log written"
+    last = trail.read_text().strip().splitlines()[-1]
+    j = json.loads(last)
+    assert j["event"] == "SessionStart"
+    assert j["decision"] in ("ok", "doctor-failed", "no-relay-cli")
+
+
+# ---------------------------------------------------------------------------
+# 5-6. PreToolUse Edit on Claude
+# ---------------------------------------------------------------------------
+
+def test_05_pretool_edit_ready_artifact_denied(monkeypatch, tmp_path):
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    pub = _publish_artifact(session, 1, "claude", "codex", "plan", os.environ)
+    payload = _claude_pretool(repo, "Edit", {"file_path": str(pub)})
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert "hookSpecificOutput" in out
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "deny"
+    assert "append-only" in hso["permissionDecisionReason"]
+    # Critical: must NOT use continue: false (codex fix #1)
+    assert "continue" not in out, f"continue must be absent on Codex; got {out}"
+
+
+def test_06_pretool_edit_draft_allowed(monkeypatch, tmp_path):
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    draft = draft_dir / "001-claude-plan.md"
+    draft.write_text("---\nseq: 1\n---\nbody\n")
+    payload = _claude_pretool(repo, "Edit", {"file_path": str(draft)})
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    assert r.stdout == "", f"draft edit should be silent; got {r.stdout!r}"
+
+
+# ---------------------------------------------------------------------------
+# 7-10. PreToolUse on Codex (apply_patch)
+# ---------------------------------------------------------------------------
+
+def test_07_pretool_apply_patch_update_file_denied(monkeypatch, tmp_path):
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    pub = _publish_artifact(session, 1, "claude", "codex", "plan", os.environ)
+    rel = pub.relative_to(repo)
+    patch = f"""*** Begin Patch
+*** Update File: {rel}
+@@
+-old
++new
+*** End Patch
+"""
+    payload = _codex_pretool(repo, "apply_patch", {"command": patch})
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_08_pretool_apply_patch_move_to_dest_ready_denied(monkeypatch, tmp_path):
+    """Codex review fix: Move to: <dest> must be parsed and canonicalized."""
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    pub = _publish_artifact(session, 1, "claude", "codex", "plan", os.environ)
+    rel = pub.relative_to(repo)
+    patch = f"""*** Begin Patch
+*** Update File: some-other.md
+*** Move to: {rel}
+@@
+-x
++y
+*** End Patch
+"""
+    payload = _codex_pretool(repo, "apply_patch", {"command": patch})
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_09_pretool_path_canonicalization_dotslash(monkeypatch, tmp_path):
+    """Codex review fix: ./relative/path canonicalized vs string prefix."""
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    pub = _publish_artifact(session, 1, "claude", "codex", "plan", os.environ)
+    rel = pub.relative_to(repo)
+    payload = _claude_pretool(repo, "Edit", {"file_path": f"./{rel}"})
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_10_pretool_codex_deny_shape_no_continue_false(monkeypatch, tmp_path):
+    """Codex fix #1: deny shape never includes continue: false."""
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    pub = _publish_artifact(session, 1, "claude", "codex", "plan", os.environ)
+    rel = pub.relative_to(repo)
+    patch = f"*** Begin Patch\n*** Delete File: {rel}\n*** End Patch\n"
+    payload = _codex_pretool(repo, "apply_patch", {"command": patch})
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    out = json.loads(r.stdout)
+    assert "continue" not in out
+    assert "stopReason" not in out
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# 11. Stop addressed-to-me peer artifact → decision: block
+# ---------------------------------------------------------------------------
+
+def test_11_stop_peer_addressed_to_me_blocks(monkeypatch, tmp_path):
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    # codex publishes artifact addressed to claude (me)
+    _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
+    os.environ["RELAY_AUTHOR"] = "claude"  # restore me
+    payload = _claude_stop(repo)
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["decision"] == "block"
+    assert "[relay-state]" in out["reason"]
+    assert "addressed=me" in out["reason"]
+    # codex review seq 6: must NOT include continue/stopReason — Codex says
+    # continue: false would override decision: block.
+    assert "continue" not in out, f"Stop block must not carry continue; got {out}"
+    assert "stopReason" not in out
+
+
+def test_11b_stop_draft_block_shape_clean(monkeypatch, tmp_path):
+    """Stop block-draft variant must also avoid continue/stopReason."""
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    # I'm claude; create a draft for me but no peer publish addressed to me
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    (draft_dir / "001-claude-plan.md").write_text("---\nseq: 1\n---\nbody\n")
+    os.environ["RELAY_AUTHOR"] = "claude"
+    payload = _claude_stop(repo)
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["decision"] == "block"
+    assert "unpublished draft" in out["reason"]
+    assert "continue" not in out
+    assert "stopReason" not in out
+
+
+# ---------------------------------------------------------------------------
+# 12. Stop dedup — second call same fingerprint → silent
+# ---------------------------------------------------------------------------
+
+def test_12_stop_dedup_silent_on_unchanged_fingerprint(monkeypatch, tmp_path):
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
+    os.environ["RELAY_AUTHOR"] = "claude"
+    payload = _claude_stop(repo)
+    overrides = {
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    }
+    r1 = _run_hook(payload, env_overrides=overrides)
+    assert r1.returncode == 0
+    assert json.loads(r1.stdout)["decision"] == "block"  # first time surfaces
+
+    r2 = _run_hook(payload, env_overrides=overrides)
+    assert r2.returncode == 0
+    assert r2.stdout == "", "second call must dedup silently"
+
+
+# ---------------------------------------------------------------------------
+# 13. stop_hook_active=true → never block again
+# ---------------------------------------------------------------------------
+
+def test_13_stop_hook_active_skip_no_block(monkeypatch, tmp_path):
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
+    os.environ["RELAY_AUTHOR"] = "claude"
+    # Both shapes
+    overrides = {
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    }
+    for payload in (
+        _claude_stop(repo, stop_hook_active=True),
+        _codex_stop(repo, stop_hook_active=True),
+    ):
+        r = _run_hook(payload, env_overrides=overrides)
+        assert r.returncode == 0
+        assert r.stdout == "", f"stop_hook_active must skip; got {r.stdout!r}"
+
+
+# ---------------------------------------------------------------------------
+# Installer merge: append-after preserves existing entries byte-for-byte
+# ---------------------------------------------------------------------------
+
+def test_installer_appends_after_preserving_existing(monkeypatch, tmp_path):
+    """codex review test #12 — existing oh-my-codex-style entry stays intact."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    (fake_home / ".codex").mkdir()
+    cfg = fake_home / ".codex" / "hooks.json"
+    existing = {
+        "state": {
+            "/some/path/hooks.json:pre_tool_use:0:0": {"trusted_hash": "sha256:abc"},
+        },
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": "/usr/bin/dispatcher"}],
+                }
+            ],
+        },
+    }
+    cfg.write_text(json.dumps(existing, indent=2))
+    before_bytes = cfg.read_bytes()
+
+    args = type("A", (), {"target": "codex", "dry_run": False})()
+    relay.cmd_hooks_install(args)
+
+    after = json.loads(cfg.read_text())
+    pre = after["hooks"]["PreToolUse"]
+    assert len(pre) == 2, "expected existing + appended"
+    assert pre[0]["matcher"] == "Bash", "existing entry must be index 0"
+    assert pre[0]["hooks"][0]["command"] == "/usr/bin/dispatcher"
+    assert pre[1].get("_agent_relay_managed") is True
+    # State map preserved
+    assert "state" in after
+    assert after["state"]["/some/path/hooks.json:pre_tool_use:0:0"]["trusted_hash"] == "sha256:abc"
+
+    # Uninstall removes only managed
+    rm_args = type("A", (), {"target": "codex", "dry_run": False})()
+    relay.cmd_hooks_uninstall(rm_args)
+    after_rm = json.loads(cfg.read_text())
+    pre_rm = after_rm["hooks"]["PreToolUse"]
+    assert len(pre_rm) == 1
+    assert pre_rm[0]["matcher"] == "Bash"

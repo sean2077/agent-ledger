@@ -14,6 +14,30 @@ The two sides may live on the same machine (two terminals, `RELAY_SYNC=none`) or
 
 The `relay` CLI does mechanical operations (atomic writes, sequence numbers, validation, rsync). **You** do everything that requires judgment: read peer's last message, decide what to do, write substantive content and clear instructions for the peer.
 
+## Hooks (optional autopilot — Claude Code + Codex CLI)
+
+If the user has run `relay hooks install --target both`, three hooks fire automatically on each host:
+
+- **SessionStart** — early hint + stale-state doctor (does **not** replace `init+preflight`; that stays required every turn).
+- **PreToolUse** — denies `Edit / Write / MultiEdit / apply_patch` aimed at any `.ready` artifact under `.shared/<session>/`. This enforces **hard rule 1** as a real guardrail on both platforms via `hookSpecificOutput.permissionDecision: "deny"`.
+- **Stop** — non-blocking peer-status surface. If peer published an artifact addressed to you, or you have an unpublished draft, the hook returns `decision: "block"` with a structured `[relay-state]` / `[relay-action]` reason so you continue without burning a user turn. Otherwise it exits silently. Deduplicates via `.shared/_relay/hook-state/<host>.json`.
+
+How to tell whether hooks are active:
+
+- `relay hooks status` lists managed entries per target and the last 10 lines of `.shared/_relay/hook-trail.log`.
+- `relay hooks doctor` verifies dispatcher + config wiring + Codex trust hint.
+- Every hook decision appends a JSON line to `.shared/_relay/hook-trail.log`. Users can `tail -f` it to watch agent activity at the protocol layer.
+
+Behaviour when hooks are **not** installed: nothing in this skill changes — the manual flow below is fully sufficient. The hooks are purely additive autopilot.
+
+Token prefixes the hooks emit (parse on sight; do not re-run `relay status`):
+
+- `[relay-state] ...` — current ledger snapshot (latest seq / kind / addressed / draft).
+- `[relay-action] ...` — the single next thing to do (e.g. read this file, publish that draft).
+- `[relay-hint] ...` — informational warning (e.g. stale state findings).
+
+Codex trust note: on the Codex side each new hook entry requires a one-time `/hooks` trust step. Existing third-party hooks (oh-my-codex etc.) keep their position because the installer appends after them.
+
 ## Resolve `relay` once per turn
 
 `relay` may not be on `$PATH`. Walk this chain at the start of each turn (project-local wins over global) and use `"$RELAY"` everywhere below:
@@ -137,6 +161,8 @@ This is the core 95% case. Take one full turn in the relay.
 
     **Hard rule**: do NOT decide "this isn't important enough to surface." If a `kind: question` benefits from user attention, encode `@user:` in the prompt body. The round-cap is the catch-all backstop so the loop cannot run forever silently.
 
+    **When hooks are installed**: the Stop hook will auto-continue the turn via `decision: "block"` whenever peer published an artifact addressed to you, so the auto-loop above happens implicitly between turns; you can rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
+
 11. **User gate** (when step 10 chose to surface). Reset the in-memory round counter to 0, then output:
     - One-line summary: what was published, where, sync state.
     - The 2-3 **key open questions** from your `prompt_for_next` — surface them at user-level so they see the decisions without opening the artifact.
@@ -244,7 +270,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 
 ## Hard rules
 
-1. **Never edit a file under `.shared/<session>/` that has a `.ready` sidecar.** Those are append-only published artifacts. Corrections go via `relay claim --kind correction` with the `corrects:` field pointing to the original seq.
+1. **Never edit a file under `.shared/<session>/` that has a `.ready` sidecar.** Those are append-only published artifacts. Corrections go via `relay claim --kind correction` with the `corrects:` field pointing to the original seq. (When hooks are installed the PreToolUse hook enforces this with `permissionDecision: "deny"`; without hooks it remains a soft discipline that depends on you remembering it.)
 2. **Never write `.sha256` or `.ready` sidecars yourself.** `relay publish` does that. If a sidecar is missing on a `.md` you published, something failed — re-run publish or escalate.
 3. **Never ls `.draft/` from peer's side.** Drafts are hidden by convention. `relay status` correctly excludes them.
 4. **Never bypass `relay preflight`.** If it fails, the mount is broken or env is wrong; writing anywhere risks data loss.
@@ -267,3 +293,4 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 
 - `references/file-protocol.md` — full schema for session.json, frontmatter, terminal states, append-only rules, concurrency
 - `references/rsync-recipes.md` — default vs strict-gitignore tradeoffs, shape A vs B, SSH troubleshooting
+- `references/hook-protocol.md` — hook dispatcher spec: event handlers, platform differences (Claude Code vs Codex CLI), JSON I/O shape, fingerprint algorithm, trail log format, `apply_patch` path extraction

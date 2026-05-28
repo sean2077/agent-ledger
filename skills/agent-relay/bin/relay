@@ -2967,6 +2967,222 @@ def _peer_heartbeat_is_stale(session: Path, peer: str, threshold: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# hooks subcommand — install/manage cross-platform hook integration
+# ---------------------------------------------------------------------------
+
+HOOKS_DIR = RELAY_PACKAGE_DIR / "hooks"
+HOOK_SCRIPT = HOOKS_DIR / "relay-hook.py"
+HOOK_FRAGMENT_CLAUDE = HOOKS_DIR / "install-targets" / "claude-settings-fragment.json"
+HOOK_FRAGMENT_CODEX = HOOKS_DIR / "install-targets" / "codex-hooks-fragment.json"
+HOOK_MANAGED_MARKER = "_agent_relay_managed"
+HOOK_EVENTS = ("SessionStart", "PreToolUse", "Stop")
+
+
+def _hooks_target_path(target: str) -> Path:
+    if target == "claude":
+        return Path.home() / ".claude" / "settings.json"
+    if target == "codex":
+        return Path.home() / ".codex" / "hooks.json"
+    raise ValueError(f"unknown hooks target: {target}")
+
+
+def _hooks_load_fragment(target: str) -> dict:
+    path = HOOK_FRAGMENT_CLAUDE if target == "claude" else HOOK_FRAGMENT_CODEX
+    raw = path.read_text(encoding="utf-8")
+    raw = raw.replace("{RELAY_HOOK_PATH}", str(HOOK_SCRIPT))
+    return json.loads(raw)
+
+
+def _hooks_read_config(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"relay hooks: cannot parse {path}: {exc}")
+
+
+def _hooks_strip_managed(config: dict) -> dict:
+    """Return config with all `_agent_relay_managed` entries removed."""
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return config
+    for event, entries in list(hooks.items()):
+        if not isinstance(entries, list):
+            continue
+        kept = [e for e in entries if not (isinstance(e, dict) and e.get(HOOK_MANAGED_MARKER))]
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    if not hooks:
+        config.pop("hooks", None)
+    return config
+
+
+def _hooks_merge(config: dict, fragment: dict) -> tuple[dict, list[str]]:
+    """Append-after merge: managed entries land at the END of each event array.
+
+    Existing entries (oh-my-codex etc.) keep their position and trust key
+    indices. Returns (new_config, summary_lines).
+    """
+    summary: list[str] = []
+    config = _hooks_strip_managed(config)  # idempotent: drop previous-version managed
+    target_hooks = config.setdefault("hooks", {})
+    frag_hooks = fragment.get("hooks", {})
+    for event in HOOK_EVENTS:
+        new_entries = frag_hooks.get(event, [])
+        if not new_entries:
+            continue
+        existing = target_hooks.get(event, [])
+        if not isinstance(existing, list):
+            existing = []
+        merged = existing + new_entries  # append-after
+        target_hooks[event] = merged
+        summary.append(
+            f"  {event}: appended at index {len(existing)} "
+            f"(existing entries: {len(existing)})"
+        )
+    return config, summary
+
+
+def _hooks_atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    atomic_write_text(path, text, mode=0o600)
+
+
+def cmd_hooks_install(args) -> int:
+    if not HOOK_SCRIPT.exists():
+        print(f"relay hooks: dispatcher missing at {HOOK_SCRIPT}", file=sys.stderr)
+        return 2
+    if not os.access(HOOK_SCRIPT, os.X_OK):
+        print(f"relay hooks: dispatcher is not executable: {HOOK_SCRIPT}\n"
+              f"  fix: chmod +x {HOOK_SCRIPT}", file=sys.stderr)
+        return 2
+
+    targets = ["claude", "codex"] if args.target == "both" else [args.target]
+    for target in targets:
+        cfg_path = _hooks_target_path(target)
+        fragment = _hooks_load_fragment(target)
+        existing = _hooks_read_config(cfg_path)
+        merged, summary = _hooks_merge(existing, fragment)
+
+        print(f"target: {target}  ({cfg_path})")
+        if args.dry_run:
+            print("  (dry-run; no changes written)")
+        else:
+            _hooks_atomic_write_json(cfg_path, merged)
+        for line in summary:
+            print(line)
+
+    print()
+    print("Next steps:")
+    print(f"  • dispatcher: {HOOK_SCRIPT}")
+    print("  • Claude Code: hooks take effect at the next session start")
+    if "codex" in targets:
+        print("  • Codex CLI: run `codex`, then `/hooks` and trust the new")
+        print("    `agent-relay` entries (each event needs trust once)")
+    print("  • inspect: `relay hooks status`  /  `relay hooks doctor`")
+    return 0
+
+
+def cmd_hooks_uninstall(args) -> int:
+    targets = ["claude", "codex"] if args.target == "both" else [args.target]
+    for target in targets:
+        cfg_path = _hooks_target_path(target)
+        if not cfg_path.exists():
+            print(f"target: {target}  (no config at {cfg_path}; skipped)")
+            continue
+        cfg = _hooks_read_config(cfg_path)
+        stripped = _hooks_strip_managed(cfg)
+        if args.dry_run:
+            print(f"target: {target}  ({cfg_path})  (dry-run)")
+        else:
+            _hooks_atomic_write_json(cfg_path, stripped)
+            print(f"target: {target}  ({cfg_path})  removed managed entries")
+    return 0
+
+
+def _hooks_count_managed(config: dict) -> dict[str, int]:
+    out: dict[str, int] = {}
+    hooks = config.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return out
+    for event, entries in hooks.items():
+        if not isinstance(entries, list):
+            continue
+        n = sum(1 for e in entries if isinstance(e, dict) and e.get(HOOK_MANAGED_MARKER))
+        if n:
+            out[event] = n
+    return out
+
+
+def cmd_hooks_doctor(args) -> int:
+    findings = 0
+    print(f"relay hooks doctor (dispatcher: {HOOK_SCRIPT})")
+    if not HOOK_SCRIPT.exists():
+        print("  [fail] dispatcher missing"); findings += 1
+    elif not os.access(HOOK_SCRIPT, os.X_OK):
+        print("  [fail] dispatcher not executable"); findings += 1
+    else:
+        print("  [ok]   dispatcher present + executable")
+
+    for target in ("claude", "codex"):
+        cfg_path = _hooks_target_path(target)
+        if not cfg_path.exists():
+            print(f"  [--]   {target}: no config ({cfg_path})")
+            continue
+        cfg = _hooks_read_config(cfg_path)
+        counts = _hooks_count_managed(cfg)
+        if not counts:
+            print(f"  [--]   {target}: no managed entries in {cfg_path}")
+            continue
+        missing = [e for e in HOOK_EVENTS if e not in counts]
+        if missing:
+            print(f"  [warn] {target}: managed entries present but missing events: "
+                  f"{', '.join(missing)}")
+            findings += 1
+        else:
+            print(f"  [ok]   {target}: managed entries for {', '.join(HOOK_EVENTS)}")
+        # Codex trust hint
+        if target == "codex":
+            state = cfg.get("state", {})
+            if isinstance(state, dict):
+                trusted = sum(1 for k in state if "agent_relay" in k or HOOK_MANAGED_MARKER in k)
+                if trusted == 0:
+                    print(f"  [hint] codex: run `/hooks` in codex CLI to trust new entries")
+    return 0 if findings == 0 else 1
+
+
+def cmd_hooks_status(args) -> int:
+    print(f"relay hooks status (dispatcher: {HOOK_SCRIPT})")
+    print(f"  exists={HOOK_SCRIPT.exists()}  executable={os.access(HOOK_SCRIPT, os.X_OK)}")
+    for target in ("claude", "codex"):
+        cfg_path = _hooks_target_path(target)
+        if not cfg_path.exists():
+            print(f"  {target}: (no config)")
+            continue
+        cfg = _hooks_read_config(cfg_path)
+        counts = _hooks_count_managed(cfg)
+        print(f"  {target}: managed entries = {dict(counts) if counts else '{}'}")
+
+    env = load_env()
+    if env.shared_root:
+        trail = env.shared_root / "_relay" / "hook-trail.log"
+        if trail.exists():
+            print()
+            print(f"Recent hook activity ({trail}):")
+            try:
+                lines = trail.read_text(encoding="utf-8").splitlines()[-10:]
+                for ln in lines:
+                    print(f"  {ln}")
+            except OSError:
+                pass
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI dispatch
 # ---------------------------------------------------------------------------
 
@@ -3111,6 +3327,30 @@ def build_parser() -> argparse.ArgumentParser:
     phb_tick.add_argument("--project", default=None)
     phb_tick.add_argument("--session-id", default=None)
     phb_tick.set_defaults(func=cmd_heartbeat_tick)
+
+    pho = sub.add_parser("hooks",
+        help="Install/manage cross-platform hook integration (Claude Code + Codex CLI).")
+    phos = pho.add_subparsers(dest="hooks_cmd", required=True)
+
+    pho_install = phos.add_parser("install",
+        help="Append agent-relay hooks to Claude settings.json and/or Codex hooks.json.")
+    pho_install.add_argument("--target", choices=("claude", "codex", "both"), default="both")
+    pho_install.add_argument("--dry-run", action="store_true")
+    pho_install.set_defaults(func=cmd_hooks_install)
+
+    pho_uninstall = phos.add_parser("uninstall",
+        help="Remove agent-relay managed hook entries.")
+    pho_uninstall.add_argument("--target", choices=("claude", "codex", "both"), default="both")
+    pho_uninstall.add_argument("--dry-run", action="store_true")
+    pho_uninstall.set_defaults(func=cmd_hooks_uninstall)
+
+    pho_doctor = phos.add_parser("doctor",
+        help="Verify hook dispatcher + config wiring + trust state.")
+    pho_doctor.set_defaults(func=cmd_hooks_doctor)
+
+    pho_status = phos.add_parser("status",
+        help="Show hook install state + recent activity from hook-trail.log.")
+    pho_status.set_defaults(func=cmd_hooks_status)
 
     return p
 

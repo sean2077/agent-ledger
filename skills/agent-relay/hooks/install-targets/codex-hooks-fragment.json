@@ -1,0 +1,43 @@
+{
+  "_comment": "agent-relay managed hooks for Codex CLI. Edits between _agent_relay_managed markers are owned by `relay hooks install/uninstall`. The {RELAY_HOOK_PATH} token is replaced by the installer with the absolute path to relay-hook.py. Each entry is APPENDED to ~/.codex/hooks.json's hooks.<Event> array (preserving existing oh-my-codex etc. entries and their trust-key indices).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "_agent_relay_managed": true,
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{RELAY_HOOK_PATH}",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "_agent_relay_managed": true,
+        "matcher": "^(apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{RELAY_HOOK_PATH}",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "_agent_relay_managed": true,
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{RELAY_HOOK_PATH}",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
