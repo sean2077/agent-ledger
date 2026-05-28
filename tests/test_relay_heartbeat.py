@@ -429,26 +429,6 @@ def test_publish_validation_failure_leaves_heartbeat_running(monkeypatch, tmp_pa
         relay.cmd_heartbeat_stop(_hb_args(draft=str(draft), force=True))
 
 
-def test_recovery_lock_o_excl_acquire_and_release(monkeypatch, tmp_path, capsys):
-    """Acquire creates lockfile; second acquire fails; release removes it."""
-    session = _bootstrap(monkeypatch, tmp_path)
-    capsys.readouterr()
-    assert relay._acquire_recovery_lock(session, "claude") is True
-    lock = relay._recovery_lock_path(session, "claude")
-    assert lock.exists()
-    # Content should include pid + author
-    payload = json.loads(lock.read_text().strip())
-    assert payload["author"] == "claude"
-    assert payload["pid"] == os.getpid()
-    # Second acquire is denied
-    assert relay._acquire_recovery_lock(session, "claude") is False
-    relay._release_recovery_lock(session, "claude")
-    assert not lock.exists()
-    # After release, fresh acquire works again
-    assert relay._acquire_recovery_lock(session, "claude") is True
-    relay._release_recovery_lock(session, "claude")
-
-
 # ---------------------------------------------------------------------------
 # Stage 2/3 review fixes — codex seq 2 findings
 # ---------------------------------------------------------------------------
@@ -512,22 +492,6 @@ def test_owner_kind_tmux_pane_no_longer_accepted(monkeypatch, tmp_path, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "tmux-pane" in err or "owner_kind" in err.lower() or "owner-kind" in err.lower()
-
-
-def test_recovery_lock_gc_cleans_dead_pid(monkeypatch, tmp_path, capsys):
-    """M4: on-entry GC must remove recovery locks whose recorded pid is dead."""
-    session = _bootstrap(monkeypatch, tmp_path)
-    capsys.readouterr()
-    lock = relay._recovery_lock_path(session, "claude")
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    # Write a lock that points to a dead pid.
-    proc = subprocess.Popen(["true"])
-    proc.wait()
-    dead_pid = proc.pid
-    lock.write_text(json.dumps({"pid": dead_pid, "author": "claude", "started_at": "x"}) + "\n")
-    assert lock.exists()
-    relay._gc_recovery_locks(session, "claude")
-    assert not lock.exists()
 
 
 def test_heartbeat_gc_purges_when_owner_dead(monkeypatch, tmp_path, capsys):

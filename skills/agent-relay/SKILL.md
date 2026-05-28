@@ -44,15 +44,22 @@ Codex trust note: on the Codex side each new hook entry requires a one-time `/ho
 
 ```bash
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-for cand in \
-    "$ROOT/.agents/skills/agent-relay/bin/relay" \
-    "$ROOT/.claude/skills/agent-relay/bin/relay" \
-    "$(command -v relay 2>/dev/null)" \
-    "$HOME/.agents/skills/agent-relay/bin/relay" \
-    "$HOME/.claude/skills/agent-relay/bin/relay" \
-    "$HOME/.codex/skills/agent-relay/bin/relay" ; do
-  [ -n "$cand" ] && [ -x "$cand" ] && { RELAY="$cand"; break; }
-done
+if [ -n "${RELAY_BIN:-}" ] && [ -x "$RELAY_BIN" ]; then
+  RELAY="$RELAY_BIN"
+else
+  for cand in \
+      "$ROOT/.agents/skills/agent-relay/bin/relay" \
+      "$ROOT/.claude/skills/agent-relay/bin/relay" \
+      "$ROOT/skills/agent-relay/bin/relay" \
+      "/usr/local/bin/relay" \
+      "$HOME/.local/bin/relay" \
+      "$(command -v relay 2>/dev/null)" \
+      "$HOME/.agents/skills/agent-relay/bin/relay" \
+      "$HOME/.claude/skills/agent-relay/bin/relay" \
+      "$HOME/.codex/skills/agent-relay/bin/relay" ; do
+    [ -n "$cand" ] && [ -x "$cand" ] && { RELAY="$cand"; break; }
+  done
+fi
 [ -n "$RELAY" ] || { echo "cannot locate relay CLI" >&2; exit 2; }
 export RELAY
 ```
@@ -163,6 +170,8 @@ This is the core 95% case. Take one full turn in the relay.
 
     **When hooks are installed**: the Stop hook will auto-continue the turn via `decision: "block"` whenever peer published an artifact addressed to you, so the auto-loop above happens implicitly between turns; you can rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
 
+    **Optional advanced: parallel wait mode.** The default remains the blocking `"$RELAY" wait` call above. If your runtime can keep a shell session running in the background, you may start `"$RELAY" wait` there and do read-only preparation while it waits. Do not edit files, claim drafts, publish, sync, or close while the wait is pending. Stop the read-only prep as soon as the wait returns, then interpret its exit code exactly as in the default path.
+
 11. **User gate** (when step 10 chose to surface). Reset the in-memory round counter to 0, then output:
     - One-line summary: what was published, where, sync state.
     - The 2-3 **key open questions** from your `prompt_for_next` — surface them at user-level so they see the decisions without opening the artifact.
@@ -186,7 +195,7 @@ This is the part of the artifact that determines whether the peer can act effect
 - Set acceptance criteria. "Do X such that test Y passes" beats "do X".
 - Note risks or open questions the peer should address.
 - If the next round needs a specific `kind`, say so: "Please respond with `kind: review`."
-- If you're blocking on user input, write `prompt_for_next:` directed `@user:` and set `status: timed_out` on publish.
+- If you're blocking on user input, write `prompt_for_next:` directed `@user:` and publish with `"$RELAY" publish "$DRAFT" --status timed_out`.
 
 Avoid:
 - Vague verbs without context ("review this", "improve that").
@@ -275,7 +284,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 3. **Never ls `.draft/` from peer's side.** Drafts are hidden by convention. `relay status` correctly excludes them.
 4. **Never bypass `relay preflight`.** If it fails, the mount is broken or env is wrong; writing anywhere risks data loss.
 5. **Never `relay close` without checking with user.** Close is intended; missed by accident, it's awkward to recover from.
-6. **If `relay claim` or `relay publish` fails after the built-in retries, stop and ask the user.** The CLI internally retries up to 10 times with random jitter; if it still surfaces "could not allocate sequence/published path after 10 attempts", that's evidence of concurrent activity or stale state you don't understand. Run `relay doctor` to inspect (drafts, heartbeat pidfiles, recovery locks) before retrying.
+6. **If `relay claim` or `relay publish` fails after the built-in retries, stop and ask the user.** The CLI internally retries up to 10 times with random jitter; if it still surfaces "could not allocate sequence/published path after 10 attempts", that's evidence of concurrent activity or stale state you don't understand. Run `relay doctor` to inspect (drafts, heartbeat pidfiles) before retrying.
 
 ## When things go wrong
 

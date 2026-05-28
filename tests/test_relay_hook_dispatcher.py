@@ -492,3 +492,62 @@ def test_installer_appends_after_preserving_existing(monkeypatch, tmp_path):
     pre_rm = after_rm["hooks"]["PreToolUse"]
     assert len(pre_rm) == 1
     assert pre_rm[0]["matcher"] == "Bash"
+
+
+def test_installer_command_is_path_independent(monkeypatch, tmp_path):
+    """Regression for codex hook exit 127 — two root causes covered.
+
+    (a) PATH-stripped spawn: Codex runs hooks with a stripped PATH (no
+        `/usr/bin`), so the rendered command must invoke an absolute python
+        interpreter, not rely on `#!/usr/bin/env python3`.
+    (b) Bad-path installs: a prior buggy install left a double-nested
+        dispatcher path on one machine (`.../skills/agent-relay/skills/
+        agent-relay/...`) that didn't exist on disk. Assert the rendered
+        script path actually exists, so a future installer regression that
+        emits a nonexistent path fails this test.
+    """
+    import shlex
+    import sys
+
+    for target in ("claude", "codex"):
+        fake_home = tmp_path / f"home_{target}"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        (fake_home / (".claude" if target == "claude" else ".codex")).mkdir()
+
+        args = type("A", (), {"target": target, "dry_run": False})()
+        relay.cmd_hooks_install(args)
+
+        cfg_path = (fake_home / ".claude" / "settings.json"
+                    if target == "claude" else fake_home / ".codex" / "hooks.json")
+        cfg = json.loads(cfg_path.read_text())
+
+        for event in ("SessionStart", "PreToolUse", "Stop"):
+            managed = [e for e in cfg["hooks"][event] if e.get("_agent_relay_managed")]
+            assert managed, f"{target}/{event}: missing managed entry"
+            cmd = managed[0]["hooks"][0]["command"]
+            parts = shlex.split(cmd)
+            assert len(parts) == 2, (
+                f"{target}/{event}: expected `<python> <script>`, got {cmd!r}"
+            )
+            interp, script = parts
+            assert interp == sys.executable, (
+                f"{target}/{event}: interpreter must be absolute sys.executable; "
+                f"got {interp!r}"
+            )
+            assert Path(interp).is_absolute(), (
+                f"{target}/{event}: interpreter path is not absolute: {interp!r}"
+            )
+            assert Path(interp).is_file(), (
+                f"{target}/{event}: interpreter must exist on disk: {interp!r}"
+            )
+            assert script.endswith("relay-hook.py"), (
+                f"{target}/{event}: second arg must be the hook script: {script!r}"
+            )
+            assert Path(script).is_absolute(), (
+                f"{target}/{event}: script path is not absolute: {script!r}"
+            )
+            assert Path(script).is_file(), (
+                f"{target}/{event}: script path must exist on disk "
+                f"(catches double-nested install bugs): {script!r}"
+            )

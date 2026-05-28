@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.3.0.
+> Source spec for the `relay` CLI implementation. v0.8.0; session schema v3.
 
 ## 1. Directory layout
 
@@ -22,13 +22,13 @@
     002-claude-review.md.sha256
     002-claude-review.ready
     ...
-    archive/                           # future supersede support; v0.3 does not write here
+    archive/                           # future supersede support; current CLI does not write here
 ```
 
 **Slug rules**:
 
 - `session-slug`: `YYYYMMDD-<topic>`, topic same rules. Single date prefix; the day is local time of `relay bootstrap`.
-- `project`: kept only as `session.json.project` metadata. It is not a directory level in v0.3.0.
+- `project`: kept only as `session.json.project` metadata. It is not a directory level.
 
 **Hidden vs visible**:
 
@@ -145,10 +145,10 @@ Free-form short ASCII, but the well-known values are:
 | `ready` | published, awaiting peer | **keeps session active** | ✓ (default) |
 | `closed` | this artifact concluded by author | **terminal** (no peer action expected) | ✓ (e.g., final decision) |
 | `cancelled` | author/user withdrew | **terminal** | ✓ |
-| `failed` | publish validation failed; or peer flagged content as broken | **terminal** | ✓ |
+| `failed` | author or peer recorded that the artifact or requested work is broken and should not continue | **terminal** | ✓ |
 | `timed_out` | long elapsed time without peer response | **terminal** | ✓ |
 
-**All four terminal statuses (`closed`/`cancelled`/`failed`/`timed_out`) signal that THIS artifact no longer requires peer response.**
+**All four terminal statuses (`closed`/`cancelled`/`failed`/`timed_out`) signal that THIS artifact no longer requires peer response.** A local `relay publish` validation failure leaves the draft in place and does not create a `failed` artifact.
 
 ## 5. Session-active rule (CLI must hard-code this)
 

@@ -5,15 +5,23 @@ Single-file executable, Python 3.10+, stdlib only. See companion spec:
   skills/agent-relay/references/file-protocol.md
 
 Commands:
-  preflight   env + mount + project + FS probes + POSIX mode
-  bootstrap   create new session directory under .shared/
-  status      list session artifacts + readiness + session-active rule
-  next-seq    print next available NNN (advisory)
-  claim       scaffold a new draft under .draft/
-  publish     validate draft, atomically promote to published + sha256 + ready
-  close       write CLOSED sentinel + update session.json (no edit to prior files)
-  sync        host-only rsync wrapper (push/pull, default and strict modes)
-  wait        block until peer publishes; exit codes 0/10/11/12/130/2
+  init         idempotently create RELAY_SHARED_ROOT + sentinel; render .envrc
+  preflight    env + mount + project + FS probes + POSIX mode
+  bootstrap    create new session directory under .shared/
+  status       list session artifacts + readiness + session-active rule
+  sessions     subcommands: list (recovery/discovery across all sessions)
+  next-seq     print next available NNN (advisory)
+  claim        scaffold a new draft under .draft/
+  publish      validate draft, atomically promote to published + sha256 + ready
+  close        write CLOSED sentinel + update session.json (no edit to prior files)
+  sync         rsync wrapper for the RELAY_SYNC=rsync side (push/pull,
+               default and strict modes)
+  wait         block until peer publishes; exit codes 0/10/11/12/130/2
+  doctor       report (and optionally fix) stuck drafts, dead heartbeat
+               pidfiles, abandoned sidecars
+  heartbeat    subcommands: start, stop, tick (per-draft liveness daemon)
+  hooks        subcommands: install, uninstall, status, doctor (Claude Code
+               + Codex CLI hook integration)
 """
 
 from __future__ import annotations
@@ -1254,7 +1262,6 @@ def cmd_status(args) -> int:
     session = (resolve_session(env, session_id, project=getattr(args, "project", None))
                if session_id else resolve_active_session(env, getattr(args, "project", None)))
     _gc_heartbeat_orphans(session, env.author or "")
-    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
     sj = json.loads((session / "session.json").read_text())
@@ -1383,7 +1390,6 @@ def cmd_claim(args) -> int:
         print(f"relay claim: {msg}{hint}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author or "")
-    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
     draft_dir = session / ".draft"
@@ -1508,7 +1514,6 @@ def cmd_publish(args) -> int:
     session = draft_path.parent.parent
     _env_pub = load_env()
     _gc_heartbeat_orphans(session, _env_pub.author or "")
-    _gc_recovery_locks(session, _env_pub.author or "")
     _gc_renewal_orphans(session, _env_pub)
     _maybe_tick_renewal(session, _env_pub)
     base = draft_path.name[:-3]  # strip .md
@@ -1615,7 +1620,6 @@ def cmd_close(args) -> int:
         print(f"relay close: {msg}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author or "")
-    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
     sentinel = session / "CLOSED"
@@ -1848,14 +1852,14 @@ def cmd_sync(args) -> int:
     if args.strict_gitignore:
         try:
             tmpfile.unlink()
-        except (NameError, FileNotFoundError):
+        except FileNotFoundError:
             pass
     return res.returncode
 
 
 # ---------------------------------------------------------------------------
 # heartbeat infrastructure (Stage 2): owner-identity model + double-fork daemon
-# + on-entry GC + recovery lock.
+# + on-entry GC.
 #
 # Heartbeat sidecar lives next to the draft as `<draft>.heartbeat` and contains
 # JSON metadata; its mtime is the liveness signal consumed by `relay wait`
@@ -2171,81 +2175,6 @@ def _heartbeat_purge_files_only(session: Path, author: str, pidfile: Path) -> No
             except OSError:
                 pass
 
-
-def _gc_recovery_locks(session: Path, author: str) -> None:
-    """Remove recovery lock files whose recorded pid is dead."""
-    if not author:
-        return
-    lock = _recovery_lock_path(session, author)
-    if not lock.exists():
-        return
-    try:
-        data = json.loads(lock.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        # malformed lock — remove
-        try:
-            lock.unlink()
-        except OSError:
-            pass
-        return
-    pid = data.get("pid")
-    if not isinstance(pid, int):
-        try:
-            lock.unlink()
-        except OSError:
-            pass
-        return
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        try:
-            lock.unlink()
-        except OSError:
-            pass
-    except (PermissionError, OSError):
-        pass  # exists or unknown; leave alone
-
-
-def _recovery_lock_path(session: Path, author: str) -> Path:
-    return session / "_relay" / f"{author}.recovery.lock"
-
-
-def _acquire_recovery_lock(session: Path, author: str) -> bool:
-    """Atomic O_EXCL acquire. Returns True on success, False if already held."""
-    if not author:
-        return False
-    lock = _recovery_lock_path(session, author)
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({
-        "pid": os.getpid(),
-        "author": author,
-        "started_at": now_iso(),
-    }).encode("utf-8") + b"\n"
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return False
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-    except OSError:
-        try:
-            lock.unlink()
-        except OSError:
-            pass
-        return False
-    return True
-
-
-def _release_recovery_lock(session: Path, author: str) -> None:
-    if not author:
-        return
-    try:
-        _recovery_lock_path(session, author).unlink()
-    except OSError:
-        pass
 
 
 def cmd_heartbeat_start(args) -> int:
@@ -2655,7 +2584,6 @@ def cmd_doctor(args) -> int:
             "drafts": [],
             "heartbeat_pidfile": None,
             "heartbeat_sidecars": [],
-            "recovery_lock": None,
         }
         # Drafts
         draft_dir = sd / ".draft"
@@ -2694,15 +2622,6 @@ def cmd_doctor(args) -> int:
                         {"name": sc.name, "age_seconds": age}
                     )
                     findings += 1
-            lock = _recovery_lock_path(sd, env.author)
-            if lock.exists():
-                entry["recovery_lock"] = {"path": str(lock)}
-                findings += 1
-                if args.fix:
-                    # On-entry GC already removes dead-PID locks; report-only here
-                    # surfaces what GC would have done if a session-scoped command
-                    # had run instead. Doctor does not force-remove the lock.
-                    pass
         # Draft GC (only with --fix + --older-than).
         # Two safety constraints (codex cross-review 2026-05-29):
         #   (a) Never delete a draft whose sibling .heartbeat sidecar is
@@ -2781,8 +2700,6 @@ def _print_doctor_text(report: dict, *, fix: bool) -> None:
             print("    heartbeat sidecars:")
             for sc in s["heartbeat_sidecars"]:
                 print(f"      - {sc['name']}  age={sc['age_seconds']}s")
-        if s["recovery_lock"]:
-            print(f"    recovery_lock: {s['recovery_lock']['path']}")
     if report["actions"]:
         print("\n  actions taken:")
         for a in report["actions"]:
@@ -2813,7 +2730,6 @@ def cmd_wait(args) -> int:
         print(f"relay wait: {msg}{hint}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author)
-    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
 
@@ -2986,10 +2902,21 @@ def _hooks_target_path(target: str) -> Path:
     raise ValueError(f"unknown hooks target: {target}")
 
 
+def _hooks_render_command() -> str:
+    """Render the hook command as `<python> <script>` with both args shell-quoted.
+
+    Codex spawns hooks with a stripped PATH (no /usr/bin), so the `#!/usr/bin/env
+    python3` shebang on relay-hook.py can't resolve `python3` and the host
+    reports exit 127. Embedding `sys.executable` as an absolute path makes the
+    command PATH-independent. The same form is fine for Claude Code.
+    """
+    return shlex.quote(sys.executable) + " " + shlex.quote(str(HOOK_SCRIPT))
+
+
 def _hooks_load_fragment(target: str) -> dict:
     path = HOOK_FRAGMENT_CLAUDE if target == "claude" else HOOK_FRAGMENT_CODEX
     raw = path.read_text(encoding="utf-8")
-    raw = raw.replace("{RELAY_HOOK_PATH}", str(HOOK_SCRIPT))
+    raw = raw.replace("{RELAY_HOOK_COMMAND}", _hooks_render_command())
     return json.loads(raw)
 
 
@@ -3262,7 +3189,7 @@ def build_parser() -> argparse.ArgumentParser:
     psl.add_argument("--json", action="store_true")
     psl.set_defaults(func=cmd_sessions_list)
 
-    psync = sub.add_parser("sync", help="Host-only rsync wrapper.")
+    psync = sub.add_parser("sync", help="rsync wrapper (only the RELAY_SYNC=rsync side may run it).")
     psync.add_argument("direction", choices=["push", "pull"])
     psync.add_argument("--dry-run", action="store_true")
     psync.add_argument("--strict-gitignore", action="store_true",

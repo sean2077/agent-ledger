@@ -3,9 +3,9 @@
 > **TL;DR.** `agent-relay` lets an interactive Claude Code session and an
 > interactive Codex CLI session cross-review each other through an
 > append-only file ledger. The relay itself requires no API keys, no
-> background daemons, and no additional per-call API billing path. Usage
-> of the underlying tools remains subject to whatever limits and billing
-> terms those tools have.
+> central long-running orchestrator daemon, and no additional per-call API
+> billing path. Usage of the underlying tools remains subject to whatever
+> limits and billing terms those tools have.
 
 This page is the longer take. The README and SKILL.md keep it short on
 purpose; this is where the caveats live.
@@ -22,8 +22,10 @@ Two things and only two things:
 
 There is no orchestrator process, no message bus, no central scheduler. The
 filesystem is the substrate. Each side reads what the other published,
-does work, publishes a response. Turns are user-driven — the human pokes
-each side via the agent's existing interactive UI.
+does work, publishes a response. The baseline workflow is manual/user-driven:
+the human pokes each side via the agent's existing interactive UI. Optional
+hooks can assist continuation by surfacing relay state, but they do not become
+a central orchestrator.
 
 ## Why it exists
 

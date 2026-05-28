@@ -68,7 +68,8 @@ else:
     log "hint"
 ```
 
-Soft timeout 10s. Never blocks the session.
+Soft timeout 3s, matching the dispatcher default for `relay doctor` and
+`relay status` subprocess calls. Never blocks the session.
 
 ### 4.2 `PreToolUse`
 
@@ -83,9 +84,11 @@ Matchers:
   - `*** Move to: <dest>` (returned **in addition to** the source path
     from the surrounding `*** Update File:` hunk)
 
-All extracted paths are canonicalized against `payload.cwd` (or git root)
-before comparison; relative paths like `./.shared/...` and absolute paths
-both resolve correctly (codex-review fix: path-canonicalization).
+All extracted paths are canonicalized against `payload.cwd`, then
+`CLAUDE_PROJECT_DIR`, then the hook process cwd before comparison. Relative
+paths like `./.shared/...` and absolute paths both resolve correctly
+(codex-review fix: path-canonicalization). PreToolUse canonicalization does
+not shell out to git.
 
 Decision:
 
@@ -149,7 +152,8 @@ takes precedence over continuation `decision: "block"` from other matching
 Stop hooks — including itself in the same response. The intended
 continuation would be silently cancelled.
 
-**State fingerprint** (stable string):
+**State fingerprint** (stable string; draft names come from `relay status`,
+not by directly listing peer `.draft/` contents):
 
 ```
 {latest_seq}|{latest_author}|{latest_peer}|{latest_kind}|{latest_status}|{drafts_count}|{sorted_draft_names}

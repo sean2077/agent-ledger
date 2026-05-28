@@ -8,6 +8,22 @@ import relay
 ROOT = Path(__file__).resolve().parent.parent
 
 
+DELETED_V05_ENVRC_TEMPLATES = [
+    "envrc.host.example",
+    "envrc.remote.example",
+    "envrc.{host,remote}.example",
+]
+
+
+def assert_no_deleted_envrc_template_refs(text: str, label: str) -> None:
+    for needle in DELETED_V05_ENVRC_TEMPLATES:
+        assert needle not in text, (
+            f"{label} still references deleted v0.5 path {needle!r}; "
+            "update guidance to use `relay init --role same-host` or "
+            "`relay init --author/--peer/--sync`"
+        )
+
+
 def test_relay_version_matches_readme():
     """M1: relay __version__ matches the v0.x.y substring in README.md."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -18,12 +34,6 @@ def test_hook_version_matches_relay_version():
     """Hook dispatcher release version stays aligned with the CLI."""
     hook = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
     assert f'VERSION = "{relay.__version__}"' in hook
-
-
-def test_first_brief_does_not_teach_needs_change_frontmatter():
-    """M2: first-brief.md does not instruct setting an off-protocol status."""
-    text = (ROOT / "skills/agent-relay/templates/first-brief.md").read_text(encoding="utf-8")
-    assert "status: needs-change" not in text
 
 
 def test_skill_mentions_multiple_active_session_stop_rule():
@@ -74,6 +84,13 @@ def test_docs_why_exists_and_carries_caveats():
     assert "subscription" in text.lower()
     assert "ChatGPT" in text
     assert "Claude" in text
+    normalized = " ".join(
+        line.removeprefix("> ").strip()
+        for line in text.splitlines()
+    )
+    assert "no central long-running orchestrator daemon" in normalized
+    assert "manual/user-driven" in normalized
+    assert "optional hooks" in normalized.lower()
 
 
 def test_legacy_role_templates_removed_in_v06():
@@ -100,17 +117,88 @@ def test_dispatcher_template_does_not_reference_deleted_v05_templates():
     paths.
     """
     template = (ROOT / "skills/agent-relay/templates/envrc.dispatcher.example").read_text(encoding="utf-8")
-    forbidden = [
-        "envrc.host.example",
-        "envrc.remote.example",
-        "envrc.{host,remote}.example",
-    ]
-    for needle in forbidden:
-        assert needle not in template, (
-            f"envrc.dispatcher.example still references deleted v0.5 path {needle!r}; "
-            "update the comments/warning to point at `relay init --role same-host` "
-            "or `--author/--peer/--sync`"
-        )
+    assert_no_deleted_envrc_template_refs(template, "envrc.dispatcher.example")
+
+
+def test_committed_envrc_does_not_reference_deleted_v05_templates():
+    """F2/F3: committed .envrc guidance must not point at deleted templates."""
+    text = (ROOT / ".envrc").read_text(encoding="utf-8")
+    assert_no_deleted_envrc_template_refs(text, ".envrc")
+    assert "relay init --role same-host" in text
+    assert "relay init --author <name> --peer <name> --sync <none|rsync>" in text
+
+
+def test_first_brief_template_removed_from_surface():
+    """C7: first-brief.md was never wired into the CLI or skill surface."""
+    assert not (ROOT / "skills/agent-relay/templates/first-brief.md").exists()
+
+
+def test_skill_relay_lookup_chain_matches_dispatcher_contract():
+    """F5: SKILL.md lookup chain includes the same project/global fallbacks as hooks."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    for needle in [
+        "${RELAY_BIN:-}",
+        "$ROOT/.agents/skills/agent-relay/bin/relay",
+        "$ROOT/.claude/skills/agent-relay/bin/relay",
+        "$ROOT/skills/agent-relay/bin/relay",
+        "/usr/local/bin/relay",
+        "$HOME/.local/bin/relay",
+        "$(command -v relay 2>/dev/null)",
+        "$HOME/.agents/skills/agent-relay/bin/relay",
+        "$HOME/.claude/skills/agent-relay/bin/relay",
+        "$HOME/.codex/skills/agent-relay/bin/relay",
+    ]:
+        assert needle in text
+
+
+def test_skill_documents_terminal_timeout_publish_command():
+    """F4: user-blocking relay questions must publish a timed_out artifact."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    assert '@user:' in text
+    assert '"$RELAY" publish "$DRAFT" --status timed_out' in text
+
+
+def test_skill_documents_optional_parallel_wait_mode_as_advanced_only():
+    """Q3: background wait is documented as optional, not the default path."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    assert "Optional advanced: parallel wait mode" in text
+    assert "The default remains the blocking" in text
+    assert "Do not edit files, claim drafts, publish, sync, or close while the wait is pending" in text
+
+
+def test_hook_protocol_timeout_and_path_canonicalization_match_dispatcher():
+    """F6/F7: hook protocol mirrors the dispatcher timeout and path base order."""
+    text = (ROOT / "skills/agent-relay/references/hook-protocol.md").read_text(encoding="utf-8")
+    src = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
+    assert "Soft timeout 3s" in text
+    assert "timeout: int = 3" in src
+    assert "`payload.cwd`, then" in text
+    assert "`CLAUDE_PROJECT_DIR`, then" in text
+    assert "hook process cwd" in text
+    normalized = " ".join(text.split())
+    assert "does not shell out to git" in normalized
+    pretooluse_section = text.split("### 4.2 `PreToolUse`", 1)[1].split("### 4.3", 1)[0]
+    assert "git root" not in pretooluse_section
+
+
+def test_hook_protocol_fingerprint_documents_status_sourced_drafts():
+    """C6: fingerprint docs must not imply hooks inspect peer draft bodies."""
+    text = (ROOT / "skills/agent-relay/references/hook-protocol.md").read_text(encoding="utf-8")
+    assert "draft names come from `relay status`" in text
+    assert "not by directly listing peer `.draft/` contents" in text
+
+
+def test_file_protocol_version_and_failed_status_wording_are_current():
+    """C4/C5: file protocol version and failed-status semantics stay current."""
+    text = (ROOT / "skills/agent-relay/references/file-protocol.md").read_text(encoding="utf-8")
+    header = text.split("\n\n", 2)[1]
+    assert "v0.8.0" in header
+    assert "session schema v3" in header
+    assert "v0.3.0" not in header
+    failed_line = next(line for line in text.splitlines() if line.startswith("| `failed` |"))
+    assert "publish validation failed" not in failed_line
+    assert "author or peer recorded" in failed_line
+    assert "does not create a `failed` artifact" in text
 
 
 def test_changelog_documents_v06_migration():
