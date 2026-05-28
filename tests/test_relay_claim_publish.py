@@ -71,24 +71,40 @@ def test_claim_collision_increments(monkeypatch, tmp_path, capsys):
     assert p2_path.name.startswith("002-")
 
 
-def test_claim_collision_after_two_retries_exits_2(monkeypatch, tmp_path, capsys):
-    """Stage 0: file-protocol.md §7.1 step 4 says second-failure exit code is 2.
-    Force claim into a real two-collision-then-fail path by stubbing latest_seq
-    to lie, then planting squatters at the seqs claim will try."""
+def test_claim_collision_after_ten_retries_exits_2(monkeypatch, tmp_path, capsys):
+    """PR2 (M4) widened retry from 2 to 10. Plant 10 squatters to force exhaustion."""
     session = _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()
     draft_dir = session / ".draft"
     draft_dir.mkdir(exist_ok=True)
-    # Squat the two slots claim will attempt after latest_seq returns 0.
-    (draft_dir / "001-codex-plan.md").write_text("squatter-a\n")
-    (draft_dir / "002-codex-plan.md").write_text("squatter-b\n")
-    # Force latest_seq to under-report so claim starts at seq=1 and collides twice.
+    # Squat the 10 slots claim will attempt after latest_seq returns 0.
+    for n in range(1, 11):
+        (draft_dir / f"{n:03d}-codex-plan.md").write_text(f"squatter-{n}\n")
+    # Force latest_seq to under-report so claim starts at seq=1 and collides 10 times.
     monkeypatch.setattr(relay, "latest_seq", lambda s: 0)
     args = type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})()
     rc = relay.cmd_claim(args)
     assert rc == 2
     err = capsys.readouterr().err
-    assert "could not allocate sequence" in err
+    assert "could not allocate sequence after 10 attempts" in err
+    assert "relay doctor" in err  # recovery hint present
+
+
+def test_claim_resolves_through_five_squatters(monkeypatch, tmp_path, capsys):
+    """With retry widened to 10, 5 concurrent collisions must resolve cleanly
+    (regression from old range(2) behavior which would have errored out)."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    for n in range(1, 6):  # plant 5 squatters at seq 1..5
+        (draft_dir / f"{n:03d}-codex-plan.md").write_text(f"squatter-{n}\n")
+    monkeypatch.setattr(relay, "latest_seq", lambda s: 0)
+    args = type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})()
+    rc = relay.cmd_claim(args)
+    assert rc == 0
+    draft = Path(capsys.readouterr().out.strip())
+    assert draft.name.startswith("006-")  # claim walked past 5 squatters
 
 
 def _fill_draft(draft_path: Path, *, prompt: str = "do real things\n", body: str = "real body"):

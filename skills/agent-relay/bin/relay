@@ -23,6 +23,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import random
 import re
 import shlex
 import shutil
@@ -1358,7 +1359,9 @@ def cmd_claim(args) -> int:
 
     seq = latest_seq(session) + 1
     author = env.author or "unknown"
-    for attempt in range(2):
+    for attempt in range(10):
+        if attempt > 0:
+            time.sleep(random.uniform(0.01, 0.05))
         draft_name = f"{seq:03d}-{author}-{args.kind}.md"
         draft_path = draft_dir / draft_name
         if draft_path.exists():
@@ -1400,7 +1403,12 @@ def cmd_claim(args) -> int:
         except OSError as exc:
             print(f"relay claim: io error: {exc}", file=sys.stderr)
             return 2
-    print("relay claim: could not allocate sequence after retry", file=sys.stderr)
+    print(
+        "relay claim: could not allocate sequence after 10 attempts; "
+        "concurrent activity detected — wait briefly and retry, or run "
+        "`relay doctor` to inspect for abandoned drafts.",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -1499,7 +1507,9 @@ def cmd_publish(args) -> int:
     fm["created"] = now_iso()
 
     seq = int(fm["seq"])
-    for attempt in range(2):
+    for attempt in range(10):
+        if attempt > 0:
+            time.sleep(random.uniform(0.01, 0.05))
         paths = published_paths(session, base)
         if paths["md"].exists():
             seq += 1
@@ -1530,7 +1540,12 @@ def cmd_publish(args) -> int:
                 clear_active_marker(env_pub.shared_root, session.name)
         print(paths["md"])
         return 0
-    print("relay publish: could not allocate published path after retry", file=sys.stderr)
+    print(
+        "relay publish: could not allocate published path after 10 attempts; "
+        "concurrent activity detected — wait briefly and retry, or run "
+        "`relay doctor` to inspect.",
+        file=sys.stderr,
+    )
     return 2
 
 
