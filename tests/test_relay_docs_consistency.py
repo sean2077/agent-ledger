@@ -117,3 +117,47 @@ def test_changelog_documents_v06_migration():
     assert "RELAY_SYNC=rsync" in text
     assert "RELAY_SYNC=none" in text
     assert "RELAY_ROLE" in text  # the old name is named explicitly
+
+
+def test_v07_error_exits_carry_recovery_hints():
+    """v0.7 PR5: every flagged error exit in relay must include a concrete
+    next-step hint. Grep the relay source for each known message and assert
+    a recovery keyword is present nearby."""
+    src = (ROOT / "skills/agent-relay/bin/relay").read_text(encoding="utf-8")
+    # Each row: (needle that locates the exit, keyword that must be in the
+    # same message block — "relay <verb>" recovery hint or known command).
+    checks = [
+        ("could not allocate sequence after 10 attempts", "relay doctor"),
+        ("could not allocate published path after 10 attempts", "relay doctor"),
+        ("heartbeat already running for", "relay heartbeat stop --force"),
+        ("cannot derive renewal path", "RELAY_PROJECT"),
+        ("owner not alive at start", "--owner-kind renewal-file"),
+        ("refusing to publish into inactive session", "relay bootstrap"),
+        ("RELAY_REMOTE_SSH and RELAY_REMOTE_PATH must be set", "relay sync push --dry-run"),
+        ("is not a valid slug", "set RELAY_PROJECT"),  # bootstrap bad-slug hint
+    ]
+    for needle, hint in checks:
+        idx = src.find(needle)
+        assert idx >= 0, f"could not locate error exit {needle!r} in relay source"
+        # Look at a ~400-char window starting at the needle to find the hint
+        # (covers multi-line print(...) calls).
+        window = src[idx:idx + 400]
+        assert hint in window, (
+            f"error exit {needle!r} is missing recovery hint {hint!r}; "
+            "v0.7 PR5 requires every stderr exit to spell out the next step."
+        )
+
+
+def test_v07_wait_hint_paths_include_doctor_or_sessions():
+    """relay wait resolver-fail and claim resolver-fail hints must mention
+    `relay sessions list` (the discovery command) and `relay bootstrap`."""
+    src = (ROOT / "skills/agent-relay/bin/relay").read_text(encoding="utf-8")
+    # Both wait and claim wrap resolve_active_session with a hint block.
+    for verb in ("relay wait:", "relay claim:"):
+        idx = src.find(verb)
+        # Find the resolver-fail hint block by searching for "no active session" near verb.
+        nas_idx = src.find("no active session", idx)
+        assert nas_idx > 0, f"{verb} missing resolver-fail handler for no-active-session"
+        window = src[nas_idx:nas_idx + 400]
+        assert "relay sessions list" in window
+        assert "relay bootstrap" in window

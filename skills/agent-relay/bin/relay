@@ -1367,11 +1367,21 @@ def cmd_claim(args) -> int:
         print(f"relay claim: unknown kind {args.kind!r} (known: {sorted(KINDS)})",
               file=sys.stderr)
         return 2
-    session = resolve_active_session(
-        env,
-        getattr(args, "project", None),
-        getattr(args, "session_id", None),
-    )
+    try:
+        session = resolve_active_session(
+            env,
+            getattr(args, "project", None),
+            getattr(args, "session_id", None),
+        )
+    except SystemExit as exc:
+        msg = str(exc)
+        hint = ""
+        if "no active session" in msg or "not active" in msg:
+            hint = " — run `relay sessions list` to see existing sessions, or `relay bootstrap --topic <slug>` to start a new one."
+        elif "multiple active sessions" in msg:
+            hint = " — pass `--session-id <id>` to disambiguate."
+        print(f"relay claim: {msg}{hint}", file=sys.stderr)
+        return 2
     _gc_heartbeat_orphans(session, env.author or "")
     _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
@@ -1509,7 +1519,10 @@ def cmd_publish(args) -> int:
     if not session_is_active(session):
         if not getattr(args, "force", False):
             print(
-                f"relay publish: refusing to publish into inactive session: {session}",
+                f"relay publish: refusing to publish into inactive session: {session} "
+                "— session is closed/terminal; `relay bootstrap --topic <slug>` to "
+                "start a new session, or pass `--force --force-reason <text> "
+                "--status <closed|cancelled|failed|timed_out>` to record a terminal note.",
                 file=sys.stderr,
             )
             return 2
@@ -1756,7 +1769,12 @@ def cmd_sync(args) -> int:
         print(f"relay sync: {reason}", file=sys.stderr)
         return 2
     if not env.remote_ssh or not env.remote_path:
-        print("relay sync: RELAY_REMOTE_SSH and RELAY_REMOTE_PATH must be set", file=sys.stderr)
+        print(
+            "relay sync: RELAY_REMOTE_SSH and RELAY_REMOTE_PATH must be set "
+            "(only the rsync owner runs sync; same-host or RELAY_SYNC=none "
+            "sides skip this step). Run `relay sync push --dry-run` first.",
+            file=sys.stderr,
+        )
         return 2
     if is_shape_a:
         # Contradiction: RELAY_SYNC=rsync was explicitly set, but the project
@@ -2281,7 +2299,8 @@ def cmd_heartbeat_start(args) -> int:
         if derived is None:
             print(
                 "relay heartbeat start: cannot derive renewal path "
-                "(RELAY_PROJECT or RELAY_AUTHOR unset)",
+                "(RELAY_PROJECT or RELAY_AUTHOR unset); set RELAY_PROJECT "
+                "or run inside a git repo with RELAY_AUTHOR set.",
                 file=sys.stderr,
             )
             return 2
@@ -2305,7 +2324,9 @@ def cmd_heartbeat_start(args) -> int:
             print(
                 f"relay heartbeat start: owner not alive at start "
                 f"(kind={args.owner_kind}, pid={args.owner_pid}, "
-                f"pidfile={args.owner_pidfile})",
+                f"pidfile={args.owner_pidfile}); verify --owner-pid / "
+                "--owner-pidfile points at a live process, or rerun "
+                "with --owner-kind renewal-file (recommended for SKILL usage).",
                 file=sys.stderr,
             )
             return 2
@@ -2316,7 +2337,8 @@ def cmd_heartbeat_start(args) -> int:
     if running:
         print(
             f"relay heartbeat start: heartbeat already running for {env.author} "
-            f"(pidfile {pidfile})",
+            f"(pidfile {pidfile}); run `relay heartbeat stop --force` to "
+            "clear it, or `relay doctor` to inspect.",
             file=sys.stderr,
         )
         return 3
@@ -2750,7 +2772,13 @@ def cmd_wait(args) -> int:
             getattr(args, "session_id", None),
         )
     except SystemExit as exc:
-        print(f"relay wait: {exc}", file=sys.stderr)
+        msg = str(exc)
+        hint = ""
+        if "no active session" in msg:
+            hint = " — run `relay sessions list` to see existing sessions, or `relay bootstrap --topic <slug>` to start a new one."
+        elif "multiple active sessions" in msg:
+            hint = " — pass `--session-id <id>` to disambiguate."
+        print(f"relay wait: {msg}{hint}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author)
     _gc_recovery_locks(session, env.author or "")
