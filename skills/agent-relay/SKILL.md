@@ -105,7 +105,29 @@ This is the core 95% case. Take one full turn in the relay.
    ```
    On success: file moves out of `.draft/`, sha256 + ready sidecars appear. On rejection: CLI prints which field failed validation; fix the draft and retry.
 9. **Sync if needed** (host only, see Intent: sync). First time push? **always `--dry-run` first**.
-10. **Report + confirmation gate**. To the user, output:
+
+10. **Auto-loop or surface decision (rule-based)**. After a successful publish, decide whether to invoke `relay wait` and loop, or to surface to the user (step 11). The check is **rule-based, never LLM-judged**:
+
+    **Surface to user (step 11) if ANY of:**
+    - just-published `kind == "decision"`
+    - just-published `status` ∈ {`closed`, `cancelled`, `failed`, `timed_out`}
+    - your `prompt_for_next` body contains literal `@user:` (case-sensitive)
+    - in-memory consecutive-auto-round counter ≥ `RELAY_AUTO_ROUND_CAP` (default 5)
+
+    **Otherwise — enter auto-loop:**
+    1. Increment the in-memory round counter.
+    2. Run `"$RELAY" wait` exactly once. Single blocking Bash tool call, no progress chatter from you before or after.
+    3. Interpret exit code:
+       - `0` — new artifact path is on stdout. Jump back to step 1.
+       - `10` — timeout (`RELAY_WAIT_TIMEOUT`, default 300s). Surface to user: "peer hasn't responded in N seconds." Offer (a) keep waiting, (b) go check the other agent, (c) stop.
+       - `11` — peer heartbeat stale (Stage 2+ only; never in Stage 1). Surface: "peer may have crashed mid-turn."
+       - `12` — session entered terminal state. Report and stop.
+       - `130` — SIGINT. Exit cleanly. User broke out.
+       - `2` — env/protocol error on stderr. Stop and report like a preflight failure.
+
+    **Hard rule**: do NOT decide "this isn't important enough to surface." If a `kind: question` benefits from user attention, encode `@user:` in the prompt body. The round-cap is the catch-all backstop so the loop cannot run forever silently.
+
+11. **User gate** (when step 10 chose to surface). Reset the in-memory round counter to 0, then output:
     - One-line summary: what was published, where, sync state.
     - The 2-3 **key open questions** from your `prompt_for_next` — surface them at user-level so they see the decisions without opening the artifact.
     - An explicit fork — let the user pick the next step. Each option must include the **concrete next command/window** the user runs, not a vague "wait" or "do":

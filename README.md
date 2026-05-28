@@ -1,7 +1,7 @@
 # agent-ledger
 
 A skill + CLI for relaying work between a local Codex CLI agent (host) and a
-remote interactive Claude Code agent (remote). Current: **v0.3.2** (pre-1.0).
+remote interactive Claude Code agent (remote). Current: **v0.4.0** (pre-1.0).
 
 The package lives in `skills/agent-relay/`:
 

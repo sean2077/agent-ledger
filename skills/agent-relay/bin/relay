@@ -13,6 +13,7 @@ Commands:
   publish     validate draft, atomically promote to published + sha256 + ready
   close       write CLOSED sentinel + update session.json (no edit to prior files)
   sync        host-only rsync wrapper (push/pull, default and strict modes)
+  wait        block until peer publishes; exit codes 0/10/11/12/130/2
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -1520,6 +1521,109 @@ def cmd_sync(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# cmd_wait — block until peer publishes a new artifact targeting this author
+# ---------------------------------------------------------------------------
+
+# Exit codes (see decision artifact 20260528-stage3-renewal-design seq 9 §3.1):
+#   0   new .ready targeted at me; stdout = absolute artifact path
+#   10  timeout (RELAY_WAIT_TIMEOUT seconds elapsed)
+#   11  peer heartbeat stale (Stage 2/3 only; never emitted in Stage 1)
+#   12  session entered terminal state; stdout = one-line status
+#   130 SIGINT (shell convention: 128 + 2)
+#   2   protocol / mount / env / collision error; stderr = error message
+
+
+def _wait_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    return v
+
+
+def cmd_wait(args) -> int:
+    env = load_env()
+    if not env.author:
+        print("relay wait: RELAY_AUTHOR not set", file=sys.stderr)
+        return 2
+
+    try:
+        session = resolve_active_session(
+            env,
+            getattr(args, "project", None),
+            getattr(args, "session_id", None),
+        )
+    except SystemExit as exc:
+        print(f"relay wait: {exc}", file=sys.stderr)
+        return 2
+
+    cli_timeout = getattr(args, "timeout", None)
+    cli_poll = getattr(args, "poll", None)
+    timeout = cli_timeout if cli_timeout is not None else _wait_int_env("RELAY_WAIT_TIMEOUT", 300)
+    poll = cli_poll if cli_poll is not None else _wait_int_env("RELAY_WAIT_POLL_INTERVAL", 2)
+    if timeout < 0:
+        timeout = 0
+    if poll <= 0:
+        poll = 1
+
+    def _terminal_exit() -> int:
+        fm = latest_artifact_frontmatter(session)
+        status = (fm or {}).get("status") or "closed"
+        print(status)
+        return 12
+
+    # Entry: if the latest artifact is already targeting me, return it immediately.
+    # Otherwise establish a baseline so we don't re-emit old peer-targeted artifacts
+    # from prior turns.
+    pub_entry = list_published(session)
+    if pub_entry:
+        try:
+            fm_last, _ = parse_frontmatter(pub_entry[-1].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            fm_last = None
+        if fm_last and fm_last.get("peer") == env.author:
+            print(pub_entry[-1])
+            return 0
+    baseline_seq = latest_seq(session)
+
+    if not session_is_active(session):
+        return _terminal_exit()
+
+    deadline = time.monotonic() + timeout
+
+    try:
+        while True:
+            for pub in list_published(session):
+                m = _DRAFT_NAME_RE.match(pub.name)
+                if not m:
+                    continue
+                seq = int(m.group(1))
+                if seq <= baseline_seq:
+                    continue
+                try:
+                    fm, _body = parse_frontmatter(pub.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if fm.get("peer") == env.author:
+                    print(pub)
+                    return 0
+                baseline_seq = max(baseline_seq, seq)
+
+            if not session_is_active(session):
+                return _terminal_exit()
+
+            if time.monotonic() >= deadline:
+                return 10
+
+            time.sleep(poll)
+    except KeyboardInterrupt:
+        return 130
+
+
+# ---------------------------------------------------------------------------
 # CLI dispatch
 # ---------------------------------------------------------------------------
 
@@ -1596,6 +1700,16 @@ def build_parser() -> argparse.ArgumentParser:
     psync.add_argument("--delete", action="store_true",
                         help="Pass --delete to rsync (off by default).")
     psync.set_defaults(func=cmd_sync)
+
+    pw = sub.add_parser("wait",
+        help="Block until peer publishes a new artifact targeting this author.")
+    pw.add_argument("--project", default=None)
+    pw.add_argument("--session-id", default=None)
+    pw.add_argument("--timeout", type=int, default=None,
+                    help="Override RELAY_WAIT_TIMEOUT (default 300s).")
+    pw.add_argument("--poll", type=int, default=None,
+                    help="Override RELAY_WAIT_POLL_INTERVAL (default 2s).")
+    pw.set_defaults(func=cmd_wait)
 
     return p
 
