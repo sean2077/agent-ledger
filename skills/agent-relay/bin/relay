@@ -26,6 +26,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -47,6 +48,7 @@ TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
 PLACEHOLDER_MARKER = "TODO:"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 NON_BLOCKING_PREFLIGHT_WARNS = {"fs.mtime_monotonic"}
+OWNER_KINDS = {"agent", "tmux-pane", "tool-process", "pidfile", "renewal-file", "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -1004,6 +1006,7 @@ def cmd_status(args) -> int:
     session_id = getattr(args, "session_id", None)
     session = (resolve_session(env, session_id, project=getattr(args, "project", None))
                if session_id else resolve_active_session(env, getattr(args, "project", None)))
+    _gc_heartbeat_orphans(session, env.author or "")
     sj = json.loads((session / "session.json").read_text())
 
     pub = list_published(session)
@@ -1119,6 +1122,7 @@ def cmd_claim(args) -> int:
         getattr(args, "project", None),
         getattr(args, "session_id", None),
     )
+    _gc_heartbeat_orphans(session, env.author or "")
     draft_dir = session / ".draft"
     draft_dir.mkdir(exist_ok=True)
 
@@ -1232,6 +1236,8 @@ def cmd_publish(args) -> int:
         return 2
 
     session = draft_path.parent.parent
+    _env_pub = load_env()
+    _gc_heartbeat_orphans(session, _env_pub.author or "")
     base = draft_path.name[:-3]  # strip .md
     final_status = args.status if args.status else "ready"
     if final_status not in STATUSES or final_status == "draft":
@@ -1277,10 +1283,18 @@ def cmd_publish(args) -> int:
         except FileNotFoundError:
             pass
         _fsync_dir(session)
+        # Best-effort: tear down any heartbeat the SKILL spawned for this draft.
+        env_pub = load_env()
+        try:
+            cmd_heartbeat_stop(type("A", (), {
+                "draft": str(draft_path), "force": True,
+                "project": None, "session_id": None,
+            })())
+        except Exception as exc:
+            print(f"relay publish: heartbeat stop warning: {exc}", file=sys.stderr)
         if final_status in TERMINAL_STATUSES:
-            env = load_env()
-            if env.shared_root:
-                clear_active_marker(env.shared_root, session.name)
+            if env_pub.shared_root:
+                clear_active_marker(env_pub.shared_root, session.name)
         print(paths["md"])
         return 0
     print("relay publish: could not allocate published path after retry", file=sys.stderr)
@@ -1317,6 +1331,7 @@ def cmd_close(args) -> int:
                     return 2
         print(f"relay close: {msg}", file=sys.stderr)
         return 2
+    _gc_heartbeat_orphans(session, env.author or "")
     sentinel = session / "CLOSED"
     if sentinel.exists():
         print(f"relay close: already closed (sentinel exists at {sentinel})", file=sys.stderr)
@@ -1521,6 +1536,454 @@ def cmd_sync(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# heartbeat infrastructure (Stage 2): owner-identity model + double-fork daemon
+# + on-entry GC + recovery lock.
+#
+# Heartbeat sidecar lives next to the draft as `<draft>.heartbeat` and contains
+# JSON metadata; its mtime is the liveness signal consumed by `relay wait`
+# (Stage 2 exit code 11) and by on-entry GC.
+#
+# Owner kinds (see decision artifact 20260528-stage3-renewal-design seq 9
+# §4.3):
+#   agent / tmux-pane / tool-process  pid-based; os.kill(pid, 0)
+#   pidfile                            reads pid from a file, then os.kill
+#   renewal-file                       mtime within RELAY_RENEWAL_STALE_THRESHOLD
+#                                      (floor 60s). Stage 3 wires the tick that
+#                                      keeps it fresh; in Stage 2 alone, this
+#                                      kind has no live writer so don't use it
+#                                      as a default.
+#   none                               always alive (explicit timeout-only mode)
+# ---------------------------------------------------------------------------
+
+
+def _heartbeat_sidecar_path(draft_path: Path) -> Path:
+    return draft_path.parent / f"{draft_path.name}.heartbeat"
+
+
+def _heartbeat_pidfile_path(session: Path, author: str) -> Path:
+    return session / "_relay" / f"{author}.heartbeat.pid"
+
+
+def _owner_alive(kind: str, *, owner_pid: Optional[int] = None,
+                 owner_pidfile: Optional[str] = None,
+                 owner_renewal_file: Optional[str] = None) -> bool:
+    if kind == "none":
+        return True
+    if kind in {"agent", "tmux-pane", "tool-process"}:
+        if owner_pid is None:
+            return False
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # exists, not ours; still alive
+        except OSError:
+            return False
+        return True
+    if kind == "pidfile":
+        if not owner_pidfile:
+            return False
+        try:
+            pid_text = Path(owner_pidfile).read_text(encoding="utf-8").strip()
+            pid = int(pid_text)
+        except (OSError, ValueError):
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+    if kind == "renewal-file":
+        if not owner_renewal_file:
+            return False
+        try:
+            mtime = os.stat(owner_renewal_file).st_mtime
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
+        return mtime >= time.time() - threshold
+    return False
+
+
+def _heartbeat_daemon_main(sidecar_path: Path, pidfile_path: Path,
+                            owner_kind: str, owner_pid: Optional[int],
+                            owner_pidfile: Optional[str],
+                            owner_renewal_file: Optional[str],
+                            interval: int) -> None:
+    """Daemon main loop — runs in the detached grandchild."""
+    # Close stdio to fully detach.
+    for fd in (0, 1, 2):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    # Reopen to /dev/null so any stray prints don't EPIPE.
+    try:
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        if devnull > 2:
+            os.close(devnull)
+    except OSError:
+        pass
+
+    # Write pidfile.
+    try:
+        atomic_write_text(pidfile_path, f"{os.getpid()}\n", mode=0o600)
+    except OSError:
+        os._exit(1)
+
+    interval = max(int(interval), 1)
+    while True:
+        try:
+            time.sleep(interval)
+            if not _owner_alive(owner_kind,
+                                 owner_pid=owner_pid,
+                                 owner_pidfile=owner_pidfile,
+                                 owner_renewal_file=owner_renewal_file):
+                os._exit(0)
+            # Update mtime; the sidecar JSON is written once at start so the
+            # waiter's stat-based stale check sees fresh mtime as the proof.
+            try:
+                os.utime(sidecar_path, None)
+            except FileNotFoundError:
+                # sidecar removed externally → caller must have stopped us
+                os._exit(0)
+        except KeyboardInterrupt:
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+
+
+def _spawn_heartbeat_daemon(sidecar_path: Path, pidfile_path: Path,
+                             owner_kind: str, owner_pid: Optional[int],
+                             owner_pidfile: Optional[str],
+                             owner_renewal_file: Optional[str],
+                             interval: int) -> int:
+    """Double-fork; return the detached daemon's pid via pipe from grandchild."""
+    r, w = os.pipe()
+    first = os.fork()
+    if first > 0:
+        os.close(w)
+        try:
+            os.waitpid(first, 0)
+            raw = os.read(r, 64)
+        finally:
+            os.close(r)
+        try:
+            return int(raw.decode().strip())
+        except (ValueError, AttributeError):
+            return -1
+    # first child
+    os.close(r)
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    second = os.fork()
+    if second > 0:
+        try:
+            os.write(w, f"{second}\n".encode())
+        finally:
+            os.close(w)
+        os._exit(0)
+    # second child — the daemon
+    os.close(w)
+    _heartbeat_daemon_main(sidecar_path, pidfile_path,
+                            owner_kind, owner_pid, owner_pidfile,
+                            owner_renewal_file, interval)
+    os._exit(0)
+
+
+def _heartbeat_is_running(pidfile_path: Path) -> tuple[bool, Optional[int]]:
+    if not pidfile_path.exists():
+        return False, None
+    try:
+        pid = int(pidfile_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False, None
+    try:
+        os.kill(pid, 0)
+        return True, pid
+    except ProcessLookupError:
+        return False, pid
+    except PermissionError:
+        return True, pid
+    except OSError:
+        return False, pid
+
+
+def _heartbeat_drafts_for_author(session: Path, author: str) -> list[Path]:
+    """Return draft .md files belonging to current author that have a heartbeat sidecar."""
+    out: list[Path] = []
+    draft_dir = session / ".draft"
+    if not draft_dir.is_dir():
+        return out
+    prefix_re = re.compile(rf"^\d{{3}}-{re.escape(author)}-[a-z0-9-]+\.md$")
+    for draft in draft_dir.glob("*.md"):
+        if not prefix_re.match(draft.name):
+            continue
+        if _heartbeat_sidecar_path(draft).exists():
+            out.append(draft)
+    return out
+
+
+def _gc_heartbeat_orphans(session: Path, author: str) -> None:
+    """Best-effort: kill orphan heartbeat daemons + remove their files.
+
+    Runs at the top of every session-scoped relay subcommand. Silent.
+    """
+    if not author:
+        return
+    pidfile = _heartbeat_pidfile_path(session, author)
+    if not pidfile.exists():
+        return
+    running, pid = _heartbeat_is_running(pidfile)
+    if running and pid:
+        # Daemon is alive. Don't touch it — the live-vs-orphan distinction
+        # belongs to the caller (e.g. cmd_heartbeat_stop). On-entry GC only
+        # collects clearly dead daemons here.
+        return
+    # Pid file present but process gone → orphan. Clean files.
+    try:
+        pidfile.unlink()
+    except OSError:
+        pass
+    for draft in _heartbeat_drafts_for_author(session, author):
+        try:
+            _heartbeat_sidecar_path(draft).unlink()
+        except OSError:
+            pass
+
+
+def _recovery_lock_path(session: Path, author: str) -> Path:
+    return session / "_relay" / f"{author}.recovery.lock"
+
+
+def _acquire_recovery_lock(session: Path, author: str) -> bool:
+    """Atomic O_EXCL acquire. Returns True on success, False if already held."""
+    if not author:
+        return False
+    lock = _recovery_lock_path(session, author)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "author": author,
+        "started_at": now_iso(),
+    }).encode("utf-8") + b"\n"
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def _release_recovery_lock(session: Path, author: str) -> None:
+    if not author:
+        return
+    try:
+        _recovery_lock_path(session, author).unlink()
+    except OSError:
+        pass
+
+
+def cmd_heartbeat_start(args) -> int:
+    env = load_env()
+    if not env.author:
+        print("relay heartbeat start: RELAY_AUTHOR not set", file=sys.stderr)
+        return 2
+    if args.owner_kind not in OWNER_KINDS:
+        print(
+            f"relay heartbeat start: --owner-kind must be one of "
+            f"{sorted(OWNER_KINDS)}, got {args.owner_kind!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    draft_path = Path(args.draft).resolve()
+    if not draft_path.is_file() or draft_path.parent.name != ".draft":
+        print(f"relay heartbeat start: --draft must point to a .draft/ file: {draft_path}",
+              file=sys.stderr)
+        return 2
+    session = draft_path.parent.parent
+
+    # Validate owner combination.
+    if args.owner_kind in {"agent", "tmux-pane", "tool-process"} and args.owner_pid is None:
+        print(f"relay heartbeat start: --owner-kind {args.owner_kind} requires --owner-pid",
+              file=sys.stderr)
+        return 2
+    if args.owner_kind == "pidfile" and not args.owner_pidfile:
+        print("relay heartbeat start: --owner-kind pidfile requires --owner-pidfile",
+              file=sys.stderr)
+        return 2
+
+    # Immediate owner-alive check; refuse if dead at start.
+    if args.owner_kind != "none":
+        alive = _owner_alive(
+            args.owner_kind,
+            owner_pid=args.owner_pid,
+            owner_pidfile=args.owner_pidfile,
+            owner_renewal_file=getattr(args, "owner_renewal_file", None),
+        )
+        if not alive:
+            print(
+                f"relay heartbeat start: owner not alive at start "
+                f"(kind={args.owner_kind}, pid={args.owner_pid}, "
+                f"pidfile={args.owner_pidfile})",
+                file=sys.stderr,
+            )
+            return 2
+
+    pidfile = _heartbeat_pidfile_path(session, env.author)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    running, _existing_pid = _heartbeat_is_running(pidfile)
+    if running:
+        print(
+            f"relay heartbeat start: heartbeat already running for {env.author} "
+            f"(pidfile {pidfile})",
+            file=sys.stderr,
+        )
+        return 3
+
+    # Seed sidecar JSON.
+    sidecar = _heartbeat_sidecar_path(draft_path)
+    payload = {
+        "heartbeat_pid": None,  # filled by daemon
+        "owner_pid": args.owner_pid,
+        "owner_kind": args.owner_kind,
+        "owner_pidfile": args.owner_pidfile,
+        "owner_renewal_file": getattr(args, "owner_renewal_file", None),
+        "host": os.uname().nodename,
+        "author": env.author,
+        "draft": draft_path.name,
+        "started_at": now_iso(),
+        "last_beat": now_iso(),
+    }
+    atomic_write_text(sidecar, json.dumps(payload, indent=2) + "\n", mode=0o600)
+
+    interval = args.interval if args.interval is not None else _wait_int_env(
+        "RELAY_HEARTBEAT_INTERVAL", 10
+    )
+    pid = _spawn_heartbeat_daemon(
+        sidecar, pidfile,
+        args.owner_kind, args.owner_pid, args.owner_pidfile,
+        getattr(args, "owner_renewal_file", None),
+        interval,
+    )
+    if pid <= 0:
+        sidecar.unlink(missing_ok=True)
+        print("relay heartbeat start: failed to spawn daemon", file=sys.stderr)
+        return 2
+
+    # Wait briefly for the daemon to write its pidfile.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if pidfile.exists():
+            break
+        time.sleep(0.05)
+
+    # Patch sidecar with the actual daemon pid (best-effort).
+    try:
+        payload["heartbeat_pid"] = pid
+        atomic_write_text(sidecar, json.dumps(payload, indent=2) + "\n", mode=0o600)
+    except OSError:
+        pass
+
+    print(pid)
+    return 0
+
+
+def cmd_heartbeat_stop(args) -> int:
+    env = load_env()
+    if not env.author:
+        print("relay heartbeat stop: RELAY_AUTHOR not set", file=sys.stderr)
+        return 2
+
+    draft_arg = getattr(args, "draft", None)
+    if draft_arg:
+        draft_path = Path(draft_arg).resolve()
+        if draft_path.parent.name != ".draft":
+            print(f"relay heartbeat stop: --draft must point under .draft/: {draft_path}",
+                  file=sys.stderr)
+            return 2
+        session = draft_path.parent.parent
+    else:
+        try:
+            session = resolve_active_session(
+                env,
+                getattr(args, "project", None),
+                getattr(args, "session_id", None),
+            )
+        except SystemExit as exc:
+            print(f"relay heartbeat stop: {exc}", file=sys.stderr)
+            return 2
+        draft_path = None
+
+    pidfile = _heartbeat_pidfile_path(session, env.author)
+    if not pidfile.exists() and not args.force:
+        # Nothing to do; considered success.
+        return 0
+
+    running, pid = _heartbeat_is_running(pidfile)
+    if running and pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        # Wait briefly then SIGKILL if still alive.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    # Remove pidfile.
+    try:
+        pidfile.unlink()
+    except OSError:
+        pass
+    # Remove sidecar(s).
+    if draft_path is not None:
+        try:
+            _heartbeat_sidecar_path(draft_path).unlink()
+        except OSError:
+            pass
+    else:
+        for draft in _heartbeat_drafts_for_author(session, env.author):
+            try:
+                _heartbeat_sidecar_path(draft).unlink()
+            except OSError:
+                pass
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # cmd_wait — block until peer publishes a new artifact targeting this author
 # ---------------------------------------------------------------------------
 
@@ -1559,6 +2022,7 @@ def cmd_wait(args) -> int:
     except SystemExit as exc:
         print(f"relay wait: {exc}", file=sys.stderr)
         return 2
+    _gc_heartbeat_orphans(session, env.author)
 
     cli_timeout = getattr(args, "timeout", None)
     cli_poll = getattr(args, "poll", None)
@@ -1710,6 +2174,34 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--poll", type=int, default=None,
                     help="Override RELAY_WAIT_POLL_INTERVAL (default 2s).")
     pw.set_defaults(func=cmd_wait)
+
+    phb = sub.add_parser("heartbeat", help="Owner-tied liveness daemon for a draft.")
+    phs = phb.add_subparsers(dest="heartbeat_cmd", required=True)
+
+    phb_start = phs.add_parser("start",
+        help="Spawn a detached daemon that refreshes the draft heartbeat sidecar.")
+    phb_start.add_argument("--draft", required=True,
+        help="Path to .draft/NNN-<author>-<kind>.md")
+    phb_start.add_argument("--owner-kind", required=True, choices=sorted(OWNER_KINDS),
+        help="How to determine owner liveness.")
+    phb_start.add_argument("--owner-pid", type=int, default=None)
+    phb_start.add_argument("--owner-pidfile", default=None)
+    phb_start.add_argument("--owner-renewal-file", default=None,
+        help="Path to a file whose mtime represents owner liveness "
+             "(used with --owner-kind renewal-file; populated by `relay heartbeat tick` in Stage 3).")
+    phb_start.add_argument("--interval", type=int, default=None,
+        help="Beat interval in seconds (default RELAY_HEARTBEAT_INTERVAL=10).")
+    phb_start.set_defaults(func=cmd_heartbeat_start)
+
+    phb_stop = phs.add_parser("stop",
+        help="Terminate the heartbeat daemon and remove its files.")
+    phb_stop.add_argument("--draft", default=None,
+        help="Optional draft path; if omitted, all sidecars for current author are cleared.")
+    phb_stop.add_argument("--project", default=None)
+    phb_stop.add_argument("--session-id", default=None)
+    phb_stop.add_argument("--force", action="store_true",
+        help="Remove files even if no daemon is running.")
+    phb_stop.set_defaults(func=cmd_heartbeat_stop)
 
     return p
 
