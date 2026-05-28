@@ -310,6 +310,54 @@ def test_gc_live_pid_with_valid_sidecar_preserved(monkeypatch, tmp_path, capsys)
             owner.wait(timeout=5)
 
 
+def test_gc_live_pid_with_renewal_file_owner_preserved(monkeypatch, tmp_path, capsys):
+    """Live heartbeat with renewal-file owner + fresh renewal must survive GC.
+
+    Covers the production sidecar shape (owner_kind='renewal-file' + real path)
+    that the owner_kind='none' sibling test cannot exercise.
+    """
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    owner = subprocess.Popen(["sleep", "60"])
+    pidfile = relay._heartbeat_pidfile_path(session, "claude")
+    sidecar = relay._heartbeat_sidecar_path(draft)
+    renewal = None
+    try:
+        renewal = relay._renewal_path_for_draft(draft, session, relay.load_env())
+        assert renewal is not None
+        renewal.parent.mkdir(parents=True, exist_ok=True)
+        renewal.touch()
+
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(f"{owner.pid}\n")
+        sidecar.write_text(json.dumps({
+            "heartbeat_pid": owner.pid,
+            "owner_pid": None,
+            "owner_kind": "renewal-file",
+            "owner_pidfile": None,
+            "owner_renewal_file": str(renewal),
+            "author": "claude",
+            "draft": draft.name,
+        }) + "\n")
+
+        relay._gc_heartbeat_orphans(session, "claude")
+
+        assert pidfile.exists()
+        assert sidecar.exists()
+        assert renewal.exists()
+        assert owner.poll() is None
+    finally:
+        pidfile.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        if renewal is not None:
+            renewal.unlink(missing_ok=True)
+        if owner.poll() is None:
+            owner.terminate()
+            owner.wait(timeout=5)
+
+
 def test_publish_stops_heartbeat_best_effort(monkeypatch, tmp_path, capsys):
     """cmd_publish success kills the running daemon + removes its files."""
     session = _bootstrap(monkeypatch, tmp_path)
