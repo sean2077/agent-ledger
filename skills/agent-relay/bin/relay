@@ -1007,6 +1007,8 @@ def cmd_status(args) -> int:
     session = (resolve_session(env, session_id, project=getattr(args, "project", None))
                if session_id else resolve_active_session(env, getattr(args, "project", None)))
     _gc_heartbeat_orphans(session, env.author or "")
+    _gc_renewal_orphans(session, env)
+    _maybe_tick_renewal(session, env)
     sj = json.loads((session / "session.json").read_text())
 
     pub = list_published(session)
@@ -1123,6 +1125,8 @@ def cmd_claim(args) -> int:
         getattr(args, "session_id", None),
     )
     _gc_heartbeat_orphans(session, env.author or "")
+    _gc_renewal_orphans(session, env)
+    _maybe_tick_renewal(session, env)
     draft_dir = session / ".draft"
     draft_dir.mkdir(exist_ok=True)
 
@@ -1238,6 +1242,8 @@ def cmd_publish(args) -> int:
     session = draft_path.parent.parent
     _env_pub = load_env()
     _gc_heartbeat_orphans(session, _env_pub.author or "")
+    _gc_renewal_orphans(session, _env_pub)
+    _maybe_tick_renewal(session, _env_pub)
     base = draft_path.name[:-3]  # strip .md
     final_status = args.status if args.status else "ready"
     if final_status not in STATUSES or final_status == "draft":
@@ -1332,6 +1338,8 @@ def cmd_close(args) -> int:
         print(f"relay close: {msg}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author or "")
+    _gc_renewal_orphans(session, env)
+    _maybe_tick_renewal(session, env)
     sentinel = session / "CLOSED"
     if sentinel.exists():
         print(f"relay close: already closed (sentinel exists at {sentinel})", file=sys.stderr)
@@ -1835,6 +1843,23 @@ def cmd_heartbeat_start(args) -> int:
         print("relay heartbeat start: --owner-kind pidfile requires --owner-pidfile",
               file=sys.stderr)
         return 2
+    if args.owner_kind == "renewal-file" and not getattr(args, "owner_renewal_file", None):
+        # Derive the scoped renewal path from project/session/author/draft.
+        derived = _renewal_path_for_draft(draft_path, session, env)
+        if derived is None:
+            print(
+                "relay heartbeat start: cannot derive renewal path "
+                "(RELAY_PROJECT or RELAY_AUTHOR unset)",
+                file=sys.stderr,
+            )
+            return 2
+        derived.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Seed the renewal file so the daemon's first owner-alive check passes.
+        if not derived.exists():
+            derived.touch(mode=0o600)
+        else:
+            os.utime(derived, None)
+        args.owner_renewal_file = str(derived)
 
     # Immediate owner-alive check; refuse if dead at start.
     if args.owner_kind != "none":
@@ -1968,18 +1993,126 @@ def cmd_heartbeat_stop(args) -> int:
         pidfile.unlink()
     except OSError:
         pass
-    # Remove sidecar(s).
+    # Remove sidecar(s) and renewal file(s).
     if draft_path is not None:
         try:
             _heartbeat_sidecar_path(draft_path).unlink()
         except OSError:
             pass
+        renewal = _renewal_path_for_draft(draft_path, session, env)
+        if renewal is not None:
+            try:
+                renewal.unlink()
+            except OSError:
+                pass
     else:
         for draft in _heartbeat_drafts_for_author(session, env.author):
             try:
                 _heartbeat_sidecar_path(draft).unlink()
             except OSError:
                 pass
+        d = _renewal_dir(session, env)
+        if d is not None and d.is_dir():
+            for f in d.glob("*.renewal"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: renewal protocol
+#
+# Renewal files live locally on each side (not in .shared/, since sshfs
+# attribute caching is exactly what mtime-based renewal must not depend on).
+# Path scope: $XDG_RUNTIME_DIR/relay/<project>/<session>/<author>/<draft>.renewal
+#
+# Each session-scoped relay subcommand auto-ticks the renewal file(s) for the
+# current author in the resolved session. As long as the SKILL keeps making
+# relay calls, the renewal stays fresh; when the SKILL stops (e.g. user Ctrl-C
+# mid-think), the renewal goes stale, the heartbeat daemon sees its owner is
+# dead (via _owner_alive(renewal-file)), and stops touching the shared
+# heartbeat sidecar. Peer's `wait` then detects the stale heartbeat → exit 11.
+# ---------------------------------------------------------------------------
+
+_tick_in_flight = False  # recursion guard for auto-tick at subcommand entries
+
+
+def _renewal_dir_for(project: Optional[str], session_id: str, author: str) -> Optional[Path]:
+    """Resolve the local renewal directory. Returns None if project/author is unknown."""
+    if not project or not author or not session_id:
+        return None
+    base = (
+        os.environ.get("XDG_RUNTIME_DIR")
+        or os.environ.get("TMPDIR")
+        or "/tmp"
+    )
+    return Path(base) / "relay" / project / session_id / author
+
+
+def _renewal_dir(session: Path, env: Env) -> Optional[Path]:
+    return _renewal_dir_for(derive_project(env), session.name, env.author or "")
+
+
+def _renewal_path_for_draft(draft_path: Path, session: Path, env: Env) -> Optional[Path]:
+    d = _renewal_dir(session, env)
+    if d is None:
+        return None
+    # draft_path is like 001-claude-plan.md; strip .md for the renewal basename.
+    return d / f"{draft_path.stem}.renewal"
+
+
+def _maybe_tick_renewal(session: Path, env: Env) -> None:
+    """Best-effort: refresh all renewal files in the current session/author scope."""
+    global _tick_in_flight
+    if _tick_in_flight:
+        return
+    d = _renewal_dir(session, env)
+    if d is None or not d.is_dir():
+        return
+    _tick_in_flight = True
+    try:
+        for renewal_file in d.glob("*.renewal"):
+            try:
+                os.utime(renewal_file, None)
+            except OSError:
+                pass
+    finally:
+        _tick_in_flight = False
+
+
+def _gc_renewal_orphans(session: Path, env: Env) -> None:
+    """Remove renewal files whose corresponding heartbeat sidecar is gone."""
+    d = _renewal_dir(session, env)
+    if d is None or not d.is_dir():
+        return
+    active_basenames = {
+        draft.stem for draft in _heartbeat_drafts_for_author(session, env.author or "")
+    }
+    for renewal_file in d.glob("*.renewal"):
+        if renewal_file.stem not in active_basenames:
+            try:
+                renewal_file.unlink()
+            except OSError:
+                pass
+
+
+def cmd_heartbeat_tick(args) -> int:
+    env = load_env()
+    if not env.author:
+        print("relay heartbeat tick: RELAY_AUTHOR not set", file=sys.stderr)
+        return 2
+    try:
+        session = resolve_active_session(
+            env,
+            getattr(args, "project", None),
+            getattr(args, "session_id", None),
+        )
+    except SystemExit as exc:
+        print(f"relay heartbeat tick: {exc}", file=sys.stderr)
+        return 2
+    _maybe_tick_renewal(session, env)
     return 0
 
 
@@ -2023,6 +2156,8 @@ def cmd_wait(args) -> int:
         print(f"relay wait: {exc}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author)
+    _gc_renewal_orphans(session, env)
+    _maybe_tick_renewal(session, env)
 
     cli_timeout = getattr(args, "timeout", None)
     cli_poll = getattr(args, "poll", None)
@@ -2040,8 +2175,6 @@ def cmd_wait(args) -> int:
         return 12
 
     # Entry: if the latest artifact is already targeting me, return it immediately.
-    # Otherwise establish a baseline so we don't re-emit old peer-targeted artifacts
-    # from prior turns.
     pub_entry = list_published(session)
     if pub_entry:
         try:
@@ -2055,6 +2188,15 @@ def cmd_wait(args) -> int:
 
     if not session_is_active(session):
         return _terminal_exit()
+
+    # Stage 3 effective-deadline rule: if peer has a live renewal-file heartbeat,
+    # the wait must run long enough for that heartbeat to plausibly go stale.
+    # Otherwise we exit 10 before exit 11 can ever fire under defaults.
+    has_renewal_file_peer = _peer_has_renewal_file_heartbeat(session, env.peer or "")
+    if has_renewal_file_peer:
+        threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
+        timeout = max(timeout, threshold + poll)
+    stale_threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
 
     deadline = time.monotonic() + timeout
 
@@ -2079,12 +2221,58 @@ def cmd_wait(args) -> int:
             if not session_is_active(session):
                 return _terminal_exit()
 
+            # Stage 3 exit 11: peer heartbeat sidecar exists and went stale.
+            if has_renewal_file_peer and _peer_heartbeat_is_stale(session, env.peer or "",
+                                                                    stale_threshold):
+                return 11
+
             if time.monotonic() >= deadline:
                 return 10
 
             time.sleep(poll)
     except KeyboardInterrupt:
         return 130
+
+
+def _peer_heartbeat_sidecars(session: Path, peer: str) -> list[Path]:
+    """List heartbeat sidecars (`.draft/*.heartbeat`) belonging to peer."""
+    if not peer:
+        return []
+    draft_dir = session / ".draft"
+    if not draft_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for sidecar in draft_dir.glob("*.heartbeat"):
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("author") == peer:
+            out.append(sidecar)
+    return out
+
+
+def _peer_has_renewal_file_heartbeat(session: Path, peer: str) -> bool:
+    for sidecar in _peer_heartbeat_sidecars(session, peer):
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("owner_kind") == "renewal-file":
+            return True
+    return False
+
+
+def _peer_heartbeat_is_stale(session: Path, peer: str, threshold: int) -> bool:
+    cutoff = time.time() - threshold
+    for sidecar in _peer_heartbeat_sidecars(session, peer):
+        try:
+            mtime = sidecar.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -2202,6 +2390,12 @@ def build_parser() -> argparse.ArgumentParser:
     phb_stop.add_argument("--force", action="store_true",
         help="Remove files even if no daemon is running.")
     phb_stop.set_defaults(func=cmd_heartbeat_stop)
+
+    phb_tick = phs.add_parser("tick",
+        help="Refresh the local renewal file mtime so the daemon sees the owner alive.")
+    phb_tick.add_argument("--project", default=None)
+    phb_tick.add_argument("--session-id", default=None)
+    phb_tick.set_defaults(func=cmd_heartbeat_tick)
 
     return p
 

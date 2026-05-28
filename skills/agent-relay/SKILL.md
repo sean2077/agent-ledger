@@ -97,6 +97,12 @@ This is the core 95% case. Take one full turn in the relay.
    DRAFT=$("$RELAY" claim --kind <kind> --in-reply-to <peer-seq>)
    ```
    `kind` is one of: `plan | review | fix | note | question | decision | correction | addendum`. The CLI creates a hidden `.draft/NNN-<you>-<kind>.md` with frontmatter scaffold; body is a placeholder.
+
+   **Optional (Stage 3 crash detection)** — if you want peer's `relay wait` to be able to distinguish "you're still thinking" from "you crashed", start a renewal-file heartbeat right after claim:
+   ```bash
+   "$RELAY" heartbeat start --draft "$DRAFT" --owner-kind renewal-file
+   ```
+   Every subsequent relay subcommand you run during this turn (status, claim, publish, wait, close) auto-touches the local renewal file. As long as you keep running relay subcommands, peer sees you alive. If your turn spans >10 minutes without any relay call (e.g. one giant Edit), call `"$RELAY" heartbeat tick` manually to keep the renewal fresh. `relay publish` auto-stops the heartbeat on success.
 6. **Fill the draft**: use your Edit tool on `$DRAFT`. Replace the placeholder body with your substantive content. **Critical**: replace the `prompt_for_next: |` block — the scaffold has `TODO: ...` and `publish` will reject anything still containing `TODO:`. See "Writing prompt_for_next" below.
 7. **Set `sync_needed: true`** in frontmatter if you modified any non-`.shared/` files. List them under `touched_paths`.
 8. **Publish**:
