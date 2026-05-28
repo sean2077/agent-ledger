@@ -100,7 +100,7 @@ def test_init_fails_without_shared_root_outside_git(monkeypatch, tmp_path, capsy
 
 
 def test_init_role_copies_envrc_template(monkeypatch, tmp_path, capsys):
-    """--role host writes .envrc.<hostname> from the matching template."""
+    """--role host writes .envrc.<hostname> AND the dispatcher .envrc."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
@@ -113,8 +113,29 @@ def test_init_role_copies_envrc_template(monkeypatch, tmp_path, capsys):
     body = target.read_text()
     assert "RELAY_ROLE=host" in body
     assert "RELAY_AUTHOR=codex" in body
+    # Dispatcher .envrc must also be installed.
+    dispatcher = repo / ".envrc"
+    assert dispatcher.is_file()
+    assert "LOCAL_ENVRC=" in dispatcher.read_text()
     out = capsys.readouterr().out
     assert "envrc.host.example" in out
+    assert "envrc.dispatcher.example" in out
+
+
+def test_init_role_dispatcher_idempotent(monkeypatch, tmp_path, capsys):
+    """If .envrc dispatcher already exists, --role leaves it alone."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    dispatcher = repo / ".envrc"
+    dispatcher.write_text("# user dispatcher; do not clobber\n")
+    rc = relay.cmd_init(_args(role="host"))
+    assert rc == 0
+    assert dispatcher.read_text() == "# user dispatcher; do not clobber\n"
+    out = capsys.readouterr().out
+    # Dispatcher line should say "already present", not "created".
+    assert ".envrc already present" in out or f"{dispatcher} already present" in out
 
 
 def test_init_role_is_idempotent_when_envrc_exists(monkeypatch, tmp_path, capsys):

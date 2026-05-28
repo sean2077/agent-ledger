@@ -873,6 +873,22 @@ def _copy_envrc_template(role: str, project_root: Path) -> tuple[Path, bool]:
     return target, True
 
 
+def _copy_envrc_dispatcher(project_root: Path) -> tuple[Path, bool]:
+    """Copy templates/envrc.dispatcher.example to <project>/.envrc.
+
+    The dispatcher is the project-agnostic file that sources `.envrc.<hostname>`.
+    It's committed in this repo but needs to be installed when adopting the relay
+    skill in other projects. Returns (target, created)."""
+    template = RELAY_PACKAGE_DIR / "templates" / "envrc.dispatcher.example"
+    if not template.exists():
+        raise SystemExit(f"relay init: template not found: {template}")
+    target = project_root / ".envrc"
+    if target.exists():
+        return target, False
+    target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    return target, True
+
+
 def cmd_init(args) -> int:
     env = load_env()
     project_root = git_toplevel()
@@ -895,7 +911,15 @@ def cmd_init(args) -> int:
 
     role = getattr(args, "role", None)
     envrc_just_created = False
+    dispatcher_just_created = False
     if role and project_root:
+        # 1. Install the project-agnostic dispatcher (.envrc) if missing.
+        dispatcher_target, dispatcher_just_created = _copy_envrc_dispatcher(project_root)
+        if dispatcher_just_created:
+            print(f"relay init: created {dispatcher_target} (from envrc.dispatcher.example)")
+        else:
+            print(f"relay init: {dispatcher_target} already present")
+        # 2. Install the per-host file (.envrc.<hostname>) from the role template.
         envrc_target, envrc_just_created = _copy_envrc_template(role, project_root)
         if envrc_just_created:
             print(f"relay init: created {envrc_target} (from envrc.{role}.example)")
