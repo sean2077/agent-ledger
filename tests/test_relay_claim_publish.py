@@ -337,6 +337,221 @@ def test_publish_rejects_kind_mismatch(monkeypatch, tmp_path, capsys):
     assert "kind" in err.lower()
 
 
+def test_claim_correction_requires_corrects(monkeypatch, tmp_path, capsys):
+    """Finding 6: --kind correction must be claimed with --corrects <seq>."""
+    _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": "correction", "in_reply_to": 1, "corrects": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--corrects" in err
+
+
+def test_claim_corrects_must_be_positive(monkeypatch, tmp_path, capsys):
+    """Finding 6: --corrects must be a positive integer."""
+    _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": "correction", "in_reply_to": 1, "corrects": 0,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "positive" in err.lower()
+
+
+def test_claim_with_corrects_lands_in_frontmatter(monkeypatch, tmp_path, capsys):
+    """Finding 6: a successful --corrects claim writes the value into
+    the scaffold so publish-time validation sees it.
+    """
+    session = _bootstrap(monkeypatch, tmp_path)
+    # First, plant a published seq 1 to correct.
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    draft1 = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft1)
+    relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft1), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    capsys.readouterr()
+    # Now claim a correction pointing at seq 1.
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": "correction", "in_reply_to": 1, "corrects": 1,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 0
+    draft = Path(capsys.readouterr().out.strip())
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    assert fm["kind"] == "correction"
+    assert fm["corrects"] == 1
+
+
+def test_publish_rejects_correction_without_corrects(monkeypatch, tmp_path, capsys):
+    """Finding 6 belt+braces: even if someone hand-edits a correction draft
+    to clear corrects, publish must refuse it."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    # plant seq 1
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    d1 = Path(capsys.readouterr().out.strip())
+    _fill_draft(d1)
+    relay.cmd_publish(type("A", (), {
+        "draft_path": str(d1), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    capsys.readouterr()
+    # claim correction properly
+    relay.cmd_claim(type("A", (), {"kind": "correction", "in_reply_to": 1,
+                                     "corrects": 1,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    fm["corrects"] = None  # tamper
+    fm["prompt_for_next"] = "real instructions\n"
+    draft.write_text(relay.dump_frontmatter(fm, "\nbody\n"))
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "corrects" in err
+
+
+def test_publish_rejects_corrects_pointing_at_future_seq(monkeypatch, tmp_path, capsys):
+    """Finding 6: corrects must point at a prior seq, not self or later."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "correction", "in_reply_to": None,
+                                     "corrects": 1,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    # seq is 1; corrects points at 1 (self) — must be rejected.
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    fm["prompt_for_next"] = "real instructions\n"
+    draft.write_text(relay.dump_frontmatter(fm, "\nbody\n"))
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "future" in err or "less than" in err
+
+
+def test_draft_set_fills_body_and_prompt_from_files(monkeypatch, tmp_path, capsys):
+    """Finding 9: relay draft set must update body + prompt_for_next from
+    files without the agent's Write tool."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    # Pre-fill: scaffold has TODO: in prompt_for_next.
+    body_file = tmp_path / "body.txt"
+    body_file.write_text("# my body\n\nreal content here\n")
+    pfn_file = tmp_path / "pfn.txt"
+    pfn_file.write_text("respond with kind: review\n")
+    rc = relay.cmd_draft_set(type("A", (), {
+        "draft_path": str(draft),
+        "body_file": str(body_file),
+        "prompt_for_next_file": str(pfn_file),
+        "sync_needed": False,
+        "touched_path": [],
+        "corrects": None,
+    })())
+    assert rc == 0
+    fm, body = relay.parse_frontmatter(draft.read_text())
+    assert "TODO:" not in fm["prompt_for_next"]
+    assert "review" in fm["prompt_for_next"]
+    assert "real content here" in body
+    assert "TODO" not in body
+    # Now publish should succeed without the placeholder reject path.
+    capsys.readouterr()
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 0, f"publish should succeed after draft set; err={capsys.readouterr().err}"
+
+
+def test_draft_set_rejects_double_stdin(monkeypatch, tmp_path, capsys):
+    """Finding 9: only one source may be '-' since stdin is consumed once."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    rc = relay.cmd_draft_set(type("A", (), {
+        "draft_path": str(draft),
+        "body_file": "-",
+        "prompt_for_next_file": "-",
+        "sync_needed": False,
+        "touched_path": [],
+        "corrects": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "stdin" in err.lower()
+
+
+def test_draft_set_appends_touched_paths_and_corrects(monkeypatch, tmp_path, capsys):
+    """Finding 9: flags compose; touched_path appends without duplicating."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "addendum", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    body_file = tmp_path / "body.txt"
+    body_file.write_text("body\n")
+    pfn_file = tmp_path / "pfn.txt"
+    pfn_file.write_text("do thing\n")
+    rc = relay.cmd_draft_set(type("A", (), {
+        "draft_path": str(draft),
+        "body_file": str(body_file),
+        "prompt_for_next_file": str(pfn_file),
+        "sync_needed": True,
+        "touched_path": ["a.py", "b.py", "a.py"],
+        "corrects": 1,
+    })())
+    assert rc == 0
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    assert fm["sync_needed"] is True
+    assert fm["touched_paths"] == ["a.py", "b.py"]
+    assert fm["corrects"] == 1
+
+
+def test_draft_set_refuses_non_draft_path(monkeypatch, tmp_path, capsys):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    bogus = tmp_path / "not-a-draft.md"
+    bogus.write_text("x")
+    rc = relay.cmd_draft_set(type("A", (), {
+        "draft_path": str(bogus),
+        "body_file": None, "prompt_for_next_file": None,
+        "sync_needed": False, "touched_path": [], "corrects": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert ".draft" in err
+
+
 def test_publish_refuses_non_draft_path(monkeypatch, tmp_path, capsys):
     session = _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()

@@ -1407,7 +1407,8 @@ def cmd_next_seq(args) -> int:
     return 0
 
 
-def _scaffold_frontmatter(env: Env, seq: int, kind: str, in_reply_to: int | None) -> dict:
+def _scaffold_frontmatter(env: Env, seq: int, kind: str, in_reply_to: int | None,
+                          corrects: int | None = None) -> dict:
     return {
         "seq": seq,
         "author": env.author or "unknown",
@@ -1419,7 +1420,7 @@ def _scaffold_frontmatter(env: Env, seq: int, kind: str, in_reply_to: int | None
         "prompt_for_next": "TODO: write actionable instructions for the peer\n",
         "sync_needed": False,
         "touched_paths": [],
-        "corrects": None,
+        "corrects": corrects,
     }
 
 
@@ -1428,6 +1429,20 @@ def cmd_claim(args) -> int:
     if args.kind not in KINDS:
         print(f"relay claim: unknown kind {args.kind!r} (known: {sorted(KINDS)})",
               file=sys.stderr)
+        return 2
+    # Finding 6: --corrects was documented for kind=correction but not
+    # actually present on the parser. Enforce it here.
+    corrects = getattr(args, "corrects", None)
+    if corrects is not None and corrects < 1:
+        print(f"relay claim: --corrects must be a positive integer (got {corrects})",
+              file=sys.stderr)
+        return 2
+    if args.kind == "correction" and corrects is None:
+        print(
+            "relay claim: --corrects <seq> is required when --kind correction; "
+            "the field points at the seq this correction supersedes.",
+            file=sys.stderr,
+        )
         return 2
     try:
         session = resolve_active_session(
@@ -1460,7 +1475,8 @@ def cmd_claim(args) -> int:
         if draft_path.exists():
             seq += 1
             continue
-        fm = _scaffold_frontmatter(env, seq, args.kind, args.in_reply_to)
+        fm = _scaffold_frontmatter(env, seq, args.kind, args.in_reply_to,
+                                   corrects=corrects)
         body = (
             f"\n# {args.kind} by {author}, seq {seq}\n\n"
             "<!-- write your substantive content here. delete this comment. -->\n"
@@ -1555,6 +1571,20 @@ def _validate_draft(draft_path: Path) -> tuple[dict, str]:
             f"frontmatter/filename kind mismatch: filename={file_kind!r} "
             f"frontmatter={fm.get('kind')!r}"
         )
+    # Finding 6: kind=correction MUST point at the seq it supersedes.
+    if fm.get("kind") == "correction":
+        c = fm.get("corrects")
+        if not isinstance(c, int) or c < 1:
+            raise ValueError(
+                "kind=correction requires a positive int 'corrects' field "
+                f"pointing at the seq being corrected (got {c!r}). "
+                "Re-claim with `--corrects <seq>`."
+            )
+        if c >= fm["seq"]:
+            raise ValueError(
+                f"corrects={c} must be less than this artifact's seq "
+                f"({fm['seq']}); you cannot correct a future artifact."
+            )
     return fm, body
 
 
@@ -1667,6 +1697,94 @@ def cmd_publish(args) -> int:
         file=sys.stderr,
     )
     return 2
+
+
+def _read_field_source(label: str, value: str | None) -> str | None:
+    """Resolve --body-file / --prompt-for-next-file value.
+
+    Returns the field's text, or None if the user did not pass the flag.
+    Value is either a file path or '-' for stdin. The caller is responsible
+    for ensuring at most one source reads stdin per invocation.
+    """
+    if value is None:
+        return None
+    if value == "-":
+        return sys.stdin.read()
+    try:
+        return Path(value).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"--{label}-file: cannot read {value}: {exc}") from exc
+
+
+def cmd_draft_set(args) -> int:
+    """Fill a draft's body / prompt_for_next / sync_needed / touched_paths /
+    corrects without going through the agent's native Write tool (finding 9).
+
+    Preserves seq, author, peer, kind, created, in_reply_to, status. The
+    atomic write goes through a tmp+rename within the .draft/ dir.
+    """
+    draft_path = Path(args.draft_path).resolve()
+    if not draft_path.exists():
+        print(f"relay draft set: draft not found: {draft_path}", file=sys.stderr)
+        return 2
+    if draft_path.parent.name != ".draft":
+        print(f"relay draft set: not under .draft/: {draft_path}", file=sys.stderr)
+        return 2
+
+    stdin_sources = sum(1 for v in (args.body_file, args.prompt_for_next_file) if v == "-")
+    if stdin_sources > 1:
+        print(
+            "relay draft set: at most one of --body-file / --prompt-for-next-file "
+            "may be '-' per invocation (stdin can only be read once).",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        body_new = _read_field_source("body", args.body_file)
+        pfn_new = _read_field_source("prompt-for-next", args.prompt_for_next_file)
+    except ValueError as exc:
+        print(f"relay draft set: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        text = draft_path.read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(text)
+    except (OSError, ValueError) as exc:
+        print(f"relay draft set: cannot parse draft: {exc}", file=sys.stderr)
+        return 2
+
+    if body_new is not None:
+        body = body_new
+    if pfn_new is not None:
+        fm["prompt_for_next"] = pfn_new
+    if args.sync_needed:
+        fm["sync_needed"] = True
+    if args.touched_path:
+        # Append (don't replace) — multiple set invocations should accumulate.
+        existing = fm.get("touched_paths") or []
+        for tp in args.touched_path:
+            if tp not in existing:
+                existing.append(tp)
+        fm["touched_paths"] = existing
+    if args.corrects is not None:
+        if args.corrects < 1:
+            print(
+                f"relay draft set: --corrects must be a positive integer "
+                f"(got {args.corrects})",
+                file=sys.stderr,
+            )
+            return 2
+        fm["corrects"] = args.corrects
+
+    new_text = dump_frontmatter(fm, body)
+    try:
+        atomic_write_text(draft_path, new_text, mode=0o600)
+    except OSError as exc:
+        print(f"relay draft set: write failed: {exc}", file=sys.stderr)
+        return 2
+    print(draft_path)
+    return 0
 
 
 def cmd_close(args) -> int:
@@ -3245,9 +3363,44 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("claim", help="Scaffold a new draft artifact under .draft/.")
     pc.add_argument("--kind", required=True, choices=sorted(KINDS))
     pc.add_argument("--in-reply-to", type=int, default=None)
+    pc.add_argument("--corrects", type=int, default=None,
+                    help="Seq this draft supersedes; required when --kind correction. "
+                         "Optional for addendum (an addendum adds info without retracting).")
     pc.add_argument("--project", default=None)
     pc.add_argument("--session-id", default=None)
     pc.set_defaults(func=cmd_claim)
+
+    pds = sub.add_parser(
+        "draft",
+        help="Fill draft contents without the agent's native Write/Edit tools.",
+    )
+    ds_sub = pds.add_subparsers(dest="draft_cmd", required=True)
+    pds_set = ds_sub.add_parser(
+        "set",
+        help="Update a draft's body / prompt_for_next / flags (finding 9).",
+    )
+    pds_set.add_argument("draft_path", help="Path to .draft/NNN-author-kind.md")
+    pds_set.add_argument(
+        "--body-file", default=None,
+        help="Path to body content. Use '-' to read body from stdin.",
+    )
+    pds_set.add_argument(
+        "--prompt-for-next-file", default=None,
+        help="Path to prompt_for_next content. Use '-' to read from stdin.",
+    )
+    pds_set.add_argument(
+        "--sync-needed", action="store_true",
+        help="Set sync_needed: true on the draft.",
+    )
+    pds_set.add_argument(
+        "--touched-path", action="append", default=[],
+        help="Append a path to touched_paths. Repeatable; dedups.",
+    )
+    pds_set.add_argument(
+        "--corrects", type=int, default=None,
+        help="Set corrects: <seq>. Must be a positive int (validated at publish).",
+    )
+    pds_set.set_defaults(func=cmd_draft_set)
 
     ppub = sub.add_parser("publish", help="Validate + atomically promote a draft.")
     ppub.add_argument("draft_path", help="Path to .draft/NNN-author-kind.md")
