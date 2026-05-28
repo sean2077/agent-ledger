@@ -4,23 +4,81 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
-## 0.7.0 — Unreleased
+## 0.7.0 — 2026-05-28
+
+The "uncrashable by input" pass. Six PRs widen the most common
+false-error paths and add a discoverable cleanup surface, so an agent
+that does the wrong thing under load gets a useful error instead of a
+wedged session.
+
+### Added
+
+- `relay wait --no-timeout` flag: disable the nominal no-heartbeat
+  deadline for long interactive turns. Stale-heartbeat exit 11 still
+  fires when the peer renewal-file heartbeat goes stale, so a real
+  crash is still detected.
+- `relay doctor` subcommand: report stale state across `.shared/`
+  (drafts, heartbeat pidfiles, sidecars, recovery_locks). Default is
+  report-only; `--fix` cleans owner-safe junk (dead pidfiles); `--fix
+  --older-than 1h` additionally deletes drafts older than the
+  threshold. Doctor never signals a live PID.
+- `--json` output mode on `relay doctor`.
 
 ### Changed
 
-- Raise the default `RELAY_WAIT_TIMEOUT` and
-  `RELAY_RENEWAL_STALE_THRESHOLD` from 600s to 3600s so long
-  interactive relay turns are less likely to false-timeout or
-  false-stale.
+- Default `RELAY_WAIT_TIMEOUT` and `RELAY_RENEWAL_STALE_THRESHOLD`
+  raised from 600s to 3600s. Long interactive agent turns are no
+  longer false-timed-out or false-stale by default.
+- `relay claim` and `relay publish` retry counts widened from 2 to
+  10, with `random.uniform(0.01, 0.05)` jitter between attempts.
+  Two simultaneous agents racing for a sequence number no longer
+  trip the "could not allocate" error.
+- Project slugs are auto-sanitized when derived from `git toplevel`
+  (lower-case, fold non-slug chars into hyphens, clip to 48 chars).
+  Explicit `RELAY_PROJECT` values are NOT sanitized — still validated
+  strictly so user typos surface clearly. Bootstrap from a repo named
+  `actibot_ego.jy` now produces project `actibot-ego-jy` instead of
+  crashing.
+- 8 stderr error exits now carry concrete recovery hints:
+  - claim/publish collision → `relay doctor`
+  - heartbeat already running → `relay heartbeat stop --force`
+  - heartbeat owner-not-alive → suggest `--owner-kind renewal-file`
+  - heartbeat cannot-derive-renewal → set `RELAY_PROJECT`
+  - wait/claim no-active-session → `relay sessions list` / `relay
+    bootstrap --topic <slug>`
+  - wait/claim multiple-active-sessions → `--session-id <id>`
+  - publish into inactive session → `relay bootstrap` or `--force
+    --force-reason --status <terminal>`
+  - sync missing `RELAY_REMOTE_*` → only the rsync owner runs sync
+  - bootstrap bad-slug → set `RELAY_PROJECT` matching the regex
+- `tests/test_relay_docs_consistency.py` gains a lint that greps the
+  relay source for each error exit and asserts the recovery hint
+  keyword sits within 400 chars. Drift gets caught at test time.
 
 ### Fixed
 
-- Clean stale heartbeat pidfiles that have no matching heartbeat sidecar
-  without signaling the recorded PID. This covers PID-reuse/no-sidecar
-  states where the PID may now belong to an unrelated process.
+- Clean stale heartbeat pidfiles that have no matching heartbeat
+  sidecar without signaling the recorded PID. This covers PID-reuse
+  / no-sidecar states where the PID may now belong to an unrelated
+  process. Robustness priority: a false kill is strictly worse than
+  a leaked file. (M3 / PR1)
 - Remove local renewal files when heartbeat GC cleans orphan pidfile
-  state, so Ctrl-C or crash recovery does not leave stale renewal state
-  behind.
+  state, so Ctrl-C or crash recovery does not leave stale renewal
+  state behind. (PR1)
+- `relay bootstrap` no longer crashes when the git toplevel name
+  contains dots or underscores (real user bug: `actibot_ego.jy`).
+  See "Changed" above for the sanitization rule.
+
+### Notes
+
+- `SKILL.md` Hard rule 6 ("If `relay claim` fails twice…") still
+  reads "twice" but the underlying retry is now 10 attempts; the
+  message now points at `relay doctor` for inspection. The phrasing
+  is intentionally conservative — the rule is really "stop and ask
+  the user if claim repeatedly fails", and that intent holds.
+- `RELAY_HEARTBEAT_STALE_FACTOR` still floors at 60s; tuning the env
+  var alone without changing the formula has no effect. Documented
+  here so operators don't chase it.
 
 ## 0.6.0 — 2026-05-28
 

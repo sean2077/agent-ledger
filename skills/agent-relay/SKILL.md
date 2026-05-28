@@ -249,7 +249,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 3. **Never ls `.draft/` from peer's side.** Drafts are hidden by convention. `relay status` correctly excludes them.
 4. **Never bypass `relay preflight`.** If it fails, the mount is broken or env is wrong; writing anywhere risks data loss.
 5. **Never `relay close` without checking with user.** Close is intended; missed by accident, it's awkward to recover from.
-6. **If `relay claim` fails twice, stop and ask the user.** Two seq collisions in a row means concurrent activity you don't understand.
+6. **If `relay claim` or `relay publish` fails after the built-in retries, stop and ask the user.** The CLI internally retries up to 10 times with random jitter; if it still surfaces "could not allocate sequence/published path after 10 attempts", that's evidence of concurrent activity or stale state you don't understand. Run `relay doctor` to inspect (drafts, heartbeat pidfiles, recovery locks) before retrying.
 
 ## When things go wrong
 
@@ -261,6 +261,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
 - **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` or unset). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
 - **`relay preflight` fails `env.RELAY_ROLE.removed`**: user's envrc still uses the v0.5 alias. Tell them to replace it per the migration table — `RELAY_ROLE=host -> RELAY_SYNC=rsync`, `RELAY_ROLE=remote -> RELAY_SYNC=none` — then `source .envrc`.
+- **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts older than the threshold. Doctor never signals a live PID.
 
 ## References
 
