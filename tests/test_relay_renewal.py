@@ -42,12 +42,16 @@ def _bootstrap(monkeypatch, tmp_path, *, project_name="myproj", topic="t",
     (shared / "_relay" / ".sentinel").touch()
     # Use the project-name keying so the renewal dir is keyed to this repo.
     _isolated_env(monkeypatch,
-        RELAY_ROLE="remote" if author == "claude" else "host",
+        RELAY_SYNC="none" if author == "claude" else "rsync",
         RELAY_AUTHOR=author,
         RELAY_PEER=peer,
         RELAY_SHARED_ROOT=str(shared),
         RELAY_PROJECT=project_name,
         XDG_RUNTIME_DIR=str(tmp_path / f"xdg-{project_name}"),
+        # When SYNC=rsync, REMOTE_* are required for preflight; renewal tests
+        # don't invoke preflight directly, but cmd_claim/publish do load env.
+        RELAY_REMOTE_SSH="x@y",
+        RELAY_REMOTE_PATH="/r",
     )
     relay.cmd_bootstrap(type("A", (), {"topic": topic, "title": None})())
     return relay.resolve_active_session(relay.load_env())

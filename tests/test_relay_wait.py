@@ -47,10 +47,12 @@ def _bootstrap(monkeypatch, tmp_path: Path, *, author="claude", peer="codex"):
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_ROLE="remote" if author == "claude" else "host",
+        RELAY_SYNC="none" if author == "claude" else "rsync",
         RELAY_AUTHOR=author,
         RELAY_PEER=peer,
         RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y",
+        RELAY_REMOTE_PATH="/r",
     )
     relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
     return relay.resolve_active_session(relay.load_env())
@@ -168,7 +170,7 @@ def test_wait_returns_2_when_no_session(monkeypatch, tmp_path, capsys):
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_ROLE="remote",
+        RELAY_SYNC="none",
         RELAY_AUTHOR="claude",
         RELAY_PEER="codex",
         RELAY_SHARED_ROOT=str(shared),
@@ -337,7 +339,7 @@ def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
     ready_sentinel = tmp_path / "wait-ready"
     env = os.environ.copy()
     env.update({
-        "RELAY_ROLE": "remote",
+        "RELAY_SYNC": "none",
         "RELAY_AUTHOR": "claude",
         "RELAY_PEER": "codex",
         "RELAY_SHARED_ROOT": str(session.parent),
@@ -346,7 +348,7 @@ def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
         "RELAY_WAIT_READY_SENTINEL": str(ready_sentinel),
     })
     # Drop unrelated RELAY_ vars that may pollute (project, etc.)
-    keep = {"RELAY_ROLE", "RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT",
+    keep = {"RELAY_SYNC", "RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT",
             "RELAY_WAIT_TIMEOUT", "RELAY_WAIT_POLL_INTERVAL",
             "RELAY_WAIT_READY_SENTINEL"}
     for k in list(env):

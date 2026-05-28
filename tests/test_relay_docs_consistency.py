@@ -70,14 +70,50 @@ def test_docs_why_exists_and_carries_caveats():
     assert "Claude" in text
 
 
-def test_legacy_role_alias_documented_with_horizon():
-    """D4: deprecation horizon for RELAY_ROLE is mentioned somewhere (README or template)."""
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    same_host = (ROOT / "skills/agent-relay/templates/envrc.same-host.example").read_text(encoding="utf-8")
-    host_legacy = (ROOT / "skills/agent-relay/templates/envrc.host.example").read_text(encoding="utf-8")
+def test_legacy_role_templates_removed_in_v06():
+    """v0.6: envrc.host.example and envrc.remote.example were deleted.
+    Only envrc.same-host.example and envrc.dispatcher.example remain."""
+    templates_dir = ROOT / "skills/agent-relay/templates"
+    assert (templates_dir / "envrc.same-host.example").is_file()
+    assert (templates_dir / "envrc.dispatcher.example").is_file()
+    assert not (templates_dir / "envrc.host.example").exists()
+    assert not (templates_dir / "envrc.remote.example").exists()
     # Same-host template MUST be RELAY_SYNC-first, no RELAY_ROLE.
+    same_host = (templates_dir / "envrc.same-host.example").read_text(encoding="utf-8")
     assert "RELAY_SYNC=none" in same_host
     assert "RELAY_ROLE" not in same_host
-    # Legacy host template still works but advertises the new option.
-    assert "RELAY_SYNC" in host_legacy
-    assert "deprecat" in host_legacy.lower()
+
+
+def test_dispatcher_template_does_not_reference_deleted_v05_templates():
+    """v0.6 post-commit-review seq 2 Blocker 1.
+
+    The dispatcher .envrc template gets copied into every new project by
+    `relay init`. It must NOT instruct users to copy envrc.host.example /
+    envrc.remote.example — those files were deleted in v0.6, so any new
+    user following the dispatcher's guidance is sent to non-existent
+    paths.
+    """
+    template = (ROOT / "skills/agent-relay/templates/envrc.dispatcher.example").read_text(encoding="utf-8")
+    forbidden = [
+        "envrc.host.example",
+        "envrc.remote.example",
+        "envrc.{host,remote}.example",
+    ]
+    for needle in forbidden:
+        assert needle not in template, (
+            f"envrc.dispatcher.example still references deleted v0.5 path {needle!r}; "
+            "update the comments/warning to point at `relay init --role same-host` "
+            "or `--author/--peer/--sync`"
+        )
+
+
+def test_changelog_documents_v06_migration():
+    """v0.6 ships with a CHANGELOG that includes the migration table."""
+    cl = (ROOT / "CHANGELOG.md")
+    assert cl.is_file()
+    text = cl.read_text(encoding="utf-8")
+    assert "0.6.0" in text
+    # Mapping table must appear (the only way for users to migrate).
+    assert "RELAY_SYNC=rsync" in text
+    assert "RELAY_SYNC=none" in text
+    assert "RELAY_ROLE" in text  # the old name is named explicitly

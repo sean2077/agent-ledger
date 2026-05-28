@@ -121,13 +121,12 @@ root is itself a fuse mount. The two shapes diverge only on
 
 Same-host is its own bucket: shape doesn't apply because there's nothing
 to mount or sync. Shape A and shape B are exclusive to the two-machine
-case. Legacy `RELAY_ROLE=host|remote` still resolves correctly to
-`RELAY_SYNC=rsync|none` for one more release; preflight emits a
-deprecation warn pointing at the new vocabulary.
+case.
 
-In every shape-B case (and in the rare two-machine same-machine-shape-B
-hybrid), an explicit `RELAY_SYNC` (or legacy `RELAY_ROLE`) is required;
-preflight will not silently infer `none` outside shape A.
+In every shape-B case, an explicit `RELAY_SYNC` is required; preflight
+will not silently infer `none` outside shape A. (The v0.5-era
+`RELAY_ROLE=host|remote` alias was removed in v0.6; see `CHANGELOG.md`
+for the migration table.)
 
 ## Why a file ledger beats copy-paste
 

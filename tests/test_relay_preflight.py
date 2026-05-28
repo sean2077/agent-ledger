@@ -44,7 +44,7 @@ def test_probes_posix_fail_when_world_writable(tmp_path: Path):
 def test_preflight_mtime_warning_is_non_blocking(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -70,7 +70,7 @@ def test_preflight_mtime_warning_is_non_blocking(monkeypatch, capsys, tmp_path):
 def test_preflight_other_warnings_still_return_warning_exit(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -106,7 +106,7 @@ def test_preflight_fails_when_no_env(monkeypatch, capsys):
 def test_preflight_json_mode(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -126,7 +126,7 @@ def test_preflight_json_mode(monkeypatch, capsys, tmp_path):
 def test_preflight_sentinel_missing(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -143,7 +143,9 @@ def test_preflight_sentinel_missing(monkeypatch, capsys, tmp_path):
 
 
 def test_preflight_shape_a_does_not_require_remote_vars(monkeypatch, capsys, tmp_path):
-    """Host on a fuse-mounted project root (shape A) should not require RELAY_REMOTE_*."""
+    """Fuse-mounted project root (shape A) without explicit RELAY_SYNC should
+    infer SYNC=none and not require RELAY_REMOTE_*. v0.6: this used to be
+    the RELAY_ROLE=host + shape A path; now it's the bare shape-A-infer."""
     subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path / "repo")], check=True)
     repo = tmp_path / "repo"
     monkeypatch.chdir(repo)
@@ -152,9 +154,9 @@ def test_preflight_shape_a_does_not_require_remote_vars(monkeypatch, capsys, tmp
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(shared),
-        # Deliberately omitting RELAY_REMOTE_SSH / RELAY_REMOTE_PATH.
+        # Deliberately omitting RELAY_SYNC and RELAY_REMOTE_*.
     )
     # Force fuse-mount detection to return True
     import relay as _relay
@@ -182,7 +184,7 @@ def test_preflight_shape_b_still_requires_remote_vars(monkeypatch, capsys, tmp_p
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(shared),
     )
     import relay as _relay
@@ -207,7 +209,7 @@ def test_preflight_project_consistency_mismatch(monkeypatch, capsys, tmp_path):
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="totally-wrong",  # mismatch with derived 'repo'
@@ -237,7 +239,7 @@ def test_preflight_fails_shared_root_outside_git_toplevel(monkeypatch, capsys, t
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
@@ -302,7 +304,7 @@ def test_preflight_shape_a_infers_sync_none(monkeypatch, capsys, tmp_path):
 
 
 def test_preflight_shape_b_no_sync_fails(monkeypatch, capsys, tmp_path):
-    """D1: shape B + neither RELAY_SYNC nor RELAY_ROLE => fail (no silent inference)."""
+    """D1: shape B + RELAY_SYNC unset => fail (no silent inference)."""
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
@@ -315,31 +317,79 @@ def test_preflight_shape_b_no_sync_fails(monkeypatch, capsys, tmp_path):
     data = json.loads(capsys.readouterr().out)
     sync_check = next(c for c in data["checks"] if c["name"] == "env.RELAY_SYNC")
     assert sync_check["status"] == "fail"
-    assert "neither RELAY_SYNC" in sync_check["detail"]
+    assert "RELAY_SYNC not set" in sync_check["detail"]
     assert rc == 2
 
 
-def test_preflight_role_alias_warns_deprecation(monkeypatch, capsys, tmp_path):
-    """D4: RELAY_ROLE=host (no RELAY_SYNC) resolves but emits non-blocking deprecation warn."""
+def test_preflight_fails_with_migration_hint_when_role_set_without_sync(monkeypatch, capsys, tmp_path):
+    """v0.6: RELAY_ROLE alias removed. Preflight must hard-fail (exit 2) with
+    an explicit migration line, not silently ignore the legacy var."""
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
         RELAY_ROLE="host",
         RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
-        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
     monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    dep = next(c for c in data["checks"] if c["name"] == "env.RELAY_ROLE.deprecated")
-    assert dep["status"] == "warn"
-    assert "deprecated" in dep["detail"]
-    sync_check = next(c for c in data["checks"] if c["name"] == "env.RELAY_SYNC")
-    assert "sync=rsync" in sync_check["detail"]
-    # Deprecation is in NON_BLOCKING_PREFLIGHT_WARNS, so exit must be 0.
-    assert rc == 0
+    removed = next(c for c in data["checks"] if c["name"] == "env.RELAY_ROLE.removed")
+    assert removed["status"] == "fail"
+    # Mapping table must appear so the user can fix without reading docs.
+    assert "RELAY_SYNC=rsync" in removed["detail"]
+    # No deprecation warn anywhere — the var name was retired.
+    assert not any(c["name"] == "env.RELAY_ROLE.deprecated" for c in data["checks"])
+    assert rc == 2
+
+
+def test_preflight_role_removed_on_shape_a_points_at_sync_none_not_rsync(monkeypatch, capsys, tmp_path):
+    """v0.6 post-commit-review seq 2 Blocker 2.
+
+    Even with legacy RELAY_ROLE=host (which normally maps to rsync), if the
+    project root is a fuse mount (shape A) the migration hint must NOT
+    suggest RELAY_SYNC=rsync — that contradicts the same preflight's
+    project.shape line. Point at none + explain why.
+    """
+    repo = _bootstrap_repo_with_shared(tmp_path)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="host",  # legacy var that USED to map to rsync
+        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(repo / ".shared"),
+    )
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: True)
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    removed = next(c for c in data["checks"] if c["name"] == "env.RELAY_ROLE.removed")
+    assert removed["status"] == "fail"
+    # The actionable target must be `none`, not `rsync`.
+    assert "RELAY_SYNC=none" in removed["detail"]
+    assert "shape A" in removed["detail"]
+    # NEGATIVE: must not tell the user to do the impossible thing.
+    assert "export RELAY_SYNC=rsync" not in removed["detail"]
+    assert rc == 2
+
+
+def test_preflight_role_remote_maps_to_sync_none_in_hint(monkeypatch, capsys, tmp_path):
+    """The migration hint must give the right mapping for each legacy value."""
+    repo = _bootstrap_repo_with_shared(tmp_path)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch,
+        RELAY_ROLE="remote",
+        RELAY_AUTHOR="claude", RELAY_PEER="codex",
+        RELAY_SHARED_ROOT=str(repo / ".shared"),
+    )
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    removed = next(c for c in data["checks"] if c["name"] == "env.RELAY_ROLE.removed")
+    # remote -> none specifically
+    assert "RELAY_SYNC=none" in removed["detail"]
+    assert rc == 2
 
 
 def test_preflight_sync_rsync_with_shape_a_is_contradiction(monkeypatch, capsys, tmp_path):
@@ -414,7 +464,7 @@ def test_preflight_fails_when_marker_mismatches_active_session(monkeypatch, caps
     )
     (shared / ".active-session").write_text("20260527-wrong\n")
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )

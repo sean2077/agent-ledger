@@ -34,10 +34,12 @@ def _bootstrap(monkeypatch, tmp_path, *, author="claude", peer="codex"):
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_ROLE="remote" if author == "claude" else "host",
+        RELAY_SYNC="none" if author == "claude" else "rsync",
         RELAY_AUTHOR=author,
         RELAY_PEER=peer,
         RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y",
+        RELAY_REMOTE_PATH="/r",
     )
     relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
     return relay.resolve_active_session(relay.load_env())

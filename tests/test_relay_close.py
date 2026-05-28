@@ -22,7 +22,9 @@ def _bootstrap(monkeypatch, tmp_path):
     for k in list(os.environ):
         if k.startswith("RELAY_"):
             monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("RELAY_ROLE", "host")
+    monkeypatch.setenv("RELAY_SYNC", "rsync")
+    monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
+    monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
     monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))

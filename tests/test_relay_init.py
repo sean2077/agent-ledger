@@ -18,7 +18,7 @@ def _isolated_env(monkeypatch, **kwargs):
 
 
 def _args(**kw):
-    base = {"role": None}
+    base = {"role": None, "author": None, "peer": None, "sync": None}
     base.update(kw)
     return type("A", (), base)()
 
@@ -99,63 +99,35 @@ def test_init_fails_without_shared_root_outside_git(monkeypatch, tmp_path, capsy
     assert "RELAY_SHARED_ROOT" in err
 
 
-def test_init_role_copies_envrc_template(monkeypatch, tmp_path, capsys):
-    """--role host writes .envrc.<hostname> AND the dispatcher .envrc."""
+def test_init_role_host_rejected_with_migration_hint(monkeypatch, tmp_path, capsys):
+    """v0.6: --role host was removed. Init must refuse with a migration line."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
     rc = relay.cmd_init(_args(role="host"))
-    assert rc == 0
-    hostname = relay._hostname_short()
-    target = repo / f".envrc.{hostname}"
-    assert target.is_file()
-    body = target.read_text()
-    assert "RELAY_ROLE=host" in body
-    assert "RELAY_AUTHOR=codex" in body
-    # Dispatcher .envrc must also be installed.
-    dispatcher = repo / ".envrc"
-    assert dispatcher.is_file()
-    assert "LOCAL_ENVRC=" in dispatcher.read_text()
-    out = capsys.readouterr().out
-    assert "envrc.host.example" in out
-    assert "envrc.dispatcher.example" in out
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "removed in v0.6" in err
+    # Suggest the new explicit-flags form with the right sync value.
+    assert "--sync rsync" in err
 
 
-def test_init_role_dispatcher_idempotent(monkeypatch, tmp_path, capsys):
-    """If .envrc dispatcher already exists, --role leaves it alone."""
+def test_init_role_remote_rejected_with_migration_hint(monkeypatch, tmp_path, capsys):
+    """v0.6: --role remote was removed; mapping must hint --sync none."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    dispatcher = repo / ".envrc"
-    dispatcher.write_text("# user dispatcher; do not clobber\n")
-    rc = relay.cmd_init(_args(role="host"))
-    assert rc == 0
-    assert dispatcher.read_text() == "# user dispatcher; do not clobber\n"
-    out = capsys.readouterr().out
-    # Dispatcher line should say "already present", not "created".
-    assert ".envrc already present" in out or f"{dispatcher} already present" in out
-
-
-def test_init_role_is_idempotent_when_envrc_exists(monkeypatch, tmp_path, capsys):
-    """If .envrc.<hostname> already exists, --role does not overwrite."""
-    repo = tmp_path / "myproj"
-    _init_git_repo(repo)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    hostname = relay._hostname_short()
-    target = repo / f".envrc.{hostname}"
-    target.write_text("# user-edited; do not clobber\n")
     rc = relay.cmd_init(_args(role="remote"))
-    assert rc == 0
-    assert target.read_text() == "# user-edited; do not clobber\n"
-    out = capsys.readouterr().out
-    assert "already present" in out
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "removed in v0.6" in err
+    assert "--sync none" in err
 
 
-def test_init_hints_when_envrc_missing_and_no_role(monkeypatch, tmp_path, capsys):
-    """In a git repo, missing .envrc.<hostname> and no --role => print copy hint."""
+def test_init_hints_lead_with_same_host_and_flag_alternatives(monkeypatch, tmp_path, capsys):
+    """v0.6: missing .envrc.<hostname> hint mentions same-host AND the explicit flags."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
@@ -163,32 +135,37 @@ def test_init_hints_when_envrc_missing_and_no_role(monkeypatch, tmp_path, capsys
     rc = relay.cmd_init(_args())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "--role host" in out
-    assert "--role remote" in out
+    assert "--role same-host" in out
+    assert "--author" in out and "--peer" in out and "--sync" in out
+    # Legacy --role host/remote should NOT appear in hints anymore.
+    assert "--role host" not in out
+    assert "--role remote" not in out
 
 
-def test_init_role_emits_direnv_aware_next_step(monkeypatch, tmp_path, capsys):
-    """After copying envrc, output names direnv or source depending on availability."""
+def test_init_same_host_emits_direnv_aware_next_step(monkeypatch, tmp_path, capsys):
+    """After --role same-host copies envrc, output names direnv or source."""
     import shutil as _shutil
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
     monkeypatch.setattr(_shutil, "which", lambda name: "/fake/direnv" if name == "direnv" else None)
-    # patch the module-level shutil used by relay
     monkeypatch.setattr(relay.shutil, "which", lambda name: "/fake/direnv" if name == "direnv" else None)
-    rc = relay.cmd_init(_args(role="host"))
+    rc = relay.cmd_init(_args(role="same-host"))
     assert rc == 0
     out = capsys.readouterr().out
     assert "direnv allow" in out
-    assert "source .envrc" not in out
+    # `source .envrc` is the other-terminal alternative line in same-host output;
+    # the next: line for the first terminal should be direnv-only.
+    primary_next_line = next(ln for ln in out.splitlines() if ln.startswith("next:"))
+    assert "source .envrc" not in primary_next_line
 
     # remove .envrc.<hostname> for second run; pretend direnv missing
     hostname = relay._hostname_short()
     (repo / f".envrc.{hostname}").unlink()
     monkeypatch.setattr(relay.shutil, "which", lambda name: None)
     capsys.readouterr()
-    rc = relay.cmd_init(_args(role="host"))
+    rc = relay.cmd_init(_args(role="same-host"))
     assert rc == 0
     out = capsys.readouterr().out
     assert "source .envrc" in out
@@ -345,11 +322,12 @@ def test_init_hint_lists_same_host_first(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_init(_args())
     assert rc == 0
     out = capsys.readouterr().out
-    # same-host should be the first --role option mentioned in the hint
-    same_host_idx = out.find("--role same-host")
-    host_idx = out.find("--role host")
-    assert same_host_idx > 0
-    assert host_idx > same_host_idx
+    # v0.6: same-host is the only --role option in the hint; the explicit
+    # --author/--peer/--sync trio is the secondary path.
+    assert "--role same-host" in out
+    assert "--role host" not in out
+    assert "--role remote" not in out
+    assert "--author" in out and "--peer" in out and "--sync" in out
 
 
 def test_init_suppresses_envrc_nag_when_sync_env_set(monkeypatch, tmp_path, capsys):
@@ -370,10 +348,10 @@ def test_init_suppresses_envrc_nag_when_sync_env_set(monkeypatch, tmp_path, caps
     assert "not found" not in out
 
 
-def test_init_suppresses_envrc_nag_when_role_env_set(monkeypatch, tmp_path, capsys):
-    """Q1: if RELAY_ROLE is set, no nag about missing .envrc.<hostname>.
-    The user has already sourced an envrc somehow (or set vars by hand);
-    further reminders to copy the template would just be noise."""
+def test_init_suppresses_envrc_nag_when_legacy_role_env_set(monkeypatch, tmp_path, capsys):
+    """If the user still has RELAY_ROLE set (pre-v0.6 envrc), init does NOT
+    spam template-setup advice. They need a migration edit, not a template;
+    preflight surfaces the migration hint separately. init stays quiet here."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
@@ -385,6 +363,64 @@ def test_init_suppresses_envrc_nag_when_role_env_set(monkeypatch, tmp_path, caps
     rc = relay.cmd_init(_args())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "--role host" not in out
-    assert "--role remote" not in out
+    assert "--role" not in out
     assert "not found" not in out
+
+
+# v0.6: new explicit-flags init tests.
+
+def test_init_author_peer_sync_renders_envrc(monkeypatch, tmp_path, capsys):
+    """`relay init --author X --peer Y --sync none` writes a working envrc."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(author="codex", peer="claude", sync="none"))
+    assert rc == 0
+    target = repo / f".envrc.{relay._hostname_short()}"
+    assert target.is_file()
+    body = target.read_text()
+    assert "RELAY_AUTHOR=codex" in body
+    assert "RELAY_PEER=claude" in body
+    assert "RELAY_SYNC=none" in body
+    # No legacy RELAY_ROLE.
+    assert "RELAY_ROLE=" not in body
+    # Dispatcher still gets installed.
+    assert (repo / ".envrc").is_file()
+
+
+def test_init_author_peer_sync_rsync_advises_remote_vars(monkeypatch, tmp_path, capsys):
+    """--sync=rsync warns about missing RELAY_REMOTE_* (but doesn't fail)."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(author="codex", peer="claude", sync="rsync"))
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "--sync=rsync" in err
+    assert "RELAY_REMOTE_SSH" in err
+
+
+def test_init_role_and_author_are_mutually_exclusive(monkeypatch, tmp_path, capsys):
+    """Pick one: --role same-host OR --author/--peer/--sync."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(role="same-host", author="codex", peer="claude", sync="none"))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "mutually exclusive" in err
+
+
+def test_init_author_without_peer_fails(monkeypatch, tmp_path, capsys):
+    """--author without --peer is incomplete; refuse so we don't generate a half-envrc."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(author="codex"))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--peer is required" in err

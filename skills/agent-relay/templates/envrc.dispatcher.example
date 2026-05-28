@@ -9,11 +9,15 @@
 #   1) direnv installed:  `direnv allow` once; auto-loads on cd.
 #   2) no direnv:         `source .envrc` manually.
 #
-# Setup:
-#   cp skills/agent-relay/templates/envrc.host.example   .envrc.$(hostname -s)   # on host
-#   cp skills/agent-relay/templates/envrc.remote.example .envrc.$(hostname -s)   # on remote
-#   $EDITOR .envrc.$(hostname -s)
-#   source .envrc
+# Setup (v0.6+):
+#   # same-host: two agents on one machine (default identity codex; the
+#   # other terminal exports RELAY_AUTHOR=claude before sourcing)
+#   relay init --role same-host
+#
+#   # explicit per-side (any topology, including two-machine with rsync):
+#   relay init --author <name> --peer <name> --sync <none|rsync>
+#
+#   source .envrc      # or: direnv allow
 
 LOCAL_ENVRC=".envrc.$(hostname -s)"
 
@@ -29,5 +33,6 @@ if [ -f "$LOCAL_ENVRC" ]; then
   source "$LOCAL_ENVRC"
 else
   echo "warning: no $LOCAL_ENVRC found." >&2
-  echo "  Create one based on skills/agent-relay/templates/envrc.{host,remote}.example" >&2
+  echo "  Run \`relay init --role same-host\` (two agents on one machine)" >&2
+  echo "  or   \`relay init --author <name> --peer <name> --sync <none|rsync>\`" >&2
 fi
