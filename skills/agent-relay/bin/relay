@@ -899,8 +899,10 @@ def cmd_init(args) -> int:
         else:
             print(f"relay init: {envrc_target} already present")
 
-    if project_root and not role:
-        # Only nag when there's no .envrc.<hostname> yet
+    if project_root and not role and not env.role:
+        # Nag only when no env is loaded yet (RELAY_ROLE unset) AND .envrc.<hostname>
+        # is missing. If the user has already sourced any envrc (RELAY_ROLE set),
+        # they've made their setup choice — quiet from here on.
         hostname = _hostname_short()
         if not (project_root / f".envrc.{hostname}").exists():
             print(f"\nhint: .envrc.{hostname} not found.")

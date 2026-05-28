@@ -172,3 +172,23 @@ def test_init_role_emits_direnv_aware_next_step(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "source .envrc" in out
     assert "install direnv" in out
+
+
+def test_init_suppresses_envrc_nag_when_role_env_set(monkeypatch, tmp_path, capsys):
+    """Q1: if RELAY_ROLE is set, no nag about missing .envrc.<hostname>.
+    The user has already sourced an envrc somehow (or set vars by hand);
+    further reminders to copy the template would just be noise."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch,
+                  RELAY_SHARED_ROOT=str(repo / ".shared"),
+                  RELAY_ROLE="host")
+    hostname = relay._hostname_short()
+    assert not (repo / f".envrc.{hostname}").exists()  # precondition
+    rc = relay.cmd_init(_args())
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--role host" not in out
+    assert "--role remote" not in out
+    assert "not found" not in out
