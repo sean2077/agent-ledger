@@ -4,6 +4,96 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.9.0 — 2026-05-29
+
+Full-audit cleanup release. A cross-review session
+(`.shared/20260529-full-audit-cleanup/`) surfaced two BLOCKERs and
+seven MAJORs in the v0.8.0 surface. All are fixed in this version;
+suite went from 207 to 251 tests with regressions for each finding.
+
+### Added
+
+- `relay claim --corrects <seq>` — first-class CLI for the
+  documented correction workflow. Required when `--kind correction`;
+  optional for `--kind addendum`. Pre-fix the flag was documented
+  but absent from the parser, so every `kind: correction` artifact
+  shipped with `corrects: null`.
+- `relay draft set <path> --body-file <p|->
+   --prompt-for-next-file <p|-> [--sync-needed]
+   [--touched-path P ...] [--corrects N]` — fill a draft's body and
+  prompt without using the agent's native Write tool. Removes the
+  Read→Write round-trip that wasted tokens on every artifact.
+- `atomic_reserve_text(path, text, mode)` primitive — O_CREAT|O_EXCL
+  reservation for the published `.md` path. The brief partial-content
+  window between create and fsync is gated by the `.ready` sentinel
+  so protocol-compliant readers never observe it.
+- `latest_published_seq(session)` helper — drafts-excluded wait
+  baseline so a peer publishing the draft they had open at wait
+  entry is no longer filtered out.
+
+### Fixed
+
+- **BLOCKER** `relay wait` could miss the very peer publish it was
+  waiting for if peer had a draft visible at wait entry. The
+  baseline came from `latest_seq()` which included `.draft/*`. New
+  helper `latest_published_seq()` walks ready-published artifacts
+  only. Live repro reproduced in the audit session itself.
+- **BLOCKER** `relay publish` was a check-then-replace race, not
+  exclusive promotion. `atomic_write_text` uses `os.replace` which
+  is unconditional, so two publishers could pass `exists()` and
+  both clobber the final `.md`. `atomic_reserve_text` raises
+  FileExistsError instead; the publish retry loop bumps seq and
+  emits a stderr line per bump so concurrent activity is observable.
+- **MAJOR** `relay publish` validated filename-vs-frontmatter author
+  agreement but never checked either against `$RELAY_AUTHOR`. Now
+  refuses to publish a draft authored by someone other than the
+  active env author, with a clear error naming both identities.
+- **MAJOR** PreToolUse hook protected `.md` but left `.ready` and
+  `.md.sha256` sidecars editable/deletable. Codex demonstrated
+  deleting a `.ready` file slipped past. The hook now treats the
+  triple as a unit; an Edit/Write/Delete to any one of the three is
+  denied when the `.ready` sentinel exists.
+- **MAJOR** `relay preflight` refused to pass when two active
+  sessions existed without a marker, blocking the documented
+  `bootstrap --force` parallel-session flow. Downgraded from fail
+  (exit 2) to warn (exit 1); detail names both sessions and tells
+  the caller to use `--session-id`.
+- **MAJOR** `project.consistency` compared raw `RELAY_PROJECT` to
+  raw git toplevel basename, so a correctly-sanitized slug in a
+  dotted/underscored repo (`actibot_ego.jy` ↔ `actibot-ego-jy`)
+  failed preflight. Both sides now canonicalize through
+  `sanitize_project_slug` before comparison; detail shows both raw
+  and canonical forms.
+- **MAJOR** `relay init --author/--peer` wrote values verbatim into
+  a sourceable shell file with no validation, opening command
+  injection (`;`, `$`, backticks, newlines) and silent breakage on
+  spaces. Now validated against the same `SLUG_RE` that artifact
+  filenames use; `author == peer` is also rejected.
+
+### Changed
+
+- SKILL.md opening rewritten: was "no autopilot loop", which
+  contradicted step 10's auto-loop semantics. New framing: "user-
+  bootstrapped, auto-converging" with rule-based break triggers
+  (kind: decision / terminal status / `@user:` escalation / round-cap).
+- SKILL.md L264 no longer implies `RELAY_ROLE` is consulted for
+  sync inference; only `RELAY_SYNC` matters since v0.6.
+- `relay publish` inter-attempt sleep raised from 10-50ms to
+  50-200ms so contending publishers spread out instead of hammering.
+- `_render_envrc_body` now carries a two-line comment explaining
+  the unconditional `unset RELAY_REMOTE_SSH RELAY_REMOTE_PATH`
+  emitted on `--sync=none`, so users don't think their env was
+  silently clobbered.
+
+### Notes
+
+- Suite size: 207 → 251 (+44 regressions; one per fix or close
+  doc-drift loophole).
+- No protocol/schema-breaking changes — pre-0.9 artifacts still
+  parse and verify; pre-0.9 `relay claim --kind correction`
+  callers will now see a hard error instead of silently emitting
+  `corrects: null`.
+
 ## 0.8.0 — 2026-05-29
 
 The cross-platform hook layer release. This version keeps the manual
