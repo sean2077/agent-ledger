@@ -352,11 +352,28 @@ def git_toplevel(start: Path | None = None) -> Optional[Path]:
         return None
 
 
+def sanitize_project_slug(raw: str) -> str:
+    """Coerce an arbitrary directory name into a SLUG_RE-matching slug.
+
+    git toplevel names legally contain dots, underscores, and capitals
+    (`actibot_ego.jy`, `MyProject`); SLUG_RE does not. Lower-case the
+    name, fold any run of non-slug chars into a single hyphen, trim
+    leading/trailing hyphens, and clip to 48 chars. Explicit user input
+    via RELAY_PROJECT bypasses this — callers validate that separately.
+    """
+    s = raw.lower()
+    s = re.sub(r"[^a-z0-9-]+", "-", s)
+    s = s.strip("-")
+    return s[:48]
+
+
 def derive_project(env: Env) -> Optional[str]:
     if env.project:
         return env.project
     top = git_toplevel()
-    return top.name if top else None
+    if not top:
+        return None
+    return sanitize_project_slug(top.name) or None
 
 
 # ---------------------------------------------------------------------------
@@ -1163,7 +1180,12 @@ def cmd_bootstrap(args) -> int:
               file=sys.stderr)
         return 2
     if not SLUG_RE.match(proj):
-        print(f"relay bootstrap: derived project {proj!r} not a valid slug", file=sys.stderr)
+        print(
+            f"relay bootstrap: project {proj!r} is not a valid slug; "
+            "set RELAY_PROJECT to a value matching ^[a-z0-9][a-z0-9-]{0,47}$ "
+            "(lowercase + digits + hyphen, ≤48 chars).",
+            file=sys.stderr,
+        )
         return 2
 
     _ensure_shared_root(env.shared_root)

@@ -70,6 +70,56 @@ def test_bootstrap_invalid_slug(monkeypatch, tmp_path, capsys):
     assert "topic must match" in capsys.readouterr().err
 
 
+def test_sanitize_project_slug_handles_dots_underscores_capitals():
+    """git-toplevel-derived names with dots / underscores / capitals must
+    coerce into valid slugs, not crash bootstrap (real user bug 2026-05-28:
+    'derived project actibot_ego.jy not a valid slug')."""
+    assert relay.sanitize_project_slug("actibot_ego.jy") == "actibot-ego-jy"
+    assert relay.sanitize_project_slug("MyProject") == "myproject"
+    assert relay.sanitize_project_slug("foo.bar.baz") == "foo-bar-baz"
+    assert relay.sanitize_project_slug("_leading_under") == "leading-under"
+    assert relay.sanitize_project_slug("trailing.") == "trailing"
+    # Length clip
+    long_raw = "x" * 60
+    assert len(relay.sanitize_project_slug(long_raw)) == 48
+
+
+def test_bootstrap_succeeds_with_dotted_repo_name(monkeypatch, tmp_path, capsys):
+    """Bootstrap must succeed when the git toplevel name has dots/underscores —
+    the slug sanitizer should coerce it instead of erroring."""
+    repo = tmp_path / "actibot_ego.jy"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_SYNC", "none")
+    monkeypatch.setenv("RELAY_AUTHOR", "codex")
+    monkeypatch.setenv("RELAY_PEER", "claude")
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
+    rc = relay.cmd_bootstrap(type("A", (), {"topic": "smoke", "title": None})())
+    assert rc == 0
+    sj = json.loads(next(p for p in shared.iterdir() if p.name.endswith("-smoke")).joinpath("session.json").read_text())
+    assert sj["project"] == "actibot-ego-jy"
+
+
+def test_bootstrap_rejects_explicit_invalid_RELAY_PROJECT(monkeypatch, tmp_path, capsys):
+    """Explicit RELAY_PROJECT env values are NOT sanitized — user-provided
+    invalid slugs still error with a clear recovery hint."""
+    _setup_shared(monkeypatch, tmp_path)
+    monkeypatch.setenv("RELAY_PROJECT", "Bad Project Name")
+    args = type("A", (), {"topic": "smoke", "title": None})()
+    rc = relay.cmd_bootstrap(args)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "not a valid slug" in err
+    assert "set RELAY_PROJECT" in err
+
+
 def test_status_empty_session_active(monkeypatch, tmp_path, capsys):
     _setup_shared(monkeypatch, tmp_path)
     relay.cmd_bootstrap(type("A", (), {"topic": "x", "title": None})())
