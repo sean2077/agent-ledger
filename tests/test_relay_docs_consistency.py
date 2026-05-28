@@ -148,6 +148,22 @@ def test_v07_error_exits_carry_recovery_hints():
         )
 
 
+def test_file_protocol_documents_ten_retry_behavior():
+    """references/file-protocol.md §7.1 must describe the 10-attempt retry
+    (not the old "second failure" wording). Codex cross-review found this
+    drift on 2026-05-29."""
+    text = (ROOT / "skills/agent-relay/references/file-protocol.md").read_text(encoding="utf-8")
+    # Forbidden old phrasing
+    assert "second failure" not in text, (
+        "file-protocol.md still describes the old 2-retry behavior; "
+        "v0.7 widened claim/publish to 10 attempts"
+    )
+    assert "increment seq once and retry" not in text
+    # Required new phrasing
+    assert "10 attempts" in text
+    assert "relay doctor" in text
+
+
 def test_v07_wait_hint_paths_include_doctor_or_sessions():
     """relay wait resolver-fail and claim resolver-fail hints must mention
     `relay sessions list` (the discovery command) and `relay bootstrap`."""

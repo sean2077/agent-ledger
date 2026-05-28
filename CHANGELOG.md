@@ -71,11 +71,10 @@ wedged session.
 
 ### Notes
 
-- `SKILL.md` Hard rule 6 ("If `relay claim` fails twice…") still
-  reads "twice" but the underlying retry is now 10 attempts; the
-  message now points at `relay doctor` for inspection. The phrasing
-  is intentionally conservative — the rule is really "stop and ask
-  the user if claim repeatedly fails", and that intent holds.
+- `SKILL.md` Hard rule 6 was rewritten to reflect the new 10-attempt
+  retry: the agent stops and asks the user only after the CLI's own
+  retry budget is exhausted, and the recommended diagnostic is now
+  `relay doctor`.
 - `RELAY_HEARTBEAT_STALE_FACTOR` still floors at 60s; tuning the env
   var alone without changing the formula has no effect. Documented
   here so operators don't chase it.

@@ -2703,19 +2703,51 @@ def cmd_doctor(args) -> int:
                     # surfaces what GC would have done if a session-scoped command
                     # had run instead. Doctor does not force-remove the lock.
                     pass
-        # Draft GC (only with --fix + --older-than)
+        # Draft GC (only with --fix + --older-than).
+        # Two safety constraints (codex cross-review 2026-05-29):
+        #   (a) Never delete a draft whose sibling .heartbeat sidecar is
+        #       fresh — the draft is still being worked on, mtime alone
+        #       can lag if the author is not touching the .md file.
+        #   (b) When a draft IS deleted, also unlink its .heartbeat sidecar
+        #       so `relay wait` does not later observe a stale peer
+        #       heartbeat and return exit 11.
         if args.fix and older_than_secs is not None and draft_dir.is_dir():
+            hb_fresh_threshold = max(
+                _wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 3600), 60
+            )
             for d in sorted(draft_dir.glob("[0-9][0-9][0-9]-*.md")):
                 try:
                     age = int(time.time() - d.stat().st_mtime)
                 except OSError:
                     continue
-                if age >= older_than_secs:
+                if age < older_than_secs:
+                    continue
+                sidecar = _heartbeat_sidecar_path(d)
+                if sidecar.exists():
                     try:
-                        d.unlink()
-                        actions.append(f"deleted abandoned draft {d}")
+                        hb_age = time.time() - sidecar.stat().st_mtime
+                    except OSError:
+                        hb_age = float("inf")
+                    if hb_age < hb_fresh_threshold:
+                        actions.append(
+                            f"skipped {d}: heartbeat sidecar is fresh "
+                            f"({int(hb_age)}s < {hb_fresh_threshold}s)"
+                        )
+                        continue
+                try:
+                    d.unlink()
+                    actions.append(f"deleted abandoned draft {d}")
+                except OSError as exc:
+                    actions.append(f"failed to delete draft {d}: {exc}")
+                    continue
+                if sidecar.exists():
+                    try:
+                        sidecar.unlink()
+                        actions.append(f"removed stale heartbeat sidecar {sidecar}")
                     except OSError as exc:
-                        actions.append(f"failed to delete draft {d}: {exc}")
+                        actions.append(
+                            f"failed to remove heartbeat sidecar {sidecar}: {exc}"
+                        )
         report["sessions"].append(entry)
 
     report["findings_count"] = findings

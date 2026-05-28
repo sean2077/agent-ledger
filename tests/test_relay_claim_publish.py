@@ -107,6 +107,36 @@ def test_claim_resolves_through_five_squatters(monkeypatch, tmp_path, capsys):
     assert draft.name.startswith("006-")  # claim walked past 5 squatters
 
 
+def test_publish_resolves_through_squatters(monkeypatch, tmp_path, capsys):
+    """PR2 widened cmd_publish retry too; codex review 2026-05-29 noted only
+    cmd_claim had a behavior test. Prove publish walks past squatters at the
+    published-path layer."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+    # Squat two published-name slots that publish will try first
+    # (it starts from the draft's seq and increments on collision).
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    seq = int(fm["seq"])  # 1
+    for offset in (0, 1, 2):
+        target = session / f"{seq + offset:03d}-codex-plan.md"
+        target.write_text("squatter\n")
+
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 0
+    pub = Path(capsys.readouterr().out.strip())
+    # Published file must be at the first non-squatted slot.
+    assert pub.name.startswith(f"{seq + 3:03d}-")
+    assert (pub.parent / (pub.name + ".sha256")).exists()
+    assert (pub.parent / (pub.name[:-3] + ".ready")).exists()
+
+
 def _fill_draft(draft_path: Path, *, prompt: str = "do real things\n", body: str = "real body"):
     fm, _ = relay.parse_frontmatter(draft_path.read_text())
     fm["prompt_for_next"] = prompt

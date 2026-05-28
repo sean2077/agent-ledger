@@ -210,15 +210,15 @@ If you need to mark something as closed/cancelled/failed/timed_out, write a *new
 
 1. Compute next seq via §7.1.
 2. Write `.draft/NNN-<author>-<kind>.md` with frontmatter scaffold (`status: draft`, `prompt_for_next: "TODO: ..."`, etc.).
-3. If `.draft/NNN-*.md` already exists from another concurrent claim, increment seq once and retry.
-4. On second failure, exit 2 and ask user to resolve.
+3. If `.draft/NNN-*.md` already exists from another concurrent claim, increment seq and retry. Up to 10 total attempts with `random.uniform(0.01, 0.05)` jitter between attempts after the first.
+4. After exhausting 10 attempts, exit 2. The stderr message points at `relay doctor` so the operator can inspect for abandoned drafts before retrying.
 
 `relay publish`:
 
 1. Validate the draft (see §8).
 2. Atomically rename `.draft/NNN-*.md` → `NNN-*.md`.
-3. If the published path is already taken (extremely rare), increment seq once and retry.
-4. On second failure, exit 2.
+3. If the published path is already taken (extremely rare), increment seq and retry. Up to 10 total attempts with the same jitter as claim.
+4. After exhausting 10 attempts, exit 2 with the same `relay doctor` recovery hint.
 
 ### 7.2 No locks
 

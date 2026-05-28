@@ -102,6 +102,65 @@ def test_doctor_fix_with_older_than_deletes_old_drafts(monkeypatch, tmp_path, ca
     assert "deleted abandoned draft" in out
 
 
+def test_doctor_fix_preserves_old_draft_with_fresh_heartbeat(monkeypatch, tmp_path, capsys):
+    """Codex review 2026-05-29: if a draft's .md mtime is old but its sibling
+    .heartbeat sidecar is fresh, the author is still working — doctor must NOT
+    delete the draft."""
+    session, _ = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    draft = draft_dir / "001-claude-plan.md"
+    draft.write_text("body\n")
+    long_ago = time.time() - 7200  # 2h
+    os.utime(draft, (long_ago, long_ago))
+    # Fresh heartbeat sidecar — author is alive
+    sidecar = relay._heartbeat_sidecar_path(draft)
+    sidecar.write_text(json.dumps({
+        "heartbeat_pid": 999999, "owner_pid": None,
+        "owner_kind": "renewal-file", "owner_pidfile": None,
+        "owner_renewal_file": None,
+        "author": "claude", "draft": draft.name,
+    }) + "\n")
+    # sidecar mtime is "now" by default
+
+    rc = relay.cmd_doctor(_doctor_args(fix=True, older_than="1h"))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert draft.exists(), "draft with fresh heartbeat must not be deleted"
+    assert sidecar.exists(), "heartbeat sidecar must not be deleted either"
+    assert "skipped" in out and "heartbeat sidecar is fresh" in out
+
+
+def test_doctor_fix_removes_heartbeat_sidecar_when_deleting_old_draft(monkeypatch, tmp_path, capsys):
+    """Codex review 2026-05-29: when doctor deletes an abandoned draft whose
+    heartbeat sidecar is stale, it must also remove the sidecar — otherwise
+    `relay wait` will see a stale peer heartbeat and return exit 11 forever."""
+    session, _ = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    draft = draft_dir / "001-claude-plan.md"
+    draft.write_text("body\n")
+    sidecar = relay._heartbeat_sidecar_path(draft)
+    sidecar.write_text(json.dumps({
+        "heartbeat_pid": 999999, "owner_pid": None,
+        "owner_kind": "renewal-file", "owner_pidfile": None,
+        "owner_renewal_file": None,
+        "author": "claude", "draft": draft.name,
+    }) + "\n")
+    long_ago = time.time() - 7200  # both mtimes 2h old
+    os.utime(draft, (long_ago, long_ago))
+    os.utime(sidecar, (long_ago, long_ago))
+
+    rc = relay.cmd_doctor(_doctor_args(fix=True, older_than="1h"))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert not draft.exists()
+    assert not sidecar.exists(), "stale .heartbeat sidecar must be removed alongside its .md"
+    assert "removed stale heartbeat sidecar" in out
+
+
 def test_doctor_older_than_without_fix_errors(monkeypatch, tmp_path, capsys):
     """--older-than without --fix has no effect → explicit error with recovery hint."""
     _bootstrap(monkeypatch, tmp_path)
