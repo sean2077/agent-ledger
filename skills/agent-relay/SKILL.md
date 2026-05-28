@@ -8,7 +8,7 @@ metadata:
 
 # agent-relay
 
-You connect an interactive Claude Code session and an interactive Codex CLI session (and, if configured, other markdown-capable agents) through an append-only shared file ledger so they can cross-review work without an API-key orchestrator. Each turn one side reads what the other published, does work, publishes a response with instructions for the next turn. The protocol is **user-driven** — there is no autopilot loop.
+You connect an interactive Claude Code session and an interactive Codex CLI session (and, if configured, other markdown-capable agents) through an append-only shared file ledger so they can cross-review work without an API-key orchestrator. Each turn one side reads what the other published, does work, and publishes a response with instructions for the next turn. The relay is **user-bootstrapped, auto-converging**: a user starts a session and picks the topic, but once both agents are oriented the default is to keep handing off (via `relay wait`) until rule-based break triggers fire — `kind: decision`, a terminal status, an explicit `@user:` escalation in the artifact, or the round-cap. See step 10 below for the exact rules.
 
 The two sides may live on the same machine (two terminals, `RELAY_SYNC=none`) or on two machines bridged by rsync (one side `RELAY_SYNC=rsync`, the other `none`). See `docs/why.md` (in the project root) for the longer take on what this is, what it isn't, and the billing/limits caveats.
 
@@ -261,7 +261,7 @@ Pull works the same way:
 
 `--delete` mirrors deletions; **off by default**. Only enable when the user explicitly says "mirror" or "delete extras".
 
-If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole project mounted from the other side). No sync needed; edits land on the remote filesystem directly. `relay preflight` infers `RELAY_SYNC=none` automatically in shape A when neither `RELAY_SYNC` nor `RELAY_ROLE` is set.
+If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole project mounted from the other side). No sync needed; edits land on the remote filesystem directly. `relay preflight` infers `RELAY_SYNC=none` automatically in shape A when `RELAY_SYNC` is unset. (`RELAY_ROLE` was removed in v0.6 and is no longer consulted for inference — the only remaining `RELAY_ROLE` code path is the fail-level migration check.)
 
 ---
 

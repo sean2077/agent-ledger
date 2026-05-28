@@ -1186,6 +1186,28 @@ def cmd_init(args) -> int:
             print("relay init: --peer is required with --author/--sync (or use --role same-host)",
                   file=sys.stderr)
             return 2
+        # Finding 8: --author / --peer values land verbatim in a sourceable
+        # shell file. Without validation, spaces break the resulting envrc
+        # and shell metacharacters (;, $, `, newlines) can inject commands
+        # into a file the user is about to `source`. Constrain to the same
+        # slug grammar that artifact filenames use; reject everything else.
+        for label, value in (("--author", author), ("--peer", peer)):
+            if not SLUG_RE.match(value):
+                print(
+                    f"relay init: {label}={value!r} is not a valid identity slug. "
+                    f"Allowed: lowercase letters, digits, hyphens; must start with "
+                    f"a letter or digit; max 48 chars (regex {SLUG_RE.pattern}). "
+                    f"Examples: claude, codex, gpt55.",
+                    file=sys.stderr,
+                )
+                return 2
+        if author == peer:
+            print(
+                f"relay init: --author and --peer cannot be the same identity "
+                f"({author!r}).",
+                file=sys.stderr,
+            )
+            return 2
         sync_value = sync if sync is not None else "none"
         if sync_value not in SYNC_VALUES:
             print(f"relay init: --sync={sync_value!r} invalid; expected one of "
@@ -1260,8 +1282,16 @@ def _render_envrc_body(author: str, peer: str, sync: str) -> str:
             "# export RELAY_REMOTE_PATH=/path/on/other/agent-ledger",
         ]
     else:
-        body += ["# RELAY_SYNC=none: rsync vars not needed.",
-                 "unset RELAY_REMOTE_SSH RELAY_REMOTE_PATH"]
+        # Finding C3: explain the unconditional `unset` so users don't
+        # wonder why their parent-shell exports were cleared after
+        # `source .envrc`. Same-host setups commonly inherit rsync vars
+        # from a sibling envrc; clearing them prevents `relay sync` from
+        # mis-guessing it should run a real transport.
+        body += [
+            "# RELAY_SYNC=none: clear stale rsync transport vars so `relay sync`",
+            "# refuses cleanly instead of attempting a half-configured push.",
+            "unset RELAY_REMOTE_SSH RELAY_REMOTE_PATH",
+        ]
     return "\n".join(body) + "\n"
 
 

@@ -424,3 +424,75 @@ def test_init_author_without_peer_fails(monkeypatch, tmp_path, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "--peer is required" in err
+
+
+@pytest.mark.parametrize("bad", [
+    "has space",
+    "semi;colon",
+    "back`tick",
+    "dollar$ign",
+    "new\nline",
+    "Upper",
+    "-leadinghyphen",
+    "",
+    "a" * 49,  # too long
+])
+def test_init_rejects_unsafe_author_slug(monkeypatch, tmp_path, capsys, bad):
+    """Finding 8: --author values land in a sourceable shell file. Reject
+    anything that's not a clean slug to prevent envrc injection AND to
+    keep author identity consistent with artifact filename grammar.
+    """
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(author=bad, peer="codex", sync="none"))
+    assert rc == 2, f"unsafe author {bad!r} should be rejected"
+    err = capsys.readouterr().err
+    assert "--author" in err
+    assert not (repo / f".envrc.{relay._hostname_short()}").exists()
+
+
+@pytest.mark.parametrize("bad", [
+    "has space",
+    "semi;colon",
+    "back`tick",
+])
+def test_init_rejects_unsafe_peer_slug(monkeypatch, tmp_path, capsys, bad):
+    """Finding 8: --peer gets the same treatment as --author."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(author="codex", peer=bad, sync="none"))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--peer" in err
+
+
+def test_init_rejects_author_equals_peer(monkeypatch, tmp_path, capsys):
+    """Finding 8 corollary: A==B is a clear configuration mistake."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(author="codex", peer="codex", sync="none"))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "cannot be the same" in err
+
+
+@pytest.mark.parametrize("ok", ["claude", "codex", "gpt55", "agent-2", "x"])
+def test_init_accepts_valid_slug_identities(monkeypatch, tmp_path, capsys, ok):
+    """Finding 8 positive: known-good slugs still work — gpt55, agent-2, etc."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    # use a distinct peer so author!=peer
+    peer = "other-side" if ok != "other-side" else "claude"
+    rc = relay.cmd_init(_args(author=ok, peer=peer, sync="none"))
+    assert rc == 0
+    body = (repo / f".envrc.{relay._hostname_short()}").read_text()
+    assert f"RELAY_AUTHOR={ok}" in body
+    assert f"RELAY_PEER={peer}" in body

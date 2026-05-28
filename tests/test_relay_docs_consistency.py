@@ -258,6 +258,56 @@ def test_file_protocol_documents_ten_retry_behavior():
     assert "relay doctor" in text
 
 
+def test_skill_opening_does_not_call_protocol_a_no_autopilot_loop():
+    """Finding 10: SKILL.md L11 used to say 'there is no autopilot loop',
+    contradicting step 10's auto-loop semantics. The rewrite must not
+    re-introduce that phrasing or any equivalent denial of the loop."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    bad_phrases = [
+        "there is no autopilot loop",
+        "no autopilot",
+        "not an autopilot",
+    ]
+    for needle in bad_phrases:
+        assert needle.lower() not in text.lower(), (
+            f"SKILL.md still contains misleading phrase {needle!r}; "
+            "the relay does run an auto-loop via `relay wait` between "
+            "rule-based break triggers — keep the framing honest"
+        )
+    # Required: the new opening must signal user-bootstrapped + auto-converging.
+    assert "auto-converging" in text or "auto-loop" in text
+
+
+def test_skill_does_not_imply_relay_role_inference_fallback():
+    """Finding C2: SKILL.md L264 used to say preflight infers RELAY_SYNC=none
+    when neither RELAY_SYNC nor RELAY_ROLE is set. _resolve_sync no longer
+    consults RELAY_ROLE for inference (since v0.6); only the migration-fail
+    path remains. Wording must not imply a fallback that doesn't exist."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    # The exact old phrasing
+    bad = "neither `RELAY_SYNC` nor `RELAY_ROLE` is set"
+    assert bad not in text, (
+        f"SKILL.md still implies RELAY_ROLE as an inference fallback "
+        f"({bad!r}); since v0.6 only RELAY_SYNC matters for inference."
+    )
+
+
+def test_envrc_renderer_explains_unconditional_unset():
+    """Finding C3: the unset RELAY_REMOTE_SSH/PATH line in the rendered
+    .envrc should carry a one-line explanation; a bare `unset` confuses
+    users whose parent shell already set those vars."""
+    src = (ROOT / "skills/agent-relay/bin/relay").read_text(encoding="utf-8")
+    idx = src.find("unset RELAY_REMOTE_SSH")
+    assert idx > 0, "renderer no longer emits the unset line — keep the explanation in sync"
+    # Look at the ~400 chars preceding the unset for the comment block.
+    window = src[max(0, idx - 400):idx]
+    assert "refuses cleanly" in window or "stale rsync" in window, (
+        "unset line must carry a comment explaining why it fires "
+        "unconditionally (so users don't think their env was clobbered "
+        "by mistake)"
+    )
+
+
 def test_v07_wait_hint_paths_include_doctor_or_sessions():
     """relay wait resolver-fail and claim resolver-fail hints must mention
     `relay sessions list` (the discovery command) and `relay bootstrap`."""
