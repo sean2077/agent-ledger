@@ -2572,6 +2572,171 @@ def _wait_int_env(name: str, default: int) -> int:
     return v
 
 
+_DURATION_RE = re.compile(r"^(\d+)([smhd])$")
+
+
+def _parse_duration(s: str) -> Optional[int]:
+    """Parse '1h', '30m', '1d', '7200s' -> seconds. Returns None on invalid."""
+    m = _DURATION_RE.match(s.strip())
+    if not m:
+        return None
+    n = int(m.group(1))
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return n * mult
+
+
+def cmd_doctor(args) -> int:
+    """Report stale relay state; optionally clean owner-safe junk + abandoned drafts.
+
+    Exit codes:
+      0 — no findings
+      1 — findings reported (whether or not --fix ran)
+      2 — protocol/env error
+    """
+    env = load_env()
+    if not env.shared_root or not env.shared_root.is_dir():
+        print("relay doctor: RELAY_SHARED_ROOT not set or missing", file=sys.stderr)
+        return 2
+
+    older_than_secs: Optional[int] = None
+    if getattr(args, "older_than", None):
+        older_than_secs = _parse_duration(args.older_than)
+        if older_than_secs is None:
+            print(
+                f"relay doctor: invalid --older-than {args.older_than!r}; "
+                "use '<n>s|m|h|d' (e.g. 1h, 30m, 1d).",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.fix:
+            print(
+                "relay doctor: --older-than has no effect without --fix; "
+                "drop --older-than for a report-only run.",
+                file=sys.stderr,
+            )
+            return 2
+
+    report = {
+        "shared_root": str(env.shared_root),
+        "author": env.author,
+        "sessions": [],
+        "actions": [],
+        "findings_count": 0,
+    }
+    actions: list[str] = report["actions"]
+    findings = 0
+
+    for sd in iter_session_dirs(env.shared_root):
+        entry = {
+            "session_id": sd.name,
+            "is_active": session_is_active(sd),
+            "drafts": [],
+            "heartbeat_pidfile": None,
+            "heartbeat_sidecars": [],
+            "recovery_lock": None,
+        }
+        # Drafts
+        draft_dir = sd / ".draft"
+        if draft_dir.is_dir():
+            for d in sorted(draft_dir.glob("[0-9][0-9][0-9]-*.md")):
+                try:
+                    age = int(time.time() - d.stat().st_mtime)
+                except OSError:
+                    continue
+                entry["drafts"].append({"name": d.name, "age_seconds": age})
+                findings += 1
+        # Heartbeat (only inspect current author's lane to avoid cross-author claims)
+        if env.author:
+            pidfile = _heartbeat_pidfile_path(sd, env.author)
+            if pidfile.exists():
+                running, pid = _heartbeat_is_running(pidfile)
+                entry["heartbeat_pidfile"] = {
+                    "path": str(pidfile),
+                    "pid": pid,
+                    "alive": running,
+                }
+                findings += 1
+                if args.fix and not running:
+                    pidfile.unlink(missing_ok=True)
+                    actions.append(f"removed dead pidfile {pidfile}")
+            if draft_dir.is_dir():
+                for sc in sorted(draft_dir.glob("*.heartbeat")):
+                    try:
+                        data = json.loads(sc.read_text(encoding="utf-8"))
+                        if data.get("author") != env.author:
+                            continue
+                        age = int(time.time() - sc.stat().st_mtime)
+                    except (OSError, ValueError):
+                        continue
+                    entry["heartbeat_sidecars"].append(
+                        {"name": sc.name, "age_seconds": age}
+                    )
+                    findings += 1
+            lock = _recovery_lock_path(sd, env.author)
+            if lock.exists():
+                entry["recovery_lock"] = {"path": str(lock)}
+                findings += 1
+                if args.fix:
+                    # On-entry GC already removes dead-PID locks; report-only here
+                    # surfaces what GC would have done if a session-scoped command
+                    # had run instead. Doctor does not force-remove the lock.
+                    pass
+        # Draft GC (only with --fix + --older-than)
+        if args.fix and older_than_secs is not None and draft_dir.is_dir():
+            for d in sorted(draft_dir.glob("[0-9][0-9][0-9]-*.md")):
+                try:
+                    age = int(time.time() - d.stat().st_mtime)
+                except OSError:
+                    continue
+                if age >= older_than_secs:
+                    try:
+                        d.unlink()
+                        actions.append(f"deleted abandoned draft {d}")
+                    except OSError as exc:
+                        actions.append(f"failed to delete draft {d}: {exc}")
+        report["sessions"].append(entry)
+
+    report["findings_count"] = findings
+
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2))
+    else:
+        _print_doctor_text(report, fix=bool(args.fix))
+
+    return 1 if findings > 0 else 0
+
+
+def _print_doctor_text(report: dict, *, fix: bool) -> None:
+    print(f"relay doctor :: {report['shared_root']}")
+    print(f"  author: {report['author'] or '(unset)'}")
+    if not report["sessions"]:
+        print("  no sessions found.")
+        return
+    for s in report["sessions"]:
+        marker = "[active]" if s["is_active"] else "[inactive]"
+        print(f"\n  session {marker}: {s['session_id']}")
+        if s["drafts"]:
+            print("    drafts (.draft/):")
+            for d in s["drafts"]:
+                print(f"      - {d['name']}  age={d['age_seconds']}s")
+        hp = s["heartbeat_pidfile"]
+        if hp:
+            tag = "alive" if hp["alive"] else "DEAD"
+            print(f"    heartbeat pidfile: pid={hp['pid']} ({tag})  {hp['path']}")
+        if s["heartbeat_sidecars"]:
+            print("    heartbeat sidecars:")
+            for sc in s["heartbeat_sidecars"]:
+                print(f"      - {sc['name']}  age={sc['age_seconds']}s")
+        if s["recovery_lock"]:
+            print(f"    recovery_lock: {s['recovery_lock']['path']}")
+    if report["actions"]:
+        print("\n  actions taken:")
+        for a in report["actions"]:
+            print(f"    - {a}")
+    print(f"\nsummary: {report['findings_count']} findings"
+          f"{' (fix applied)' if fix else ''}")
+
+
 def cmd_wait(args) -> int:
     env = load_env()
     if not env.author:
@@ -2829,6 +2994,18 @@ def build_parser() -> argparse.ArgumentParser:
     psync.add_argument("--delete", action="store_true",
                         help="Pass --delete to rsync (off by default).")
     psync.set_defaults(func=cmd_sync)
+
+    pdoc = sub.add_parser("doctor",
+        help="Report stale relay state; optionally clean owner-safe junk.")
+    pdoc.add_argument("--json", action="store_true",
+                      help="Machine-readable report.")
+    pdoc.add_argument("--fix", action="store_true",
+                      help="Clean owner-safe junk (dead pidfiles). With --older-than, "
+                           "also delete abandoned drafts older than the threshold.")
+    pdoc.add_argument("--older-than", default=None,
+                      help="Duration ('1h', '30m', '1d'). Required with --fix only "
+                           "to delete drafts; ignored otherwise.")
+    pdoc.set_defaults(func=cmd_doctor)
 
     pw = sub.add_parser("wait",
         help="Block until peer publishes a new artifact targeting this author.")
