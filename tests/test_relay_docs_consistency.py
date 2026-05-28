@@ -14,6 +14,12 @@ def test_relay_version_matches_readme():
     assert f"v{relay.__version__}" in readme
 
 
+def test_hook_version_matches_relay_version():
+    """Hook dispatcher release version stays aligned with the CLI."""
+    hook = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
+    assert f'VERSION = "{relay.__version__}"' in hook
+
+
 def test_first_brief_does_not_teach_needs_change_frontmatter():
     """M2: first-brief.md does not instruct setting an off-protocol status."""
     text = (ROOT / "skills/agent-relay/templates/first-brief.md").read_text(encoding="utf-8")

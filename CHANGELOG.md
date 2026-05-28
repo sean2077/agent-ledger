@@ -4,6 +4,32 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.8.0 — 2026-05-29
+
+The cross-platform hook layer release. This version keeps the manual
+relay workflow intact while adding optional Claude Code + Codex CLI
+hooks that surface relay state and protect published artifacts.
+
+### Added
+
+- `relay hooks install|uninstall|status|doctor` for managing optional
+  Claude Code and Codex CLI hook wiring.
+- Cross-platform hook dispatcher covering `SessionStart`, `PreToolUse`,
+  and `Stop` events.
+- Managed hook config fragments for Claude Code and Codex CLI.
+- Hook protocol reference documenting payload shapes, emitted token
+  prefixes, trust requirements, and non-goals.
+- Dispatcher tests covering fast-path skip, published-artifact edit
+  denial, Stop-hook deduplication, and installer merge stability.
+
+### Changed
+
+- `SKILL.md` now documents optional hook behaviour and the
+  `[relay-state]` / `[relay-action]` / `[relay-hint]` prefixes emitted
+  by the hook layer.
+- Hook installation appends managed entries after existing hooks and
+  preserves unmanaged config state byte-for-byte.
+
 ## 0.7.0 — 2026-05-28
 
 The "uncrashable by input" pass. Six PRs widen the most common

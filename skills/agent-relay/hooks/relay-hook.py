@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 
-VERSION = "0.8.0-dev"
+VERSION = "0.8.0"
 
 HOOK_QUIET = os.environ.get("RELAY_HOOK_QUIET", "1") != "0"
 HOOK_VERBOSE = os.environ.get("RELAY_HOOK_VERBOSE", "0") == "1"
