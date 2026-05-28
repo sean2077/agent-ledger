@@ -69,6 +69,26 @@ def test_claim_collision_increments(monkeypatch, tmp_path, capsys):
     assert p2_path.name.startswith("002-")
 
 
+def test_claim_collision_after_two_retries_exits_2(monkeypatch, tmp_path, capsys):
+    """Stage 0: file-protocol.md §7.1 step 4 says second-failure exit code is 2.
+    Force claim into a real two-collision-then-fail path by stubbing latest_seq
+    to lie, then planting squatters at the seqs claim will try."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    # Squat the two slots claim will attempt after latest_seq returns 0.
+    (draft_dir / "001-codex-plan.md").write_text("squatter-a\n")
+    (draft_dir / "002-codex-plan.md").write_text("squatter-b\n")
+    # Force latest_seq to under-report so claim starts at seq=1 and collides twice.
+    monkeypatch.setattr(relay, "latest_seq", lambda s: 0)
+    args = type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})()
+    rc = relay.cmd_claim(args)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "could not allocate sequence" in err
+
+
 def _fill_draft(draft_path: Path, *, prompt: str = "do real things\n", body: str = "real body"):
     fm, _ = relay.parse_frontmatter(draft_path.read_text())
     fm["prompt_for_next"] = prompt
