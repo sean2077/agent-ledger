@@ -48,7 +48,7 @@ TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
 PLACEHOLDER_MARKER = "TODO:"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 NON_BLOCKING_PREFLIGHT_WARNS = {"fs.mtime_monotonic"}
-OWNER_KINDS = {"agent", "tmux-pane", "tool-process", "pidfile", "renewal-file", "none"}
+OWNER_KINDS = {"agent", "tool-process", "pidfile", "renewal-file", "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -1007,6 +1007,7 @@ def cmd_status(args) -> int:
     session = (resolve_session(env, session_id, project=getattr(args, "project", None))
                if session_id else resolve_active_session(env, getattr(args, "project", None)))
     _gc_heartbeat_orphans(session, env.author or "")
+    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
     sj = json.loads((session / "session.json").read_text())
@@ -1125,6 +1126,7 @@ def cmd_claim(args) -> int:
         getattr(args, "session_id", None),
     )
     _gc_heartbeat_orphans(session, env.author or "")
+    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
     draft_dir = session / ".draft"
@@ -1242,6 +1244,7 @@ def cmd_publish(args) -> int:
     session = draft_path.parent.parent
     _env_pub = load_env()
     _gc_heartbeat_orphans(session, _env_pub.author or "")
+    _gc_recovery_locks(session, _env_pub.author or "")
     _gc_renewal_orphans(session, _env_pub)
     _maybe_tick_renewal(session, _env_pub)
     base = draft_path.name[:-3]  # strip .md
@@ -1338,6 +1341,7 @@ def cmd_close(args) -> int:
         print(f"relay close: {msg}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author or "")
+    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
     sentinel = session / "CLOSED"
@@ -1553,7 +1557,7 @@ def cmd_sync(args) -> int:
 #
 # Owner kinds (see decision artifact 20260528-stage3-renewal-design seq 9
 # §4.3):
-#   agent / tmux-pane / tool-process  pid-based; os.kill(pid, 0)
+#   agent / tool-process               pid-based; os.kill(pid, 0)
 #   pidfile                            reads pid from a file, then os.kill
 #   renewal-file                       mtime within RELAY_RENEWAL_STALE_THRESHOLD
 #                                      (floor 60s). Stage 3 wires the tick that
@@ -1561,6 +1565,11 @@ def cmd_sync(args) -> int:
 #                                      kind has no live writer so don't use it
 #                                      as a default.
 #   none                               always alive (explicit timeout-only mode)
+#
+# tmux-pane was advertised in the locked spec but the impl was not wired to
+# `tmux list-panes -t <pane>`. The kind is removed for now; reintroduce when
+# the tmux verification strategy is implemented (would need a string pane id,
+# not --owner-pid int).
 # ---------------------------------------------------------------------------
 
 
@@ -1577,7 +1586,7 @@ def _owner_alive(kind: str, *, owner_pid: Optional[int] = None,
                  owner_renewal_file: Optional[str] = None) -> bool:
     if kind == "none":
         return True
-    if kind in {"agent", "tmux-pane", "tool-process"}:
+    if kind in {"agent", "tool-process"}:
         if owner_pid is None:
             return False
         try:
@@ -1745,7 +1754,15 @@ def _heartbeat_drafts_for_author(session: Path, author: str) -> list[Path]:
 
 
 def _gc_heartbeat_orphans(session: Path, author: str) -> None:
-    """Best-effort: kill orphan heartbeat daemons + remove their files.
+    """Kill orphan heartbeat daemons + remove their files.
+
+    Decision matrix (per locked spec §4.4):
+        daemon alive  | sidecar stale | owner alive | verdict
+        ----------------------------------------------------------
+        yes           | no            | yes         | live, leave alone
+        yes           | no            | no          | orphan — kill daemon, clean
+        yes           | yes           | any         | orphan — daemon hung, kill + clean
+        no            | any           | any         | orphan — pidfile leak, clean
 
     Runs at the top of every session-scoped relay subcommand. Silent.
     """
@@ -1755,12 +1772,61 @@ def _gc_heartbeat_orphans(session: Path, author: str) -> None:
     if not pidfile.exists():
         return
     running, pid = _heartbeat_is_running(pidfile)
-    if running and pid:
-        # Daemon is alive. Don't touch it — the live-vs-orphan distinction
-        # belongs to the caller (e.g. cmd_heartbeat_stop). On-entry GC only
-        # collects clearly dead daemons here.
+
+    if not running:
+        _heartbeat_purge(session, author, pidfile, pid=None)
         return
-    # Pid file present but process gone → orphan. Clean files.
+
+    # Daemon alive — inspect each of its sidecars. If any sidecar is stale or
+    # its owner is dead, the daemon is no longer authoritative.
+    interval = max(_wait_int_env("RELAY_HEARTBEAT_INTERVAL", 10), 1)
+    factor = max(_wait_int_env("RELAY_HEARTBEAT_STALE_FACTOR", 3), 1)
+    sidecar_stale_threshold = max(interval * factor, 60)
+    cutoff = time.time() - sidecar_stale_threshold
+
+    for draft in _heartbeat_drafts_for_author(session, author):
+        sidecar = _heartbeat_sidecar_path(draft)
+        try:
+            stat = sidecar.stat()
+        except OSError:
+            continue
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        sidecar_stale = stat.st_mtime < cutoff
+        owner_kind = data.get("owner_kind") or "none"
+        owner_alive = _owner_alive(
+            owner_kind,
+            owner_pid=data.get("owner_pid"),
+            owner_pidfile=data.get("owner_pidfile"),
+            owner_renewal_file=data.get("owner_renewal_file"),
+        )
+        if sidecar_stale or not owner_alive:
+            _heartbeat_purge(session, author, pidfile, pid=pid)
+            return  # purge clears every sidecar at once; one bad sidecar tears it all down
+
+
+def _heartbeat_purge(session: Path, author: str, pidfile: Path,
+                      pid: Optional[int]) -> None:
+    """Kill daemon if alive, remove pidfile + sidecars."""
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
     try:
         pidfile.unlink()
     except OSError:
@@ -1770,6 +1836,40 @@ def _gc_heartbeat_orphans(session: Path, author: str) -> None:
             _heartbeat_sidecar_path(draft).unlink()
         except OSError:
             pass
+
+
+def _gc_recovery_locks(session: Path, author: str) -> None:
+    """Remove recovery lock files whose recorded pid is dead."""
+    if not author:
+        return
+    lock = _recovery_lock_path(session, author)
+    if not lock.exists():
+        return
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # malformed lock — remove
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+        return
+    pid = data.get("pid")
+    if not isinstance(pid, int):
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+        return
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+    except (PermissionError, OSError):
+        pass  # exists or unknown; leave alone
 
 
 def _recovery_lock_path(session: Path, author: str) -> Path:
@@ -1832,10 +1932,25 @@ def cmd_heartbeat_start(args) -> int:
         print(f"relay heartbeat start: --draft must point to a .draft/ file: {draft_path}",
               file=sys.stderr)
         return 2
+    # Draft filename must encode an author that matches RELAY_AUTHOR; otherwise
+    # the heartbeat would attach to someone else's in-flight work.
+    m = _DRAFT_NAME_RE.match(draft_path.name)
+    if not m:
+        print(f"relay heartbeat start: malformed draft name: {draft_path.name}",
+              file=sys.stderr)
+        return 2
+    draft_author = m.group(2)
+    if draft_author != env.author:
+        print(
+            f"relay heartbeat start: draft author {draft_author!r} does not match "
+            f"RELAY_AUTHOR {env.author!r}",
+            file=sys.stderr,
+        )
+        return 2
     session = draft_path.parent.parent
 
     # Validate owner combination.
-    if args.owner_kind in {"agent", "tmux-pane", "tool-process"} and args.owner_pid is None:
+    if args.owner_kind in {"agent", "tool-process"} and args.owner_pid is None:
         print(f"relay heartbeat start: --owner-kind {args.owner_kind} requires --owner-pid",
               file=sys.stderr)
         return 2
@@ -1843,8 +1958,9 @@ def cmd_heartbeat_start(args) -> int:
         print("relay heartbeat start: --owner-kind pidfile requires --owner-pidfile",
               file=sys.stderr)
         return 2
-    if args.owner_kind == "renewal-file" and not getattr(args, "owner_renewal_file", None):
-        # Derive the scoped renewal path from project/session/author/draft.
+    if args.owner_kind == "renewal-file":
+        # Scoped renewal path is ALWAYS derived internally — callers cannot pass
+        # one in (per spec, prevents cross-session false-alive bypass).
         derived = _renewal_path_for_draft(draft_path, session, env)
         if derived is None:
             print(
@@ -2156,12 +2272,13 @@ def cmd_wait(args) -> int:
         print(f"relay wait: {exc}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author)
+    _gc_recovery_locks(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
 
     cli_timeout = getattr(args, "timeout", None)
     cli_poll = getattr(args, "poll", None)
-    timeout = cli_timeout if cli_timeout is not None else _wait_int_env("RELAY_WAIT_TIMEOUT", 300)
+    timeout = cli_timeout if cli_timeout is not None else _wait_int_env("RELAY_WAIT_TIMEOUT", 600)
     poll = cli_poll if cli_poll is not None else _wait_int_env("RELAY_WAIT_POLL_INTERVAL", 2)
     if timeout < 0:
         timeout = 0
@@ -2189,16 +2306,18 @@ def cmd_wait(args) -> int:
     if not session_is_active(session):
         return _terminal_exit()
 
-    # Stage 3 effective-deadline rule: if peer has a live renewal-file heartbeat,
-    # the wait must run long enough for that heartbeat to plausibly go stale.
-    # Otherwise we exit 10 before exit 11 can ever fire under defaults.
-    has_renewal_file_peer = _peer_has_renewal_file_heartbeat(session, env.peer or "")
-    if has_renewal_file_peer:
-        threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
-        timeout = max(timeout, threshold + poll)
+    # Stage 3 wait policy:
+    #   - No peer renewal-file heartbeat is visible → use nominal timeout
+    #     (returns exit 10 if no peer artifact arrives in time).
+    #   - Peer renewal-file heartbeat IS visible at any point during the loop →
+    #     defer to its mtime as the liveness signal. Stale heartbeat → exit 11.
+    #     Fresh heartbeat → keep polling (no nominal timeout while peer is alive).
+    #
+    # Detection must be DYNAMIC inside the loop: peer typically starts the
+    # heartbeat after we already entered wait, so a once-only snapshot at entry
+    # would miss it.
     stale_threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
-
-    deadline = time.monotonic() + timeout
+    nominal_deadline = time.monotonic() + timeout
 
     try:
         while True:
@@ -2221,13 +2340,18 @@ def cmd_wait(args) -> int:
             if not session_is_active(session):
                 return _terminal_exit()
 
-            # Stage 3 exit 11: peer heartbeat sidecar exists and went stale.
-            if has_renewal_file_peer and _peer_heartbeat_is_stale(session, env.peer or "",
-                                                                    stale_threshold):
-                return 11
-
-            if time.monotonic() >= deadline:
-                return 10
+            # Dynamic peer-heartbeat detection: re-check every iteration.
+            has_renewal_file_peer = _peer_has_renewal_file_heartbeat(
+                session, env.peer or ""
+            )
+            if has_renewal_file_peer:
+                if _peer_heartbeat_is_stale(session, env.peer or "", stale_threshold):
+                    return 11
+                # heartbeat is fresh → keep polling, ignore nominal timeout
+            else:
+                # No peer heartbeat seen yet → honor nominal timeout.
+                if time.monotonic() >= nominal_deadline:
+                    return 10
 
             time.sleep(poll)
     except KeyboardInterrupt:
@@ -2264,8 +2388,19 @@ def _peer_has_renewal_file_heartbeat(session: Path, peer: str) -> bool:
 
 
 def _peer_heartbeat_is_stale(session: Path, peer: str, threshold: int) -> bool:
+    """Stale-renewal detection: only renewal-file kind sidecars count.
+
+    Spec restricts wait exit 11 to a stale peer owner_kind=renewal-file heartbeat;
+    pid-based or `none` sidecars must not trigger it.
+    """
     cutoff = time.time() - threshold
     for sidecar in _peer_heartbeat_sidecars(session, peer):
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("owner_kind") != "renewal-file":
+            continue
         try:
             mtime = sidecar.stat().st_mtime
         except OSError:
@@ -2358,7 +2493,7 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--project", default=None)
     pw.add_argument("--session-id", default=None)
     pw.add_argument("--timeout", type=int, default=None,
-                    help="Override RELAY_WAIT_TIMEOUT (default 300s).")
+                    help="Override RELAY_WAIT_TIMEOUT (default 600s).")
     pw.add_argument("--poll", type=int, default=None,
                     help="Override RELAY_WAIT_POLL_INTERVAL (default 2s).")
     pw.set_defaults(func=cmd_wait)
@@ -2374,9 +2509,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="How to determine owner liveness.")
     phb_start.add_argument("--owner-pid", type=int, default=None)
     phb_start.add_argument("--owner-pidfile", default=None)
-    phb_start.add_argument("--owner-renewal-file", default=None,
-        help="Path to a file whose mtime represents owner liveness "
-             "(used with --owner-kind renewal-file; populated by `relay heartbeat tick` in Stage 3).")
     phb_start.add_argument("--interval", type=int, default=None,
         help="Beat interval in seconds (default RELAY_HEARTBEAT_INTERVAL=10).")
     phb_start.set_defaults(func=cmd_heartbeat_start)

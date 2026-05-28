@@ -212,6 +212,117 @@ RELAY_BIN = (
 )
 
 
+def _write_peer_heartbeat(session: Path, *, peer: str, draft_name: str,
+                            owner_kind: str, mtime_offset: float = 0.0):
+    """Plant a heartbeat sidecar in peer's .draft/ scope for wait to read."""
+    import json as _json
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    # Also need a stub .md so _heartbeat_drafts_for_author/_peer_heartbeat_sidecars
+    # can find it. peer's draft name format: NNN-<peer>-<kind>.md
+    md = draft_dir / draft_name
+    if not md.exists():
+        md.write_text("stub\n")
+    sidecar = md.with_name(md.name + ".heartbeat")
+    sidecar.write_text(_json.dumps({
+        "heartbeat_pid": None,
+        "owner_pid": None,
+        "owner_kind": owner_kind,
+        "owner_pidfile": None,
+        "owner_renewal_file": None,
+        "host": "x", "author": peer,
+        "draft": draft_name,
+        "started_at": "x", "last_beat": "x",
+    }) + "\n")
+    if mtime_offset:
+        target = time.time() + mtime_offset
+        os.utime(sidecar, (target, target))
+    return sidecar
+
+
+def test_wait_exit_11_only_on_stale_renewal_file_heartbeat(monkeypatch, tmp_path, capsys):
+    """M3 regression: exit 11 must fire only when a stale peer heartbeat has
+    owner_kind=renewal-file. A stale non-renewal sidecar must not trigger it."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(session, seq=1, author="claude", peer="codex")
+    monkeypatch.setenv("RELAY_RENEWAL_STALE_THRESHOLD", "2")
+    # Peer (codex) has a stale 'none' kind sidecar — must NOT trigger exit 11.
+    _write_peer_heartbeat(session, peer="codex",
+        draft_name="002-codex-review.md", owner_kind="none", mtime_offset=-30)
+    capsys.readouterr()
+    rc = relay.cmd_wait(_wait_args(timeout=2, poll=1))
+    # Must time out (10), not crash-signal (11), because no renewal-file kind exists.
+    assert rc == 10
+
+
+def test_wait_exit_11_fires_on_stale_renewal_file_heartbeat(monkeypatch, tmp_path, capsys):
+    """M3 regression: a stale renewal-file kind sidecar must trigger exit 11.
+
+    The threshold floor in code is 60s (cannot go lower per spec). Backdate the
+    sidecar > 60s old so the stale-threshold comparison fires regardless of
+    the RELAY_RENEWAL_STALE_THRESHOLD env override."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(session, seq=1, author="claude", peer="codex")
+    monkeypatch.setenv("RELAY_WAIT_POLL_INTERVAL", "1")
+    _write_peer_heartbeat(session, peer="codex",
+        draft_name="002-codex-review.md", owner_kind="renewal-file", mtime_offset=-700)
+    capsys.readouterr()
+    rc = relay.cmd_wait(_wait_args(timeout=2, poll=1))
+    assert rc == 11
+
+
+def test_wait_detects_renewal_heartbeat_appearing_after_wait_started(
+    monkeypatch, tmp_path, capsys
+):
+    """Codex seq 4 regression: cmd_wait must DYNAMICALLY detect peer renewal-file
+    heartbeat that appears AFTER wait entry. In the normal auto-loop flow,
+    waiter publishes and enters wait BEFORE peer starts its own heartbeat."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(session, seq=1, author="claude", peer="codex")
+    monkeypatch.setenv("RELAY_WAIT_POLL_INTERVAL", "1")
+    capsys.readouterr()
+
+    def _delayed_stale_heartbeat():
+        time.sleep(0.5)
+        _write_peer_heartbeat(session, peer="codex",
+            draft_name="002-codex-review.md", owner_kind="renewal-file",
+            mtime_offset=-700)  # backdated past default threshold (600s)
+
+    t = threading.Thread(target=_delayed_stale_heartbeat, daemon=True)
+    t.start()
+    # Without dynamic detection, wait would exit 10 at the nominal timeout
+    # because has_renewal_file_peer was False at entry. With dynamic detection,
+    # exit 11 fires within ~2 poll iterations after the sidecar appears.
+    rc = relay.cmd_wait(_wait_args(timeout=10, poll=1))
+    t.join(timeout=2)
+    assert rc == 11
+
+
+def test_peer_heartbeat_helper_filters_non_renewal_kinds(monkeypatch, tmp_path):
+    """M3 regression at the helper level: stale 'none' or 'tool-process' sidecars
+    must be ignored by _peer_heartbeat_is_stale. Only owner_kind=renewal-file counts."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    # Two stale sidecars in peer's .draft/: one 'none' kind, one 'tool-process' kind.
+    # Neither should make the helper return True.
+    _write_peer_heartbeat(session, peer="codex",
+        draft_name="002-codex-review.md", owner_kind="none", mtime_offset=-300)
+    _write_peer_heartbeat(session, peer="codex",
+        draft_name="003-codex-fix.md", owner_kind="tool-process", mtime_offset=-300)
+    assert relay._peer_heartbeat_is_stale(session, "codex", threshold=60) is False
+    # Now add a stale renewal-file kind. Helper must return True.
+    _write_peer_heartbeat(session, peer="codex",
+        draft_name="004-codex-note.md", owner_kind="renewal-file", mtime_offset=-300)
+    assert relay._peer_heartbeat_is_stale(session, "codex", threshold=60) is True
+
+
+def test_peer_heartbeat_helper_fresh_renewal_not_stale(monkeypatch, tmp_path):
+    """Direct helper test: a fresh renewal-file kind sidecar is not stale."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _write_peer_heartbeat(session, peer="codex",
+        draft_name="002-codex-review.md", owner_kind="renewal-file", mtime_offset=0)
+    assert relay._peer_heartbeat_is_stale(session, "codex", threshold=60) is False
+
+
 def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
     """SIGINT during wait → exit 130 (128 + SIGINT)."""
     session = _bootstrap(monkeypatch, tmp_path)

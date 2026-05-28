@@ -301,3 +301,121 @@ def test_recovery_lock_o_excl_acquire_and_release(monkeypatch, tmp_path, capsys)
     # After release, fresh acquire works again
     assert relay._acquire_recovery_lock(session, "claude") is True
     relay._release_recovery_lock(session, "claude")
+
+
+# ---------------------------------------------------------------------------
+# Stage 2/3 review fixes — codex seq 2 findings
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_start_refuses_draft_author_mismatch(monkeypatch, tmp_path, capsys):
+    """M2: --draft NNN-<someone-else>-<kind>.md must be refused even if file exists."""
+    session = _bootstrap(monkeypatch, tmp_path, author="claude", peer="codex")
+    capsys.readouterr()
+    # Manually plant a draft whose filename author is `codex` (not us).
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    imposter = draft_dir / "001-codex-plan.md"
+    imposter.write_text("body\n")
+    rc = relay.cmd_heartbeat_start(_hb_args(
+        draft=str(imposter), owner_kind="none", interval=1,
+    ))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "author" in err.lower()
+
+
+def test_heartbeat_start_renewal_file_ignores_caller_path(monkeypatch, tmp_path, capsys):
+    """M1: even if args carry an owner_renewal_file, start derives the scoped path."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    bogus = tmp_path / "bogus-renewal-file"
+    bogus.touch()
+    try:
+        rc = relay.cmd_heartbeat_start(type("A", (), {
+            "draft": str(draft), "owner_kind": "renewal-file",
+            "owner_pid": None, "owner_pidfile": None,
+            "owner_renewal_file": str(bogus),  # caller tries to inject; impl must ignore
+            "interval": 1, "force": False,
+            "project": None, "session_id": None,
+        })())
+        assert rc == 0
+        capsys.readouterr()
+        sidecar = relay._heartbeat_sidecar_path(draft)
+        data = json.loads(sidecar.read_text())
+        # The recorded path must be the scoped one, not the bogus one.
+        assert data["owner_renewal_file"] != str(bogus)
+        env = relay.load_env()
+        derived = relay._renewal_path_for_draft(draft, session, env)
+        assert data["owner_renewal_file"] == str(derived)
+    finally:
+        relay.cmd_heartbeat_stop(_hb_args(draft=str(draft), force=True))
+
+
+def test_owner_kind_tmux_pane_no_longer_accepted(monkeypatch, tmp_path, capsys):
+    """M5: tmux-pane kind was removed from taxonomy; start should refuse it."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    rc = relay.cmd_heartbeat_start(_hb_args(
+        draft=str(draft), owner_kind="tmux-pane", owner_pid=os.getpid(), interval=1,
+    ))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "tmux-pane" in err or "owner_kind" in err.lower() or "owner-kind" in err.lower()
+
+
+def test_recovery_lock_gc_cleans_dead_pid(monkeypatch, tmp_path, capsys):
+    """M4: on-entry GC must remove recovery locks whose recorded pid is dead."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    lock = relay._recovery_lock_path(session, "claude")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    # Write a lock that points to a dead pid.
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    dead_pid = proc.pid
+    lock.write_text(json.dumps({"pid": dead_pid, "author": "claude", "started_at": "x"}) + "\n")
+    assert lock.exists()
+    relay._gc_recovery_locks(session, "claude")
+    assert not lock.exists()
+
+
+def test_heartbeat_gc_purges_when_owner_dead(monkeypatch, tmp_path, capsys):
+    """M4: GC must kill daemon + clean files when owner is dead even though daemon is alive."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    owner = subprocess.Popen(["sleep", "60"])
+    try:
+        rc = relay.cmd_heartbeat_start(_hb_args(
+            draft=str(draft), owner_kind="tool-process", owner_pid=owner.pid,
+            interval=60,  # long interval so daemon won't self-stop quickly
+        ))
+        assert rc == 0
+        daemon_pid = int(capsys.readouterr().out.strip())
+        pidfile = relay._heartbeat_pidfile_path(session, "claude")
+        sidecar = relay._heartbeat_sidecar_path(draft)
+        for _ in range(20):
+            if pidfile.exists():
+                break
+            time.sleep(0.1)
+        assert pidfile.exists() and sidecar.exists()
+        # Kill owner; daemon still alive (its 60s sleep hasn't elapsed).
+        owner.kill()
+        owner.wait(timeout=2)
+        # GC should detect owner-dead and purge.
+        relay._gc_heartbeat_orphans(session, "claude")
+        assert not pidfile.exists()
+        assert not sidecar.exists()
+        time.sleep(0.2)
+        with pytest.raises(OSError):
+            os.kill(daemon_pid, 0)
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+        _stop_active_heartbeat(session)
