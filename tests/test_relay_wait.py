@@ -267,7 +267,7 @@ def test_wait_exit_11_fires_on_stale_renewal_file_heartbeat(monkeypatch, tmp_pat
     _publish_artifact(session, seq=1, author="claude", peer="codex")
     monkeypatch.setenv("RELAY_WAIT_POLL_INTERVAL", "1")
     _write_peer_heartbeat(session, peer="codex",
-        draft_name="002-codex-review.md", owner_kind="renewal-file", mtime_offset=-700)
+        draft_name="002-codex-review.md", owner_kind="renewal-file", mtime_offset=-3700)
     capsys.readouterr()
     rc = relay.cmd_wait(_wait_args(timeout=2, poll=1))
     assert rc == 11
@@ -288,7 +288,7 @@ def test_wait_detects_renewal_heartbeat_appearing_after_wait_started(
         time.sleep(0.5)
         _write_peer_heartbeat(session, peer="codex",
             draft_name="002-codex-review.md", owner_kind="renewal-file",
-            mtime_offset=-700)  # backdated past default threshold (600s)
+            mtime_offset=-3700)  # backdated past default threshold (3600s)
 
     t = threading.Thread(target=_delayed_stale_heartbeat, daemon=True)
     t.start()

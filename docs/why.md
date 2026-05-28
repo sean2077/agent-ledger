@@ -143,8 +143,8 @@ structure to make peer review actually useful:
 - **Append-only + sidecar `.sha256` + `.ready`** make the ledger
   auditable: every artifact is content-addressed, and a missing
   `.ready` means publish failed (don't trust the file).
-- **Heartbeat + renewal-file protocol** lets the waiting side detect a
-  peer crash within ~60 seconds instead of waiting out a long timeout.
+- **Heartbeat + renewal-file protocol** lets the waiting side distinguish
+  a live peer from stale relay state without trusting timeout alone.
 
 None of these prevent the user from intervening — they're guardrails for
 the bots, not gates on the human.

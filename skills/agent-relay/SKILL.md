@@ -129,7 +129,7 @@ This is the core 95% case. Take one full turn in the relay.
     2. Run `"$RELAY" wait` exactly once. Single blocking Bash tool call, no progress chatter from you before or after.
     3. Interpret exit code:
        - `0` — new artifact path is on stdout. Jump back to step 1.
-       - `10` — timeout (`RELAY_WAIT_TIMEOUT`, default 600s). Surface to user: "peer hasn't responded in N seconds." Offer (a) keep waiting, (b) go check the other agent, (c) stop.
+       - `10` — timeout (`RELAY_WAIT_TIMEOUT`, default 3600s). Surface to user: "peer hasn't responded in N seconds." Offer (a) keep waiting, (b) go check the other agent, (c) stop.
        - `11` — peer heartbeat stale (Stage 2+ only; never in Stage 1). Surface: "peer may have crashed mid-turn."
        - `12` — session entered terminal state. Report and stop.
        - `130` — SIGINT. Exit cleanly. User broke out.

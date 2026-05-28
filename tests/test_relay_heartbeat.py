@@ -214,6 +214,102 @@ def test_on_entry_gc_cleans_orphan_pidfile(monkeypatch, tmp_path, capsys):
     assert not sidecar.exists()
 
 
+def test_gc_dead_pid_no_sidecar_removes_pidfile_and_renewal(monkeypatch, tmp_path, capsys):
+    """Dead-pid pidfile without a heartbeat sidecar must not leave local renewal state behind."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    pidfile = relay._heartbeat_pidfile_path(session, "claude")
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(f"{proc.pid}\n")
+    renewal = relay._renewal_path_for_draft(draft, session, relay.load_env())
+    assert renewal is not None
+    renewal.parent.mkdir(parents=True, exist_ok=True)
+    renewal.touch()
+    assert pidfile.exists()
+    assert renewal.exists()
+    assert not relay._heartbeat_sidecar_path(draft).exists()
+
+    relay._gc_heartbeat_orphans(session, "claude")
+
+    assert not pidfile.exists()
+    assert not renewal.exists()
+
+
+def test_gc_live_unrelated_pid_no_sidecar_is_files_only(monkeypatch, tmp_path, capsys):
+    """PID reuse shape: unlink relay state but never signal the unrelated live process."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    unrelated = subprocess.Popen(["sleep", "60"])
+    try:
+        pidfile = relay._heartbeat_pidfile_path(session, "claude")
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(f"{unrelated.pid}\n")
+        renewal = relay._renewal_path_for_draft(draft, session, relay.load_env())
+        assert renewal is not None
+        renewal.parent.mkdir(parents=True, exist_ok=True)
+        renewal.touch()
+        assert pidfile.exists()
+        assert renewal.exists()
+        assert not relay._heartbeat_sidecar_path(draft).exists()
+
+        relay._gc_heartbeat_orphans(session, "claude")
+
+        assert not pidfile.exists()
+        assert not renewal.exists()
+        assert unrelated.poll() is None
+    finally:
+        if unrelated.poll() is None:
+            unrelated.terminate()
+            unrelated.wait(timeout=5)
+
+
+def test_gc_live_pid_with_valid_sidecar_preserved(monkeypatch, tmp_path, capsys):
+    """A live heartbeat with a fresh matching sidecar is not purged by the no-sidecar repair."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    owner = subprocess.Popen(["sleep", "60"])
+    try:
+        pidfile = relay._heartbeat_pidfile_path(session, "claude")
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(f"{owner.pid}\n")
+        sidecar = relay._heartbeat_sidecar_path(draft)
+        sidecar.write_text(json.dumps({
+            "heartbeat_pid": owner.pid,
+            "owner_pid": None,
+            "owner_kind": "none",
+            "owner_pidfile": None,
+            "owner_renewal_file": None,
+            "author": "claude",
+            "draft": draft.name,
+        }) + "\n")
+        renewal = relay._renewal_path_for_draft(draft, session, relay.load_env())
+        assert renewal is not None
+        renewal.parent.mkdir(parents=True, exist_ok=True)
+        renewal.touch()
+
+        relay._gc_heartbeat_orphans(session, "claude")
+
+        assert pidfile.exists()
+        assert sidecar.exists()
+        assert renewal.exists()
+        assert owner.poll() is None
+    finally:
+        pidfile.unlink(missing_ok=True)
+        relay._heartbeat_sidecar_path(draft).unlink(missing_ok=True)
+        if owner.poll() is None:
+            owner.terminate()
+            owner.wait(timeout=5)
+
+
 def test_publish_stops_heartbeat_best_effort(monkeypatch, tmp_path, capsys):
     """cmd_publish success kills the running daemon + removes its files."""
     session = _bootstrap(monkeypatch, tmp_path)

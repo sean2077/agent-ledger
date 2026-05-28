@@ -1811,7 +1811,7 @@ def cmd_sync(args) -> int:
 #   agent / tool-process               pid-based; os.kill(pid, 0)
 #   pidfile                            reads pid from a file, then os.kill
 #   renewal-file                       mtime within RELAY_RENEWAL_STALE_THRESHOLD
-#                                      (floor 60s). Stage 3 wires the tick that
+#                                      (default 3600s, floor 60s). Stage 3 wires the tick that
 #                                      keeps it fresh; in Stage 2 alone, this
 #                                      kind has no live writer so don't use it
 #                                      as a default.
@@ -1875,7 +1875,7 @@ def _owner_alive(kind: str, *, owner_pid: Optional[int] = None,
             return False
         except OSError:
             return False
-        threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
+        threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 3600), 60)
         return mtime >= time.time() - threshold
     return False
 
@@ -2013,6 +2013,7 @@ def _gc_heartbeat_orphans(session: Path, author: str) -> None:
         yes           | no            | yes         | live, leave alone
         yes           | no            | no          | orphan — kill daemon, clean
         yes           | yes           | any         | orphan — daemon hung, kill + clean
+        yes           | n/a absent    | n/a         | pid reuse/sidecar loss — files-only clean
         no            | any           | any         | orphan — pidfile leak, clean
 
     Runs at the top of every session-scoped relay subcommand. Silent.
@@ -2035,7 +2036,18 @@ def _gc_heartbeat_orphans(session: Path, author: str) -> None:
     sidecar_stale_threshold = max(interval * factor, 60)
     cutoff = time.time() - sidecar_stale_threshold
 
-    for draft in _heartbeat_drafts_for_author(session, author):
+    drafts = _heartbeat_drafts_for_author(session, author)
+    if not drafts:
+        # The pidfile points at a live PID, but relay has no heartbeat sidecar
+        # proving that PID is ours. This is the PID-reuse/stale-pidfile shape:
+        # clear only relay-owned files and never signal the unrelated process.
+        time.sleep(0.1)
+        drafts = _heartbeat_drafts_for_author(session, author)
+        if not drafts:
+            _heartbeat_purge_files_only(session, author, pidfile)
+            return
+
+    for draft in drafts:
         sidecar = _heartbeat_sidecar_path(draft)
         try:
             stat = sidecar.stat()
@@ -2078,6 +2090,11 @@ def _heartbeat_purge(session: Path, author: str, pidfile: Path,
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
+    _heartbeat_purge_files_only(session, author, pidfile)
+
+
+def _heartbeat_purge_files_only(session: Path, author: str, pidfile: Path) -> None:
+    """Remove relay-owned heartbeat files without signaling any PID."""
     try:
         pidfile.unlink()
     except OSError:
@@ -2087,6 +2104,17 @@ def _heartbeat_purge(session: Path, author: str, pidfile: Path,
             _heartbeat_sidecar_path(draft).unlink()
         except OSError:
             pass
+    try:
+        env = load_env()
+        d = _renewal_dir_for(derive_project(env), session.name, author)
+    except SystemExit:
+        d = None
+    if d is not None and d.is_dir():
+        for renewal_file in d.glob("*.renewal"):
+            try:
+                renewal_file.unlink()
+            except OSError:
+                pass
 
 
 def _gc_recovery_locks(session: Path, author: str) -> None:
@@ -2529,7 +2557,7 @@ def cmd_wait(args) -> int:
 
     cli_timeout = getattr(args, "timeout", None)
     cli_poll = getattr(args, "poll", None)
-    timeout = cli_timeout if cli_timeout is not None else _wait_int_env("RELAY_WAIT_TIMEOUT", 600)
+    timeout = cli_timeout if cli_timeout is not None else _wait_int_env("RELAY_WAIT_TIMEOUT", 3600)
     poll = cli_poll if cli_poll is not None else _wait_int_env("RELAY_WAIT_POLL_INTERVAL", 2)
     if timeout < 0:
         timeout = 0
@@ -2567,7 +2595,7 @@ def cmd_wait(args) -> int:
     # Detection must be DYNAMIC inside the loop: peer typically starts the
     # heartbeat after we already entered wait, so a once-only snapshot at entry
     # would miss it.
-    stale_threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
+    stale_threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 3600), 60)
     nominal_deadline = time.monotonic() + timeout
 
     # Optional readiness sentinel for tests / supervisors that need to know
@@ -2765,7 +2793,7 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--project", default=None)
     pw.add_argument("--session-id", default=None)
     pw.add_argument("--timeout", type=int, default=None,
-                    help="Override RELAY_WAIT_TIMEOUT (default 600s).")
+                    help="Override RELAY_WAIT_TIMEOUT (default 3600s).")
     pw.add_argument("--poll", type=int, default=None,
                     help="Override RELAY_WAIT_POLL_INTERVAL (default 2s).")
     pw.set_defaults(func=cmd_wait)

@@ -4,6 +4,24 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.7.0 — Unreleased
+
+### Changed
+
+- Raise the default `RELAY_WAIT_TIMEOUT` and
+  `RELAY_RENEWAL_STALE_THRESHOLD` from 600s to 3600s so long
+  interactive relay turns are less likely to false-timeout or
+  false-stale.
+
+### Fixed
+
+- Clean stale heartbeat pidfiles that have no matching heartbeat sidecar
+  without signaling the recorded PID. This covers PID-reuse/no-sidecar
+  states where the PID may now belong to an unrelated process.
+- Remove local renewal files when heartbeat GC cleans orphan pidfile
+  state, so Ctrl-C or crash recovery does not leave stale renewal state
+  behind.
+
 ## 0.6.0 — 2026-05-28
 
 ### Breaking changes
