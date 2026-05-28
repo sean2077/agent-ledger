@@ -1,6 +1,7 @@
 """Atomic primitives + frontmatter parsing/dumping."""
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -58,6 +59,47 @@ def test_concurrent_writes_no_leftover(tmp_path: Path):
 
     assert target.read_text().startswith("v")
     assert [f for f in tmp_path.iterdir() if ".relay-" in f.name] == []
+
+
+def test_atomic_reserve_text_raises_on_existing(tmp_path: Path):
+    """Finding 2: reserve must fail on EEXIST rather than clobbering."""
+    p = tmp_path / "reserve.md"
+    relay.atomic_reserve_text(p, "first")
+    assert p.read_text() == "first"
+    with pytest.raises(FileExistsError):
+        relay.atomic_reserve_text(p, "second")
+    assert p.read_text() == "first"  # not overwritten
+
+
+def test_atomic_reserve_text_creates_parent_and_fsyncs(tmp_path: Path):
+    p = tmp_path / "a" / "b" / "c.md"
+    relay.atomic_reserve_text(p, "ok")
+    assert p.read_text() == "ok"
+    assert (p.stat().st_mode & 0o777) == 0o600
+
+
+def test_atomic_reserve_text_cleans_up_on_write_failure(tmp_path: Path, monkeypatch):
+    """If write/fsync fails mid-flight, the reserved path must not leak."""
+    p = tmp_path / "boom.md"
+
+    real_fdopen = os.fdopen
+
+    def failing_fdopen(fd, mode):
+        f = real_fdopen(fd, mode)
+        orig_flush = f.flush
+
+        def boom():
+            orig_flush()
+            raise OSError("synthetic disk error")
+
+        f.flush = boom
+        return f
+
+    import os as _os
+    monkeypatch.setattr(_os, "fdopen", failing_fdopen)
+    with pytest.raises(OSError, match="synthetic"):
+        relay.atomic_reserve_text(p, "x")
+    assert not p.exists()
 
 
 def test_sha256_of_file(tmp_path: Path):

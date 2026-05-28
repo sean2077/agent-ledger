@@ -94,6 +94,38 @@ def atomic_write_text(target: Path, text: str, *, mode: int = 0o600) -> None:
     atomic_write_bytes(target, text.encode("utf-8"), mode=mode)
 
 
+def atomic_reserve_text(target: Path, text: str, *, mode: int = 0o600) -> None:
+    """Create `target` exclusively (O_CREAT|O_EXCL) then write+fsync.
+
+    Used by `relay publish` to reserve the final `.md` path against
+    truly-concurrent publishers (finding 2). `atomic_write_text` uses
+    tmp+`os.replace`, which is atomic but UNCONDITIONAL — two writers
+    can both pass an `exists()` check and then clobber each other via
+    `os.replace`. This primitive raises `FileExistsError` instead.
+
+    Note: unlike `atomic_write_text`, the final path is briefly visible
+    in a partial-content state between create and fsync. The relay
+    protocol gates consumer reads on the `.ready` sentinel (written
+    last by the same publisher), so partial content is not observable
+    to a protocol-compliant reader.
+    """
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise
+    _fsync_dir(target.parent)
+
+
 def atomic_write_json(target: Path, obj: dict, *, mode: int = 0o600) -> None:
     atomic_write_text(
         target,
@@ -622,6 +654,12 @@ def list_published(session: Path) -> list[Path]:
 
 
 def latest_seq(session: Path) -> int:
+    """Max seq across published artifacts AND in-flight drafts.
+
+    Used by claim-time reservation so a new draft never overlaps an
+    in-flight one. NOT safe as a `relay wait` baseline — see
+    `latest_published_seq()` for that case (finding 1).
+    """
     seqs: list[int] = []
     for f in session.glob("[0-9][0-9][0-9]-*.md"):
         try:
@@ -635,6 +673,23 @@ def latest_seq(session: Path) -> int:
                 seqs.append(int(f.name[:3]))
             except ValueError:
                 pass
+    return max(seqs) if seqs else 0
+
+
+def latest_published_seq(session: Path) -> int:
+    """Max seq across .ready-published artifacts only (excludes .draft/).
+
+    Used by `relay wait` to compute its baseline. Including drafts
+    here would mask the peer publishing the very draft they had open
+    when wait entered (finding 1: the published seq equals the draft
+    seq, and the old `latest_seq()` baseline filtered it out).
+    """
+    seqs: list[int] = []
+    for p in list_published(session):
+        try:
+            seqs.append(int(p.name[:3]))
+        except ValueError:
+            pass
     return max(seqs) if seqs else 0
 
 
@@ -1549,15 +1604,26 @@ def cmd_publish(args) -> int:
     seq = int(fm["seq"])
     for attempt in range(10):
         if attempt > 0:
-            time.sleep(random.uniform(0.01, 0.05))
+            time.sleep(random.uniform(0.05, 0.20))
         paths = published_paths(session, base)
-        if paths["md"].exists():
+        text = dump_frontmatter(fm, body)
+        try:
+            # Finding 2: O_CREAT|O_EXCL reserves the final path atomically;
+            # truly concurrent publishers cannot both win the same seq.
+            atomic_reserve_text(paths["md"], text, mode=0o600)
+        except FileExistsError:
+            old_seq = seq
             seq += 1
             base = f"{seq:03d}-{fm['author']}-{fm['kind']}"
             fm["seq"] = seq
+            # Finding C1: surface the bump so concurrent publishing is
+            # observable rather than silent.
+            print(
+                f"relay publish: seq {old_seq:03d} taken by concurrent "
+                f"publisher, retrying as {seq:03d}",
+                file=sys.stderr,
+            )
             continue
-        text = dump_frontmatter(fm, body)
-        atomic_write_text(paths["md"], text, mode=0o600)
         digest = sha256_of_file(paths["md"])
         atomic_write_text(paths["sha256"], f"{digest}  {paths['md'].name}\n", mode=0o644)
         atomic_write_bytes(paths["ready"], b"", mode=0o644)
@@ -2762,7 +2828,9 @@ def cmd_wait(args) -> int:
         if fm_last and fm_last.get("peer") == env.author:
             print(pub_entry[-1])
             return 0
-    baseline_seq = latest_seq(session)
+    # Finding 1: baseline must exclude in-flight peer drafts, otherwise a
+    # peer publishing the same seq they had open at wait entry is filtered.
+    baseline_seq = latest_published_seq(session)
 
     if not session_is_active(session):
         return _terminal_exit()

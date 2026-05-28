@@ -107,6 +107,36 @@ def test_claim_resolves_through_five_squatters(monkeypatch, tmp_path, capsys):
     assert draft.name.startswith("006-")  # claim walked past 5 squatters
 
 
+def test_publish_warns_on_each_seq_bump(monkeypatch, tmp_path, capsys):
+    """Finding C1: when publish bumps seq due to concurrent path collision,
+    emit a stderr line per bump so concurrent publishers are observable
+    rather than silent."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    seq = int(fm["seq"])  # 1
+    # Squat seq 1 and seq 2 — publish must bump twice and warn twice.
+    (session / f"{seq:03d}-codex-plan.md").write_text("squatter-1\n")
+    (session / f"{seq + 1:03d}-codex-plan.md").write_text("squatter-2\n")
+
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    captured = capsys.readouterr()
+    assert rc == 0
+    pub = Path(captured.out.strip())
+    assert pub.name.startswith(f"{seq + 2:03d}-")
+    # Both bumps must appear on stderr
+    assert "seq 001 taken by concurrent publisher" in captured.err
+    assert "seq 002 taken by concurrent publisher" in captured.err
+
+
 def test_publish_resolves_through_squatters(monkeypatch, tmp_path, capsys):
     """PR2 widened cmd_publish retry too; codex review 2026-05-29 noted only
     cmd_claim had a behavior test. Prove publish walks past squatters at the

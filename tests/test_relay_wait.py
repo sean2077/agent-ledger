@@ -182,6 +182,41 @@ def test_wait_returns_2_when_no_session(monkeypatch, tmp_path, capsys):
     assert "no active session" in err.lower() or "active session" in err.lower()
 
 
+def test_wait_returns_0_when_peer_draft_exists_at_entry(monkeypatch, tmp_path, capsys):
+    """Finding 1 regression: peer has a draft in .draft/ when wait enters.
+
+    Old code used `latest_seq()` (which includes drafts) as baseline, so the
+    eventual published artifact at the same seq was filtered out and wait
+    timed out (exit 10). The reproducible bug surfaced live during the
+    audit session: my first wait task timed out despite codex publishing
+    seq 3 — codex had draft 003 visible before wait entered.
+    """
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(session, seq=1, author="claude", peer="codex")  # baseline
+
+    # Plant a peer draft for seq 2 BEFORE entering wait. Name structure must
+    # match _DRAFT_NAME_RE so latest_seq() picks it up under the old code.
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    peer_draft = draft_dir / "002-codex-review.md"
+    peer_draft.write_text("placeholder body — content doesn't matter for baseline\n")
+
+    def _delayed_publish():
+        time.sleep(0.6)
+        # Simulate peer's cmd_publish: clear the draft and write the ready triad.
+        peer_draft.unlink()
+        _publish_artifact(session, seq=2, author="codex", peer="claude")
+
+    t = threading.Thread(target=_delayed_publish, daemon=True)
+    t.start()
+    capsys.readouterr()  # drain bootstrap chatter
+    rc = relay.cmd_wait(_wait_args(timeout=5, poll=1))
+    t.join(timeout=2)
+    assert rc == 0, "wait must see peer's publish even though peer had a draft at entry"
+    out = capsys.readouterr().out.strip()
+    assert out.endswith("002-codex-review.md")
+
+
 def test_wait_returns_0_when_peer_publishes_mid_wait(monkeypatch, tmp_path, capsys):
     """Peer publishes while we're blocked in poll loop → exit 0, path on stdout.
 
