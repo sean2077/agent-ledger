@@ -84,11 +84,11 @@ This is the core 95% case. Take one full turn in the relay.
 1. **Read state**: `"$RELAY" status --json` (or text). Note the active session path, latest published file, and `next-seq`.
    - If it errors with `multiple active sessions`, stop normal handoff, run `"$RELAY" sessions list`, report the candidates, and do not claim/close until a specific `--session-id` is chosen or the state is repaired.
 
-2. **Turn check — STOP HERE IF NOT YOUR TURN**. Of the latest published artifact:
-   - If its `peer` field equals `$RELAY_AUTHOR` (i.e. it's addressed to you), **continue** to step 3.
-   - If its `peer` is someone else, the relay is waiting on them — **report state to the user and stop**. Example: "Latest is `002-gpt55-review.md` (gpt55 -> claude). Nothing pending for codex. Run `$agent-relay` again after claude publishes."
+2. **Turn check — what's next**. Of the latest published artifact:
    - If there are no published artifacts yet, this session is freshly bootstrapped. Suggest bootstrap intent or ask the user what to write first; **do not silently claim**.
    - If the latest artifact's `status` is terminal (`closed | cancelled | failed | timed_out`), the session is effectively over. Report and stop.
+   - If its `peer` field equals `$RELAY_AUTHOR` (it's addressed to you), **continue** to step 3.
+   - **If its `peer` is someone else** (you are the latest publisher; peer hasn't responded yet), jump directly to **step 10** — the same auto-loop / break check that runs after a fresh publish. For the break-check, the "just-published" artifact is the latest published. This is what closes the loop across tool turns: whether the publish happened in this turn or a prior turn, you flow through the same wait/surface decision.
 
 3. **Read the peer's latest message**: use your Read tool on that latest `.md`. Pay attention to its `prompt_for_next` block — that is your task.
 4. **Do the work**: this is the part the CLI cannot do. Plan / review / write code / debug / investigate. Use Read, Edit, Bash, Grep, Glob as needed. Keep track of any non-`.shared/` files you change (you'll list them under `touched_paths`).
@@ -112,11 +112,11 @@ This is the core 95% case. Take one full turn in the relay.
    On success: file moves out of `.draft/`, sha256 + ready sidecars appear. On rejection: CLI prints which field failed validation; fix the draft and retry.
 9. **Sync if needed** (host only, see Intent: sync). First time push? **always `--dry-run` first**.
 
-10. **Auto-loop or surface decision (rule-based)**. After a successful publish, decide whether to invoke `relay wait` and loop, or to surface to the user (step 11). The check is **rule-based, never LLM-judged**:
+10. **Auto-loop or surface decision (rule-based)**. Reached either from step 9 (after a successful publish) or from step 2 (re-entry when the latest artifact is yours targeting peer). In both cases the artifact under inspection is the latest published. Decide whether to invoke `relay wait` and loop, or to surface to the user (step 11). The check is **rule-based, never LLM-judged**:
 
     **Surface to user (step 11) if ANY of:**
-    - just-published `kind == "decision"`
-    - just-published `status` ∈ {`closed`, `cancelled`, `failed`, `timed_out`}
+    - latest-published `kind == "decision"`
+    - latest-published `status` ∈ {`closed`, `cancelled`, `failed`, `timed_out`}
     - your `prompt_for_next` body contains literal `@user:` (case-sensitive)
     - in-memory consecutive-auto-round counter ≥ `RELAY_AUTO_ROUND_CAP` (default 5)
 
