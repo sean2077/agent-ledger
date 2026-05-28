@@ -2571,11 +2571,15 @@ def cmd_wait(args) -> int:
     _maybe_tick_renewal(session, env)
 
     cli_timeout = getattr(args, "timeout", None)
+    cli_no_timeout = bool(getattr(args, "no_timeout", False))
     cli_poll = getattr(args, "poll", None)
-    timeout = cli_timeout if cli_timeout is not None else _wait_int_env("RELAY_WAIT_TIMEOUT", 3600)
+    if cli_no_timeout:
+        timeout = None  # sentinel: skip nominal deadline; stale-heartbeat escape remains
+    else:
+        timeout = cli_timeout if cli_timeout is not None else _wait_int_env("RELAY_WAIT_TIMEOUT", 3600)
+        if timeout < 0:
+            timeout = 0
     poll = cli_poll if cli_poll is not None else _wait_int_env("RELAY_WAIT_POLL_INTERVAL", 2)
-    if timeout < 0:
-        timeout = 0
     if poll <= 0:
         poll = 1
 
@@ -2611,7 +2615,7 @@ def cmd_wait(args) -> int:
     # heartbeat after we already entered wait, so a once-only snapshot at entry
     # would miss it.
     stale_threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 3600), 60)
-    nominal_deadline = time.monotonic() + timeout
+    nominal_deadline = None if timeout is None else time.monotonic() + timeout
 
     # Optional readiness sentinel for tests / supervisors that need to know
     # the poll loop has been reached (e.g. to send SIGINT reliably without
@@ -2653,8 +2657,9 @@ def cmd_wait(args) -> int:
                     return 11
                 # heartbeat is fresh → keep polling, ignore nominal timeout
             else:
-                # No peer heartbeat seen yet → honor nominal timeout.
-                if time.monotonic() >= nominal_deadline:
+                # No peer heartbeat seen yet → honor nominal timeout
+                # unless --no-timeout was passed (nominal_deadline is None).
+                if nominal_deadline is not None and time.monotonic() >= nominal_deadline:
                     return 10
 
             time.sleep(poll)
@@ -2807,8 +2812,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Block until peer publishes a new artifact targeting this author.")
     pw.add_argument("--project", default=None)
     pw.add_argument("--session-id", default=None)
-    pw.add_argument("--timeout", type=int, default=None,
+    pw_timeout = pw.add_mutually_exclusive_group()
+    pw_timeout.add_argument("--timeout", type=int, default=None,
                     help="Override RELAY_WAIT_TIMEOUT (default 3600s).")
+    pw_timeout.add_argument("--no-timeout", action="store_true",
+                    help="Disable the nominal no-heartbeat deadline. "
+                         "A stale peer renewal-file heartbeat still exits with 11.")
     pw.add_argument("--poll", type=int, default=None,
                     help="Override RELAY_WAIT_POLL_INTERVAL (default 2s).")
     pw.set_defaults(func=cmd_wait)

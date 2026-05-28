@@ -90,7 +90,8 @@ def _publish_artifact(session: Path, *, seq: int, author: str, peer: str,
 
 
 def _wait_args(**kw):
-    base = {"project": None, "session_id": None, "timeout": None, "poll": None}
+    base = {"project": None, "session_id": None, "timeout": None, "poll": None,
+            "no_timeout": False}
     base.update(kw)
     return type("A", (), base)()
 
@@ -384,3 +385,50 @@ def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
     assert b"KeyboardInterrupt" not in err, (
         f"top-level SIGINT guard must suppress traceback; stderr={err!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR3 (M2): --no-timeout flag
+# ---------------------------------------------------------------------------
+
+
+def test_wait_no_timeout_skips_nominal_deadline(monkeypatch, tmp_path, capsys):
+    """--no-timeout: even with no peer heartbeat, wait must NOT exit 10 —
+    it should keep polling past the would-be nominal deadline and wake on
+    a late publish."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(session, seq=1, author="claude", peer="codex")
+    capsys.readouterr()
+
+    def _delayed_publish():
+        time.sleep(1.5)  # well past any normal nominal deadline
+        _publish_artifact(session, seq=2, author="codex", peer="claude")
+
+    t = threading.Thread(target=_delayed_publish, daemon=True)
+    t.start()
+    # With nominal timeout disabled, the only normal exit path is the
+    # late publish landing — assert it does, within reasonable time.
+    rc = relay.cmd_wait(_wait_args(no_timeout=True, poll=1))
+    t.join(timeout=3)
+    assert rc == 0
+
+
+def test_wait_no_timeout_still_returns_11_on_stale_heartbeat(monkeypatch, tmp_path, capsys):
+    """--no-timeout must NOT suppress stale-heartbeat escape — exit 11 still
+    fires when the peer renewal-file heartbeat is stale."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(session, seq=1, author="claude", peer="codex")
+    monkeypatch.setenv("RELAY_WAIT_POLL_INTERVAL", "1")
+    _write_peer_heartbeat(session, peer="codex",
+        draft_name="002-codex-review.md", owner_kind="renewal-file",
+        mtime_offset=-3700)
+    capsys.readouterr()
+    rc = relay.cmd_wait(_wait_args(no_timeout=True, poll=1))
+    assert rc == 11
+
+
+def test_wait_no_timeout_and_timeout_are_mutually_exclusive():
+    """argparse must reject --timeout and --no-timeout together."""
+    parser = relay.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["wait", "--timeout", "60", "--no-timeout"])
