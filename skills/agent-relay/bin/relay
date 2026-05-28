@@ -1568,6 +1568,20 @@ def cmd_publish(args) -> int:
 
     session = draft_path.parent.parent
     _env_pub = load_env()
+    # Finding 3: prevent author forgery. _validate_draft only checks that
+    # filename and frontmatter agree on author; it does NOT check that
+    # either matches the currently active RELAY_AUTHOR. Without this
+    # guard, `RELAY_AUTHOR=codex relay publish <claude-draft>` succeeds
+    # and publishes a `claude`-authored artifact from a `codex` env.
+    if _env_pub.author and fm.get("author") != _env_pub.author:
+        print(
+            f"relay publish: refusing to publish draft authored by "
+            f"{fm.get('author')!r} from RELAY_AUTHOR={_env_pub.author!r} — "
+            f"set RELAY_AUTHOR to match the draft, or re-claim under the "
+            f"current author.",
+            file=sys.stderr,
+        )
+        return 2
     _gc_heartbeat_orphans(session, _env_pub.author or "")
     _gc_renewal_orphans(session, _env_pub)
     _maybe_tick_renewal(session, _env_pub)

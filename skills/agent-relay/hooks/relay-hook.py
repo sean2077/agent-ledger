@@ -348,28 +348,43 @@ def handle_pre_tool_use(payload: dict, shared_root: Path,
             p.relative_to(shared_resolved)
         except ValueError:
             continue  # not under .shared/
-        if p.suffix != ".md":
+        # Finding 4: previously only `.md` was protected, leaving `.ready`
+        # and `.md.sha256` sidecars editable/deletable. The published
+        # artifact is the triple (md, sha256, ready) per
+        # references/file-protocol.md; any one being mutated breaks
+        # readers that gate on .ready existence + sha256 match.
+        if p.suffix == ".md":
+            md = p
+            ready = p.with_suffix(".ready")
+        elif p.suffix == ".ready":
+            md = p.with_suffix(".md")
+            ready = p
+        elif p.suffix == ".sha256" and p.name.endswith(".md.sha256"):
+            md = p.with_name(p.name[:-len(".sha256")])  # strip .sha256
+            ready = md.with_suffix(".ready")
+        else:
             continue
-        ready = p.with_suffix(".ready")
-        if ready.exists():
-            reason = (
-                "Published relay artifact is append-only. "
-                "Use: relay claim --kind correction --corrects <seq>"
-            )
-            append_trail(shared_root, {
-                "event": "PreToolUse", "host": host, "decision": "deny",
-                "tool": tool_name,
-                "path": str(p.relative_to(shared_resolved)),
-                "reason": "ready-sidecar",
-            })
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                },
-                "systemMessage": f"[relay-hint] denied edit to ready artifact: {p.name}",
-            }
+        if not ready.exists():
+            continue
+        reason = (
+            "Published relay artifact is append-only "
+            "(.md / .ready / .md.sha256 are protected as a unit). "
+            "Use: relay claim --kind correction --corrects <seq>"
+        )
+        append_trail(shared_root, {
+            "event": "PreToolUse", "host": host, "decision": "deny",
+            "tool": tool_name,
+            "path": str(p.relative_to(shared_resolved)),
+            "reason": "ready-sidecar",
+        })
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            },
+            "systemMessage": f"[relay-hint] denied edit to ready artifact: {md.name}",
+        }
 
     return None
 

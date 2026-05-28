@@ -292,6 +292,35 @@ def test_publish_rejects_author_mismatch(monkeypatch, tmp_path, capsys):
     assert "author" in err.lower()
 
 
+def test_publish_rejects_cross_author_env(monkeypatch, tmp_path, capsys):
+    """Finding 3: publish must refuse to ship a draft authored by someone
+    other than the current RELAY_AUTHOR. Repro from codex's review: claim
+    a draft as one author, then publish with a different RELAY_AUTHOR —
+    pre-fix this returned 0 and shipped a forged-attribution artifact.
+    """
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    # Claim as codex (the bootstrap default)
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+    # Switch RELAY_AUTHOR to claude and try to publish codex's draft
+    monkeypatch.setenv("RELAY_AUTHOR", "claude")
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "RELAY_AUTHOR" in err
+    assert "'codex'" in err  # the draft's author
+    # Original draft must still be there; no .ready emitted.
+    assert draft.exists()
+    pub_md = session / draft.name
+    assert not pub_md.exists()
+
+
 def test_publish_rejects_kind_mismatch(monkeypatch, tmp_path, capsys):
     """Bug fix MAJOR #3: frontmatter kind must match filename."""
     session = _bootstrap(monkeypatch, tmp_path)
