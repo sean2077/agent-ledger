@@ -447,6 +447,134 @@ def test_preflight_sync_rsync_requires_remote_vars(monkeypatch, capsys, tmp_path
     assert rc == 2
 
 
+def test_preflight_project_consistency_passes_when_canonical_form_matches(
+    monkeypatch, capsys, tmp_path,
+):
+    """Finding 7: declared RELAY_PROJECT in sanitized form must match a
+    git toplevel basename whose canonical form is the same — even if the
+    raw basename has dots/underscores. Pre-fix this raised a fail because
+    the comparison was literal."""
+    repo = tmp_path / "actibot_ego.jy"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    _isolated_env(monkeypatch,
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+        RELAY_PROJECT="actibot-ego-jy",  # sanitized form of toplevel basename
+    )
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    pc = next(c for c in data["checks"] if c["name"] == "project.consistency")
+    assert pc["status"] == "pass", f"unexpected: {pc}"
+    assert "actibot-ego-jy" in pc["detail"]
+
+
+def test_preflight_project_consistency_still_fails_on_real_mismatch(
+    monkeypatch, capsys, tmp_path,
+):
+    """Finding 7 negative: sanitization must not let unrelated names pass."""
+    repo = tmp_path / "alpha"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    _isolated_env(monkeypatch,
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+        RELAY_PROJECT="beta",
+    )
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    pc = next(c for c in data["checks"] if c["name"] == "project.consistency")
+    assert pc["status"] == "fail"
+    assert "alpha" in pc["detail"]
+    assert "beta" in pc["detail"]
+
+
+def test_preflight_warns_on_parallel_active_sessions_without_marker(
+    monkeypatch, capsys, tmp_path,
+):
+    """Finding 5: `bootstrap --force` is documented for parallel mode.
+    Two actives + no marker should warn (not fail) so downstream commands
+    can disambiguate with --session-id."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    # Plant two active sessions.
+    for sid in ("20260529-a", "20260529-b"):
+        s = shared / sid
+        s.mkdir()
+        (s / "session.json").write_text(
+            f'{{"schema_version": 3, "project": "repo", "session_id": "{sid}", '
+            f'"state": "active"}}'
+        )
+    # NO .active-session marker — caller is in parallel mode.
+    _isolated_env(monkeypatch,
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+    )
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    marker = next(c for c in data["checks"] if c["name"] == "session.active_marker")
+    assert marker["status"] == "warn"
+    assert "20260529-a" in marker["detail"]
+    assert "20260529-b" in marker["detail"]
+    assert "--session-id" in marker["detail"]
+    # warn → exit 1, not 2; bootstrap --force flow can proceed
+    assert rc == 1
+
+
+def test_preflight_passes_when_marker_matches_one_of_many_actives(
+    monkeypatch, capsys, tmp_path,
+):
+    """Finding 5: marker pointing to one of N active sessions is the
+    legitimate parallel-mode state — must pass, not fail."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    for sid in ("20260529-a", "20260529-b"):
+        s = shared / sid
+        s.mkdir()
+        (s / "session.json").write_text(
+            f'{{"schema_version": 3, "project": "repo", "session_id": "{sid}", '
+            f'"state": "active"}}'
+        )
+    (shared / ".active-session").write_text("20260529-a\n")
+    _isolated_env(monkeypatch,
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SHARED_ROOT=str(shared),
+        RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
+    )
+    rc = relay.cmd_preflight(type("A", (), {"json": True})())
+    import json
+    data = json.loads(capsys.readouterr().out)
+    marker = next(c for c in data["checks"] if c["name"] == "session.active_marker")
+    assert marker["status"] == "pass"
+    assert "20260529-a" in marker["detail"]
+    assert "20260529-b" in marker["detail"]
+    assert rc == 0
+
+
 def test_preflight_fails_when_marker_mismatches_active_session(monkeypatch, capsys, tmp_path):
     """R3.a: .shared/.active-session disagreeing with session_is_active is a fail (corruption)."""
     repo = tmp_path / "repo"

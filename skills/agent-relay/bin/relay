@@ -762,17 +762,30 @@ def _check_active_marker(root: Path) -> dict:
     actives = active_sessions(root)
     active_names = [sd.name for sd in actives]
     if marker is None:
-        if active_names:
+        if not active_names:
             return {
                 "name": "session.active_marker",
-                "status": "fail",
-                "detail": "missing .active-session for active session(s): "
-                          + ", ".join(active_names),
+                "status": "pass",
+                "detail": "no active sessions and no marker",
             }
+        if len(active_names) == 1:
+            return {
+                "name": "session.active_marker",
+                "status": "pass",
+                "detail": f"single active session {active_names[0]} (no marker needed)",
+            }
+        # Finding 5: `bootstrap --force` is documented for parallel sessions.
+        # Multiple actives without a marker is the legitimate state for that
+        # mode; downgrade from fail -> warn so callers can pass --session-id
+        # to disambiguate downstream commands without preflight blocking.
         return {
             "name": "session.active_marker",
-            "status": "pass",
-            "detail": "no active sessions and no marker",
+            "status": "warn",
+            "detail": (
+                f"{len(active_names)} active sessions without a marker "
+                f"({', '.join(active_names)}); "
+                "use --session-id <id> on follow-up commands, or `relay sessions list`."
+            ),
         }
     target = root / marker
     if not (target / "session.json").exists():
@@ -781,9 +794,22 @@ def _check_active_marker(root: Path) -> dict:
             "status": "fail",
             "detail": f".active-session points at missing session {marker!r}",
         }
-    if len(active_names) != 1 or active_names[0] != marker:
-        detail = f".active-session={marker!r} but active={active_names or 'none'}"
-        return {"name": "session.active_marker", "status": "fail", "detail": detail}
+    if marker not in active_names:
+        # Marker points at a real session that's no longer active.
+        return {
+            "name": "session.active_marker",
+            "status": "fail",
+            "detail": f".active-session={marker!r} but that session is not active "
+                      f"(active={active_names or 'none'})",
+        }
+    if len(active_names) > 1:
+        # Marker disambiguates; parallel mode is fine.
+        others = [n for n in active_names if n != marker]
+        return {
+            "name": "session.active_marker",
+            "status": "pass",
+            "detail": f".active-session={marker} (other active: {', '.join(others)})",
+        }
     return {
         "name": "session.active_marker",
         "status": "pass",
@@ -946,15 +972,26 @@ def cmd_preflight(args) -> int:
     declared = env.project
     derived = git_toplevel()
     derived_name = derived.name if derived else None
-    if declared and derived_name and declared != derived_name:
+    # Finding 7: compare sanitized forms so an explicit RELAY_PROJECT that
+    # matches the *valid slug grammar* of a dotted/underscored repo (e.g.
+    # RELAY_PROJECT=actibot-ego-jy in a checkout named actibot_ego.jy)
+    # is treated as consistent. Without this both sides differ literally
+    # and preflight fails even though they refer to the same project.
+    declared_canon = sanitize_project_slug(declared) if declared else None
+    derived_canon = sanitize_project_slug(derived_name) if derived_name else None
+    if declared and derived_name and declared_canon != derived_canon:
         out["checks"].append({
             "name": "project.consistency", "status": "fail",
-            "detail": f"$RELAY_PROJECT={declared!r} but git toplevel basename={derived_name!r}",
+            "detail": (
+                f"$RELAY_PROJECT={declared!r} (canonical {declared_canon!r}) "
+                f"vs git toplevel basename {derived_name!r} "
+                f"(canonical {derived_canon!r}); pick one"
+            ),
         })
     elif declared or derived_name:
         out["checks"].append({
             "name": "project.consistency", "status": "pass",
-            "detail": f"project={declared or derived_name}",
+            "detail": f"project={declared_canon or derived_canon}",
         })
     else:
         out["checks"].append({
