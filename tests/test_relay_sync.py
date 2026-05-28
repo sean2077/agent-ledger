@@ -11,18 +11,19 @@ import pytest
 import relay
 
 
-def _setup(monkeypatch, tmp_path, *, role="host"):
+def _setup(monkeypatch, tmp_path, *, sync="rsync"):
+    """sync='rsync' = this side owns transport; 'none' = this side cannot sync."""
     repo = tmp_path / "myproj"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     monkeypatch.chdir(repo)
     for k in list(os.environ):
         if k.startswith("RELAY_"):
             monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("RELAY_ROLE", role)
+    monkeypatch.setenv("RELAY_SYNC", sync)
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
     monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
-    if role == "host":
+    if sync == "rsync":
         monkeypatch.setenv("RELAY_REMOTE_SSH", "user@remote")
         monkeypatch.setenv("RELAY_REMOTE_PATH", "/remote/path")
     return repo
@@ -34,16 +35,61 @@ def _args(direction="push", **kw):
     return type("A", (), base)()
 
 
-def test_sync_refuses_on_remote_role(monkeypatch, tmp_path, capsys):
-    _setup(monkeypatch, tmp_path, role="remote")
+def test_sync_refuses_when_sync_none(monkeypatch, tmp_path, capsys):
+    """RELAY_SYNC=none cannot run sync."""
+    _setup(monkeypatch, tmp_path, sync="none")
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
     rc = relay.cmd_sync(_args())
     assert rc == 2
-    assert "must run on host" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "RELAY_SYNC" in err
+    assert "'none'" in err
+
+
+def test_sync_refuses_when_legacy_role_remote(monkeypatch, tmp_path, capsys):
+    """Legacy RELAY_ROLE=remote maps to RELAY_SYNC=none; cannot sync."""
+    repo = tmp_path / "myproj"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_ROLE", "remote")
+    monkeypatch.setenv("RELAY_AUTHOR", "claude")
+    monkeypatch.setenv("RELAY_PEER", "codex")
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
+    rc = relay.cmd_sync(_args())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "RELAY_ROLE" in err and "'remote'" in err
+
+
+def test_sync_legacy_role_host_still_works(monkeypatch, tmp_path, capsys):
+    """Compat: RELAY_ROLE=host should still drive sync (maps to RELAY_SYNC=rsync)."""
+    repo = tmp_path / "myproj"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_ROLE", "host")
+    monkeypatch.setenv("RELAY_AUTHOR", "codex")
+    monkeypatch.setenv("RELAY_PEER", "claude")
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
+    monkeypatch.setenv("RELAY_REMOTE_SSH", "user@remote")
+    monkeypatch.setenv("RELAY_REMOTE_PATH", "/remote/path")
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
+    captured = _mock_rsync(monkeypatch)
+    rc = relay.cmd_sync(_args(dry_run=True))
+    assert rc == 0
+    assert captured  # rsync was invoked
 
 
 def test_sync_refuses_when_no_remote_env(monkeypatch, tmp_path, capsys):
     _setup(monkeypatch, tmp_path)
     monkeypatch.delenv("RELAY_REMOTE_SSH", raising=False)
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
     rc = relay.cmd_sync(_args())
     assert rc == 2
     assert "RELAY_REMOTE" in capsys.readouterr().err
@@ -59,6 +105,36 @@ def test_sync_refuses_when_project_root_is_fuse(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_sync(_args())
     assert rc == 2
     assert "fuse" in capsys.readouterr().err.lower()
+
+
+def test_sync_refuses_with_correct_message_for_legacy_host_on_shape_a(monkeypatch, tmp_path, capsys):
+    """Codex v05-post-commit-review seq 2 Major.
+
+    RELAY_ROLE=host + shape A (fuse mount) falls through to RELAY_SYNC=none
+    in _resolve_sync, but the refusal message must NOT suggest enabling
+    RELAY_SYNC=rsync — that's a contradiction on shape A. It must instead
+    explain that the project root is a fuse mount and no sync is needed.
+    """
+    repo = tmp_path / "myproj"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_ROLE", "host")
+    monkeypatch.setenv("RELAY_AUTHOR", "codex")
+    monkeypatch.setenv("RELAY_PEER", "claude")
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
+    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: True)
+    rc = relay.cmd_sync(_args())
+    assert rc == 2
+    err = capsys.readouterr().err
+    # Correct message: name the topology and explain why sync isn't needed.
+    assert "shape A" in err
+    assert "fuse mount" in err
+    # NEGATIVE check: the misleading "use RELAY_SYNC=rsync" advice must NOT
+    # appear, because that would be a contradiction on shape A.
+    assert "use RELAY_SYNC=rsync" not in err
 
 
 def _mock_rsync(monkeypatch):

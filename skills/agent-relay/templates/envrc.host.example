@@ -1,10 +1,19 @@
 # Per-host relay config for the HOST machine (Codex CLI side).
 # Copy to .envrc.$(hostname -s) at the project root and source.
 # Gitignored — not committed.
+#
+# NOTE: `RELAY_ROLE=host|remote` is the legacy vocabulary. v0.5+ prefers
+# `RELAY_SYNC=none|rsync` (this side owns rsync transport, or doesn't).
+# This template still works — RELAY_ROLE=host maps to RELAY_SYNC=rsync —
+# but it emits a deprecation warn in `relay preflight`. For new setups:
+#   - same machine, both agents -> envrc.same-host.example
+#   - two machines with rsync   -> set RELAY_SYNC=rsync below instead
 
 export RELAY_ROLE=host
 export RELAY_AUTHOR=codex
 export RELAY_PEER=claude
+# Future-proof: explicit RELAY_SYNC overrides RELAY_ROLE in v0.5+ preflight.
+# export RELAY_SYNC=rsync
 export RELAY_SHARED_ROOT="$PWD/.shared"
 
 # --- RELAY_REMOTE_* are only needed for shape B (separate project copies

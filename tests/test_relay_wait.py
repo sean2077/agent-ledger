@@ -324,9 +324,17 @@ def test_peer_heartbeat_helper_fresh_renewal_not_stale(monkeypatch, tmp_path):
 
 
 def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
-    """SIGINT during wait → exit 130 (128 + SIGINT)."""
+    """SIGINT during wait → exit 130 (128 + SIGINT).
+
+    Uses a readiness sentinel (RELAY_WAIT_READY_SENTINEL) instead of a fixed
+    sleep so the test does not race with subprocess startup under load. Also
+    verifies the top-level KeyboardInterrupt guard in `__main__` works: even
+    if SIGINT races startup before cmd_wait's internal handler runs, the
+    process must exit 130 cleanly with no Python traceback.
+    """
     session = _bootstrap(monkeypatch, tmp_path)
     _publish_artifact(session, seq=1, author="claude", peer="codex")
+    ready_sentinel = tmp_path / "wait-ready"
     env = os.environ.copy()
     env.update({
         "RELAY_ROLE": "remote",
@@ -335,13 +343,14 @@ def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
         "RELAY_SHARED_ROOT": str(session.parent),
         "RELAY_WAIT_TIMEOUT": "60",
         "RELAY_WAIT_POLL_INTERVAL": "1",
+        "RELAY_WAIT_READY_SENTINEL": str(ready_sentinel),
     })
     # Drop unrelated RELAY_ vars that may pollute (project, etc.)
+    keep = {"RELAY_ROLE", "RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT",
+            "RELAY_WAIT_TIMEOUT", "RELAY_WAIT_POLL_INTERVAL",
+            "RELAY_WAIT_READY_SENTINEL"}
     for k in list(env):
-        if k.startswith("RELAY_") and k not in {
-            "RELAY_ROLE", "RELAY_AUTHOR", "RELAY_PEER",
-            "RELAY_SHARED_ROOT", "RELAY_WAIT_TIMEOUT", "RELAY_WAIT_POLL_INTERVAL",
-        }:
+        if k.startswith("RELAY_") and k not in keep:
             del env[k]
     proc = subprocess.Popen(
         [sys.executable, str(RELAY_BIN), "wait"],
@@ -349,7 +358,18 @@ def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    time.sleep(1.5)  # let it enter the poll loop
+    # Wait for cmd_wait to reach the poll loop (touches the sentinel).
+    # Bound by 10s so a stuck subprocess can't hang the suite forever.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if ready_sentinel.exists():
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    if not ready_sentinel.exists() and proc.poll() is None:
+        proc.kill()
+        pytest.fail("cmd_wait never reached the poll loop (readiness sentinel never appeared)")
     proc.send_signal(signal.SIGINT)
     try:
         out, err = proc.communicate(timeout=5)
@@ -357,3 +377,8 @@ def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
         proc.kill()
         pytest.fail("wait did not exit within 5s of SIGINT")
     assert proc.returncode == 130, f"stdout={out!r} stderr={err!r}"
+    # The top-level guard means SIGINT must NOT leave a KeyboardInterrupt
+    # traceback on stderr (the previous symptom under codex's environment).
+    assert b"KeyboardInterrupt" not in err, (
+        f"top-level SIGINT guard must suppress traceback; stderr={err!r}"
+    )

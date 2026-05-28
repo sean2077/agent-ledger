@@ -195,6 +195,181 @@ def test_init_role_emits_direnv_aware_next_step(monkeypatch, tmp_path, capsys):
     assert "install direnv" in out
 
 
+def test_init_role_same_host_copies_template(monkeypatch, tmp_path, capsys):
+    """v0.5: --role same-host copies envrc.same-host.example to .envrc.<hostname>."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args(role="same-host"))
+    assert rc == 0
+    hostname = relay._hostname_short()
+    target = repo / f".envrc.{hostname}"
+    assert target.is_file()
+    body = target.read_text()
+    # Defining marks of the same-host template:
+    assert "RELAY_SYNC=none" in body
+    assert "RELAY_AUTHOR=" in body
+    # The same-host template MUST NOT set the legacy RELAY_ROLE.
+    assert "RELAY_ROLE=" not in body
+    # Dispatcher must also exist.
+    assert (repo / ".envrc").is_file()
+
+
+def _source_template_and_read(env_vars: dict[str, str], template_body: str) -> dict[str, str]:
+    """Source the given envrc body in a fresh bash, return resulting RELAY_* vars.
+
+    Used to prove the same-host template actually produces distinct identities
+    based on a pre-set RELAY_AUTHOR — the regression codex seq 6 asked for.
+    """
+    import tempfile
+    import textwrap
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(template_body)
+        envrc_path = fh.name
+    try:
+        # Build the bash script: clear RELAY_*, set the requested overrides,
+        # source the template, then print resolved RELAY_* as KEY=VALUE lines.
+        export_block = "\n".join(f"export {k}={v!r}" for k, v in env_vars.items())
+        # cd into a tmp dir so $PWD in the template lands somewhere innocuous
+        with tempfile.TemporaryDirectory() as cwd:
+            script = textwrap.dedent(f"""
+                set -e
+                # Clear any inherited RELAY_*.
+                for v in $(env | awk -F= '/^RELAY_/{{print $1}}'); do unset "$v"; done
+                {export_block}
+                cd {cwd!r}
+                # shellcheck disable=SC1090
+                source {envrc_path!r}
+                env | grep '^RELAY_' || true
+            """).strip()
+            res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    finally:
+        os.unlink(envrc_path)
+    assert res.returncode == 0, f"bash source failed: {res.stderr!r}"
+    out = {}
+    for line in res.stdout.splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            out[k] = v
+    return out
+
+
+def test_same_host_template_produces_distinct_identities_on_one_hostname(monkeypatch, tmp_path):
+    """Regression for codex seq 6 blocker.
+
+    Same hostname, same template file: a per-terminal `export RELAY_AUTHOR=...`
+    BEFORE sourcing must produce two distinct (author, peer) pairs without
+    editing the file between terminal launches.
+    """
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    assert relay.cmd_init(_args(role="same-host")) == 0
+    target = repo / f".envrc.{relay._hostname_short()}"
+    body = target.read_text()
+
+    # Terminal A (default, no pre-export) -> codex / claude.
+    env_a = _source_template_and_read({}, body)
+    assert env_a["RELAY_AUTHOR"] == "codex"
+    assert env_a["RELAY_PEER"] == "claude"
+    assert env_a["RELAY_SYNC"] == "none"
+
+    # Terminal B (per-terminal override) -> claude / codex.
+    env_b = _source_template_and_read({"RELAY_AUTHOR": "claude"}, body)
+    assert env_b["RELAY_AUTHOR"] == "claude"
+    assert env_b["RELAY_PEER"] == "codex"
+    assert env_b["RELAY_SYNC"] == "none"
+
+    # The file on disk MUST be identical between the two terminals.
+    assert target.read_text() == body, "template should not be mutated by sourcing"
+
+
+def test_same_host_template_invalid_author_unsets_peer(monkeypatch, tmp_path):
+    """Codex v05-post-commit-review seq 2 Minor.
+
+    Re-sourcing the template with an unrecognized RELAY_AUTHOR must unset
+    RELAY_PEER. Otherwise a previously-valid (claude, codex) pair can
+    survive into a bad env (e.g. AUTHOR=gpt55, PEER=codex) that still
+    passes preflight's "all required env set" check.
+    """
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    assert relay.cmd_init(_args(role="same-host")) == 0
+    target = repo / f".envrc.{relay._hostname_short()}"
+    body = target.read_text()
+
+    # Simulate: first source as claude (sets PEER=codex), then re-source
+    # with AUTHOR=gpt55 — the template's default branch must unset PEER.
+    import tempfile, textwrap
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(body)
+        envrc_path = fh.name
+    try:
+        with tempfile.TemporaryDirectory() as cwd:
+            script = textwrap.dedent(f"""
+                set -e
+                for v in $(env | awk -F= '/^RELAY_/{{print $1}}'); do unset "$v"; done
+                cd {cwd!r}
+                # First terminal: claude.
+                export RELAY_AUTHOR=claude
+                source {envrc_path!r}
+                # Now simulate the user typo: change AUTHOR to something unknown
+                # and re-source the SAME file. RELAY_PEER must come out unset.
+                export RELAY_AUTHOR=gpt55
+                source {envrc_path!r} 2>/dev/null  # suppress the human-readable error
+                echo "AUTHOR=${{RELAY_AUTHOR-<unset>}}"
+                echo "PEER=${{RELAY_PEER-<unset>}}"
+            """).strip()
+            res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    finally:
+        os.unlink(envrc_path)
+    assert res.returncode == 0, f"bash source failed: {res.stderr!r}"
+    out = dict(line.split("=", 1) for line in res.stdout.splitlines() if "=" in line)
+    assert out["AUTHOR"] == "gpt55"
+    assert out["PEER"] == "<unset>", (
+        f"RELAY_PEER must be unset after invalid-author re-source; got {out['PEER']!r}"
+    )
+
+
+def test_init_hint_lists_same_host_first(monkeypatch, tmp_path, capsys):
+    """Hint should lead with same-host (the v0.5+ recommendation)."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
+    rc = relay.cmd_init(_args())
+    assert rc == 0
+    out = capsys.readouterr().out
+    # same-host should be the first --role option mentioned in the hint
+    same_host_idx = out.find("--role same-host")
+    host_idx = out.find("--role host")
+    assert same_host_idx > 0
+    assert host_idx > same_host_idx
+
+
+def test_init_suppresses_envrc_nag_when_sync_env_set(monkeypatch, tmp_path, capsys):
+    """If RELAY_SYNC is set (v0.5+ path), no nag about missing .envrc.<hostname>."""
+    repo = tmp_path / "myproj"
+    _init_git_repo(repo)
+    monkeypatch.chdir(repo)
+    _isolated_env(monkeypatch,
+                  RELAY_SHARED_ROOT=str(repo / ".shared"),
+                  RELAY_SYNC="none",
+                  RELAY_AUTHOR="codex", RELAY_PEER="claude")
+    hostname = relay._hostname_short()
+    assert not (repo / f".envrc.{hostname}").exists()
+    rc = relay.cmd_init(_args())
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--role" not in out
+    assert "not found" not in out
+
+
 def test_init_suppresses_envrc_nag_when_role_env_set(monkeypatch, tmp_path, capsys):
     """Q1: if RELAY_ROLE is set, no nag about missing .envrc.<hostname>.
     The user has already sourced an envrc somehow (or set vars by hand);

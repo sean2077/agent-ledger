@@ -39,7 +39,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -47,7 +47,12 @@ STATUSES = {"draft", "ready", "closed", "cancelled", "failed", "timed_out"}
 TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
 PLACEHOLDER_MARKER = "TODO:"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
-NON_BLOCKING_PREFLIGHT_WARNS = {"fs.mtime_monotonic"}
+NON_BLOCKING_PREFLIGHT_WARNS = {
+    "fs.mtime_monotonic",
+    # Deprecation surface only — RELAY_ROLE still resolves correctly via the
+    # alias; user should migrate to RELAY_SYNC but doesn't have to today.
+    "env.RELAY_ROLE.deprecated",
+}
 OWNER_KINDS = {"agent", "tool-process", "pidfile", "renewal-file", "none"}
 
 
@@ -290,6 +295,13 @@ class Env:
     project: Optional[str]
     remote_ssh: Optional[str]
     remote_path: Optional[str]
+    # `sync_raw` is the literal value from RELAY_SYNC (or None if unset);
+    # `sync_source` is one of "env" | "role-alias" | "shape-a-infer" | None,
+    # so preflight can warn appropriately. Resolution lives in `_resolve_sync`.
+    sync_raw: Optional[str] = None
+
+
+SYNC_VALUES = {"none", "rsync"}
 
 
 def load_env() -> Env:
@@ -303,7 +315,36 @@ def load_env() -> Env:
         project=os.environ.get("RELAY_PROJECT") or None,
         remote_ssh=os.environ.get("RELAY_REMOTE_SSH") or None,
         remote_path=os.environ.get("RELAY_REMOTE_PATH") or None,
+        sync_raw=os.environ.get("RELAY_SYNC") or None,
     )
+
+
+def _resolve_sync(env: Env, *, is_shape_a: bool) -> tuple[Optional[str], str]:
+    """Return (effective_sync, source) where source is 'env', 'role-alias',
+    'shape-a-infer', or 'unset'. `effective_sync` is in SYNC_VALUES or None.
+
+    Precedence: explicit RELAY_SYNC wins; else legacy RELAY_ROLE alias; else
+    shape-A infers `none`; else unset.
+
+    Shape detection is performed by the caller and passed in so this helper
+    stays independent of RELAY_ROLE (per codex seq 4 implementation note).
+    """
+    if env.sync_raw is not None:
+        if env.sync_raw in SYNC_VALUES:
+            return env.sync_raw, "env"
+        return None, "env-invalid"
+    if env.role == "host":
+        # Per D4: shape A overrides the host alias to `none` (rsync is
+        # structurally inapplicable when the project root IS the shared
+        # mount). The deprecation warn still surfaces below.
+        if is_shape_a:
+            return "none", "role-alias"
+        return "rsync", "role-alias"
+    if env.role == "remote":
+        return "none", "role-alias"
+    if is_shape_a:
+        return "none", "shape-a-infer"
+    return None, "unset"
 
 
 def git_toplevel(start: Path | None = None) -> Optional[Path]:
@@ -688,14 +729,17 @@ def _print_env_template() -> None:
         "\nenvironment setup:\n"
         "  This project uses a per-host .envrc.<hostname> file dispatched\n"
         "  by the committed .envrc. Copy the appropriate template and source:\n\n"
-        "    # on host (Codex CLI side):\n"
+        "    # same-host (two agents on one machine, v0.5+ recommended):\n"
+        "    cp skills/agent-relay/templates/envrc.same-host.example \\\n"
+        "       \".envrc.$(hostname -s)\"\n"
+        "    source .envrc                           # codex terminal (default)\n"
+        "    # in the OTHER terminal:\n"
+        "    export RELAY_AUTHOR=claude && source .envrc\n\n"
+        "    # two-machine (legacy RELAY_ROLE pair):\n"
         "    cp skills/agent-relay/templates/envrc.host.example \\\n"
-        "       \".envrc.$(hostname -s)\"\n"
-        "    $EDITOR \".envrc.$(hostname -s)\"   # fill RELAY_REMOTE_SSH/PATH\n"
-        "    source .envrc\n\n"
-        "    # on remote (Claude Code side):\n"
+        "       \".envrc.$(hostname -s)\"      # on the rsync side\n"
         "    cp skills/agent-relay/templates/envrc.remote.example \\\n"
-        "       \".envrc.$(hostname -s)\"\n"
+        "       \".envrc.$(hostname -s)\"      # on the other side\n"
         "    source .envrc\n"
     )
 
@@ -704,18 +748,21 @@ def cmd_preflight(args) -> int:
     env = load_env()
     out: dict = {"exit_code": 0, "env": {}, "checks": []}
 
-    # Detect project shape (only meaningful on host):
-    #   shape A: PROJECT_ROOT is itself a fuse mount → no rsync needed
-    #            → RELAY_REMOTE_SSH / RELAY_REMOTE_PATH are irrelevant
-    #   shape B: PROJECT_ROOT is local; only .shared/ is mounted
-    #            → RELAY_REMOTE_SSH / RELAY_REMOTE_PATH required for `relay sync`
+    # Detect project shape unconditionally (independent of RELAY_ROLE, per
+    # codex seq 4 ack on D1 — otherwise same-host setups without a legacy
+    # role never reach the shape-A inference path):
+    #   shape A: PROJECT_ROOT is itself a fuse mount → rsync structurally
+    #            inapplicable; RELAY_REMOTE_SSH / RELAY_REMOTE_PATH irrelevant.
+    #   shape B: PROJECT_ROOT is local; only .shared/ may be mounted.
     is_shape_a = False
     project_root = git_toplevel()
-    if env.role == "host" and project_root is not None:
+    if project_root is not None:
         is_shape_a = _is_fuse_mount(project_root)
 
-    required = ["RELAY_ROLE", "RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT"]
-    if env.role == "host" and not is_shape_a:
+    sync_effective, sync_source = _resolve_sync(env, is_shape_a=is_shape_a)
+
+    required = ["RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT"]
+    if sync_effective == "rsync":
         required += ["RELAY_REMOTE_SSH", "RELAY_REMOTE_PATH"]
     for var in required:
         val = os.environ.get(var)
@@ -726,16 +773,58 @@ def cmd_preflight(args) -> int:
             "detail": "set" if val else "not set",
         })
 
-    if env.role == "host":
-        if is_shape_a:
+    # Sync resolution check — surfaces effective sync mode plus advisory warns.
+    if sync_source == "env-invalid":
+        out["checks"].append({
+            "name": "env.RELAY_SYNC", "status": "fail",
+            "detail": f"RELAY_SYNC={env.sync_raw!r} invalid; expected one of "
+                      f"{sorted(SYNC_VALUES)}",
+        })
+    elif sync_effective is None:
+        # Neither RELAY_SYNC nor legacy RELAY_ROLE set, and shape detection
+        # could not infer (shape B or no git toplevel). Fail with a hint.
+        hint = (
+            "set RELAY_SYNC=rsync (this side owns rsync transport) "
+            "or RELAY_SYNC=none (this side does not sync)"
+        )
+        out["checks"].append({
+            "name": "env.RELAY_SYNC", "status": "fail",
+            "detail": f"neither RELAY_SYNC nor legacy RELAY_ROLE set; {hint}",
+        })
+    else:
+        out["env"]["RELAY_SYNC"] = True
+        detail = f"sync={sync_effective} (source: {sync_source})"
+        if sync_source == "role-alias":
             out["checks"].append({
-                "name": "project.shape", "status": "pass",
-                "detail": "shape A (PROJECT_ROOT is a fuse mount; rsync not needed)",
+                "name": "env.RELAY_ROLE.deprecated", "status": "warn",
+                "detail": f"RELAY_ROLE={env.role!r} is deprecated; "
+                          f"use RELAY_SYNC={sync_effective} (set both during "
+                          "migration, drop RELAY_ROLE when ready). "
+                          "Removal planned for v0.6+.",
             })
-        elif project_root is not None:
+        out["checks"].append({
+            "name": "env.RELAY_SYNC", "status": "pass", "detail": detail,
+        })
+
+    if project_root is not None:
+        if is_shape_a:
+            shape_detail = "shape A (PROJECT_ROOT is a fuse mount; rsync structurally inapplicable)"
+            if sync_effective == "rsync":
+                # Contradiction: caller asserts they own rsync but project root
+                # IS the mount, so there is nothing to rsync.
+                out["checks"].append({
+                    "name": "project.shape", "status": "fail",
+                    "detail": shape_detail + " — but RELAY_SYNC=rsync; refuse to run sync",
+                })
+            else:
+                out["checks"].append({
+                    "name": "project.shape", "status": "pass",
+                    "detail": shape_detail,
+                })
+        else:
             out["checks"].append({
                 "name": "project.shape", "status": "pass",
-                "detail": "shape B (PROJECT_ROOT is local; sync via rsync)",
+                "detail": "shape B (PROJECT_ROOT is local; rsync available if SYNC=rsync)",
             })
 
     if env.shared_root and project_root is not None:
@@ -926,14 +1015,15 @@ def cmd_init(args) -> int:
         else:
             print(f"relay init: {envrc_target} already present")
 
-    if project_root and not role and not env.role:
-        # Nag only when no env is loaded yet (RELAY_ROLE unset) AND .envrc.<hostname>
-        # is missing. If the user has already sourced any envrc (RELAY_ROLE set),
-        # they've made their setup choice — quiet from here on.
+    if project_root and not role and not env.role and not env.sync_raw:
+        # Nag only when no env is loaded yet AND .envrc.<hostname> is missing.
+        # If the user has already sourced any envrc (RELAY_SYNC or legacy
+        # RELAY_ROLE set), they've made their setup choice — quiet from here on.
         hostname = _hostname_short()
         if not (project_root / f".envrc.{hostname}").exists():
             print(f"\nhint: .envrc.{hostname} not found.")
-            print(f"  run `relay init --role host` or `relay init --role remote` to copy the template.")
+            print("  run `relay init --role same-host` (two agents on one machine, v0.5+)")
+            print("  or   `relay init --role host` / `--role remote` (legacy two-machine pair)")
 
     if envrc_just_created and project_root:
         has_direnv = shutil.which("direnv") is not None
@@ -943,6 +1033,9 @@ def cmd_init(args) -> int:
         else:
             print(f"next: cd {project_root} && source .envrc")
             print("  (install direnv for auto-load on cd)")
+        if role == "same-host":
+            print("  in the OTHER terminal: export RELAY_AUTHOR=claude && source .envrc")
+            print("  (defaults to RELAY_AUTHOR=codex; peer derived automatically)")
 
     return 0
 
@@ -1485,21 +1578,45 @@ def _gitignore_has_negation(repo: Path) -> bool:
 
 def cmd_sync(args) -> int:
     env = load_env()
-    if env.role != "host":
-        print(f"relay sync: must run on host (RELAY_ROLE={env.role!r}); remote cannot SSH back",
-              file=sys.stderr)
-        return 2
-    if not env.remote_ssh or not env.remote_path:
-        print("relay sync: RELAY_REMOTE_SSH and RELAY_REMOTE_PATH must be set", file=sys.stderr)
-        return 2
     top = git_toplevel()
     if not top:
         print("relay sync: not in a git repo (need project root)", file=sys.stderr)
         return 2
     project_root = top
-    if _is_fuse_mount(project_root):
-        print(f"relay sync: $PROJECT_ROOT={project_root} is a fuse mount; "
-              "no sync needed (shape-A: edits land on remote directly)", file=sys.stderr)
+    is_shape_a = _is_fuse_mount(project_root)
+    sync_effective, sync_source = _resolve_sync(env, is_shape_a=is_shape_a)
+    if sync_effective != "rsync":
+        # Cover both "explicit none" and "could not resolve". Be specific about which.
+        if sync_source == "env":
+            reason = f"RELAY_SYNC={env.sync_raw!r}; this side does not own rsync transport"
+        elif sync_source == "role-alias" and env.role == "host" and is_shape_a:
+            # Per D1 fine print: RELAY_ROLE=host + shape A falls through to
+            # RELAY_SYNC=none because rsync is structurally inapplicable.
+            # The refusal must NOT suggest enabling RELAY_SYNC=rsync — that
+            # would be a contradiction on shape A.
+            reason = (f"$PROJECT_ROOT={project_root} is a fuse mount (shape A); "
+                      f"RELAY_ROLE={env.role!r} therefore maps to RELAY_SYNC=none "
+                      "and no sync is needed (edits land on the remote directly)")
+        elif sync_source == "role-alias":
+            reason = (f"RELAY_ROLE={env.role!r} maps to RELAY_SYNC=none; "
+                      "use RELAY_SYNC=rsync (or legacy RELAY_ROLE=host) to enable sync")
+        elif sync_source == "shape-a-infer":
+            reason = (f"$PROJECT_ROOT={project_root} is a fuse mount (shape A); "
+                      "no sync needed (edits land on the remote directly)")
+        else:
+            reason = ("neither RELAY_SYNC nor legacy RELAY_ROLE set; "
+                      "set RELAY_SYNC=rsync on the side that owns the rsync transport")
+        print(f"relay sync: {reason}", file=sys.stderr)
+        return 2
+    if not env.remote_ssh or not env.remote_path:
+        print("relay sync: RELAY_REMOTE_SSH and RELAY_REMOTE_PATH must be set", file=sys.stderr)
+        return 2
+    if is_shape_a:
+        # Contradiction: RELAY_SYNC=rsync was explicitly set, but the project
+        # root is itself the shared mount. Refuse rather than do a destructive
+        # rsync over the mount.
+        print(f"relay sync: $PROJECT_ROOT={project_root} is a fuse mount but "
+              "RELAY_SYNC=rsync; refusing (shape A: nothing to sync)", file=sys.stderr)
         return 2
 
     direction = args.direction
@@ -2343,6 +2460,16 @@ def cmd_wait(args) -> int:
     stale_threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 600), 60)
     nominal_deadline = time.monotonic() + timeout
 
+    # Optional readiness sentinel for tests / supervisors that need to know
+    # the poll loop has been reached (e.g. to send SIGINT reliably without
+    # a `time.sleep()` race). Unset in normal operation.
+    ready_sentinel = os.environ.get("RELAY_WAIT_READY_SENTINEL")
+    if ready_sentinel:
+        try:
+            Path(ready_sentinel).touch()
+        except OSError:
+            pass  # best-effort signal; not protocol-critical
+
     try:
         while True:
             for pub in list_published(session):
@@ -2449,8 +2576,10 @@ def build_parser() -> argparse.ArgumentParser:
     pp.set_defaults(func=cmd_preflight)
 
     pi = sub.add_parser("init", help="Idempotently create RELAY_SHARED_ROOT + sentinel.")
-    pi.add_argument("--role", choices=["host", "remote"], default=None,
-                    help="Also copy envrc.<role>.example to .envrc.<hostname> if absent.")
+    pi.add_argument("--role", choices=["host", "remote", "same-host"], default=None,
+                    help="Also copy envrc.<role>.example to .envrc.<hostname> if absent. "
+                         "`same-host` is the v0.5+ recommendation for two agents on one machine; "
+                         "`host`/`remote` are the legacy two-machine pair (RELAY_ROLE-based).")
     pi.set_defaults(func=cmd_init)
 
     pb = sub.add_parser("bootstrap", help="Create a new session under .shared/.")
@@ -2563,4 +2692,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Top-level SIGINT guard: codex seq 8 observed tracebacks when SIGINT
+    # arrived during early CLI startup (argparse build) before any command
+    # handler installed its own KeyboardInterrupt catcher. Exit cleanly with
+    # 130 (128 + SIGINT) so the protocol contract holds anywhere in the
+    # process lifetime, not just inside `cmd_wait`.
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

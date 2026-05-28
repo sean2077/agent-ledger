@@ -1,0 +1,41 @@
+# Per-host relay config for the SAME-HOST setup.
+#
+# Use this template when both agents (e.g. Codex CLI in one terminal, Claude
+# Code in another) run on the same machine and share the same project
+# checkout. No rsync transport is involved.
+#
+# Copy to .envrc.$(hostname -s) at the project root and source. Gitignored —
+# not committed. The file works for both terminals as-is: identity is picked
+# from a pre-existing RELAY_AUTHOR export (per-terminal), defaulting to
+# `codex`. To run as `claude` in the other terminal:
+#
+#     export RELAY_AUTHOR=claude
+#     source .envrc          # or: direnv reload
+#
+# Identity: honor whatever the terminal already set, default to codex.
+# Per-terminal override is how the same .envrc file serves both agents
+# without editing it between terminal launches.
+export RELAY_AUTHOR="${RELAY_AUTHOR:-codex}"
+
+# Peer is derived from author so the two stay in lockstep.
+case "$RELAY_AUTHOR" in
+  codex)  export RELAY_PEER=claude ;;
+  claude) export RELAY_PEER=codex  ;;
+  *)
+    echo "envrc.same-host: unrecognized RELAY_AUTHOR=$RELAY_AUTHOR" >&2
+    echo "  expected one of: codex, claude" >&2
+    # Unset RELAY_PEER so a stale value from a previous source can't survive
+    # — preflight should fail the missing-env check rather than accept a
+    # bad (AUTHOR, PEER) pair.
+    unset RELAY_PEER
+    ;;
+esac
+
+# Sync capability: same-host setups never need rsync — the shared dir is
+# already on the same filesystem.
+export RELAY_SYNC=none
+
+export RELAY_SHARED_ROOT="$PWD/.shared"
+
+# RELAY_REMOTE_SSH / RELAY_REMOTE_PATH are not needed when RELAY_SYNC=none.
+unset RELAY_REMOTE_SSH RELAY_REMOTE_PATH

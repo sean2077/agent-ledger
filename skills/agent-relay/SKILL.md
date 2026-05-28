@@ -1,6 +1,6 @@
 ---
 name: agent-relay
-description: "Relay work between local Codex and remote Claude Code through a shared .shared/ directory. Use when user says: continue the relay, handoff to claude/codex, start a relay session, sync code to remote, check relay status. Project-agnostic; uses the `relay` CLI for mechanical ops and RELAY_* env vars for config."
+description: "Cross-review relay for interactive Claude Code <-> Codex CLI (and other markdown-capable agents) through a shared .shared/ file ledger, with no API-key orchestrator. Use when user says: continue the relay, handoff to claude/codex, start a relay session, sync code to remote, check relay status. Project-agnostic; uses the `relay` CLI for mechanical ops and RELAY_* env vars for config."
 metadata:
   requires:
     bins: ["relay", "bash"]
@@ -8,7 +8,9 @@ metadata:
 
 # agent-relay
 
-You are part of a relay between local Codex CLI (`host` role) and remote interactive Claude Code (`remote` role). Each turn one side reads what the other published, does work, publishes a response containing instructions for the next turn. The protocol is **user-driven** — there is no autopilot loop.
+You connect an interactive Claude Code session and an interactive Codex CLI session (and, if configured, other markdown-capable agents) through an append-only shared file ledger so they can cross-review work without an API-key orchestrator. Each turn one side reads what the other published, does work, publishes a response with instructions for the next turn. The protocol is **user-driven** — there is no autopilot loop.
+
+The two sides may live on the same machine (two terminals, `RELAY_SYNC=none`) or on two machines bridged by rsync (one side `RELAY_SYNC=rsync`, the other `none`). See `docs/why.md` (in the project root) for the longer take on what this is, what it isn't, and the billing/limits caveats.
 
 The `relay` CLI does mechanical operations (atomic writes, sequence numbers, validation, rsync). **You** do everything that requires judgment: read peer's last message, decide what to do, write substantive content and clear instructions for the peer.
 
@@ -42,7 +44,7 @@ Before any other action:
 
 `init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. If `RELAY_SHARED_ROOT` is unset, `init` defaults to `<git_toplevel>/.shared`; outside a git repo it fails clearly.
 
-For the first time on a machine, `relay init --role host` (or `--role remote`) also copies the matching `envrc.<role>.example` template to `.envrc.<hostname>` if absent. The skill prelude runs the no-arg form; if init prints a `--role` hint, surface it to the user — that's the only path the prelude can't auto-resolve.
+For the first time on a machine, `relay init --role same-host` (two agents on one box; recommended for v0.5+) or `relay init --role host` / `--role remote` (legacy two-machine pair) copies the matching template to `.envrc.<hostname>` if absent. The skill prelude runs the no-arg form; if init prints a `--role` hint, surface it to the user — that's the only path the prelude can't auto-resolve.
 
 Interpret the preflight exit code as three levels:
 
@@ -54,6 +56,7 @@ Interpret the preflight exit code as three levels:
 
 `warn`s currently classified as **non-blocking** (still appear in `checks`, do not bump exit to 1):
 - `fs.mtime_monotonic` "mtime unchanged …coarse resolution" — typical on sshfs with attribute caching; the protocol uses `.sha256` + `.ready` sentinels, not mtime.
+- `env.RELAY_ROLE.deprecated` "RELAY_ROLE=... is deprecated; use RELAY_SYNC=..." — v0.5 introduced `RELAY_SYNC=none|rsync`; the legacy alias still resolves correctly and won't be removed until v0.6+, so the warn surfaces the migration but doesn't escalate the exit.
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
@@ -110,7 +113,7 @@ This is the core 95% case. Take one full turn in the relay.
    "$RELAY" publish "$DRAFT"
    ```
    On success: file moves out of `.draft/`, sha256 + ready sidecars appear. On rejection: CLI prints which field failed validation; fix the draft and retry.
-9. **Sync if needed** (host only, see Intent: sync). First time push? **always `--dry-run` first**.
+9. **Sync if needed** (only on the side with `RELAY_SYNC=rsync`; see Intent: sync). First time push? **always `--dry-run` first**.
 
 10. **Auto-loop or surface decision (rule-based)**. Reached either from step 9 (after a successful publish) or from step 2 (re-entry when the latest artifact is yours targeting peer). In both cases the artifact under inspection is the latest published. Decide whether to invoke `relay wait` and loop, or to surface to the user (step 11). The check is **rule-based, never LLM-judged**:
 
@@ -204,7 +207,7 @@ Report to user:
 
 ## Intent: sync
 
-Only on `host` role. Remote cannot SSH back to host, so all rsync originates from host.
+Only on the side with `RELAY_SYNC=rsync` (the side that owns the rsync transport). The other side, and any same-host setup (`RELAY_SYNC=none`), cannot run sync. Legacy `RELAY_ROLE=host` still maps to `RELAY_SYNC=rsync` for one more release.
 
 ```bash
 "$RELAY" sync push --dry-run    # ALWAYS first
@@ -222,7 +225,7 @@ Pull works the same way:
 
 `--delete` mirrors deletions; **off by default**. Only enable when the user explicitly says "mirror" or "delete extras".
 
-If `cmd_sync` reports "this project root is a fuse mount" → that's shape A (whole project mounted from remote). No sync needed; edits land on remote directly.
+If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole project mounted from the other side). No sync needed; edits land on the remote filesystem directly. `relay preflight` infers `RELAY_SYNC=none` automatically in shape A when neither `RELAY_SYNC` nor `RELAY_ROLE` is set.
 
 ---
 
@@ -255,7 +258,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay publish` rejects with "prompt_for_next still contains placeholder"**: you forgot to replace the `TODO: ...` line. Edit the draft and retry.
 - **`relay publish` rejects with "body is empty"**: scaffold body is the placeholder comment; replace it with real content.
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
-- **`relay sync push` aborts with "must run on host"**: you're on remote; remote cannot sync. Tell user; the host side must run the push.
+- **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none`, or legacy `RELAY_ROLE=remote`, or unset). Tell the user; the side with `RELAY_SYNC=rsync` (legacy `RELAY_ROLE=host`) must run the push.
 
 ## References
 
