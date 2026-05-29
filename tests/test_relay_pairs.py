@@ -147,3 +147,37 @@ def test_ensure_excludes_same_author_pair(monkeypatch, tmp_path, capsys):
     _instance(monkeypatch, "claude", "id-aaa")
     rc, out = _ensure(capsys)
     assert rc == 3 and out["action"] == "full"
+
+
+def _degrade(monkeypatch) -> None:
+    """Force an unresolvable (degraded) instance identity: no override / platform
+    id and no per-window signal."""
+    for k in ("RELAY_AGENT_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_AUTHOR", "claude")
+    monkeypatch.setenv("RELAY_PEER", "codex")
+    monkeypatch.setattr(relay, "_terminal_signal", lambda: ("shared", "degraded"))
+
+
+def test_ensure_degraded_never_auto_binds(monkeypatch, tmp_path, capsys):
+    """Two same-author windows with an unresolvable (degraded) id must never
+    silently share a pair: ensure returns `degraded`, never use/joined, and
+    writes no binding (codex code-review must-fix regression)."""
+    shared = _shared(monkeypatch, tmp_path)
+    _mk_session(shared, "20260530-x")
+    _degrade(monkeypatch)
+    rc1, out1 = _ensure(capsys)   # window 1
+    rc2, out2 = _ensure(capsys)   # window 2 (same author, same degraded host)
+    assert out1["action"] == "degraded" and rc1 == 3
+    assert out2["action"] == "degraded" and rc2 == 3
+    assert relay.list_bindings(shared) == []  # neither auto-bound -> no sharing
+
+
+def test_pair_join_refused_when_degraded(monkeypatch, tmp_path, capsys):
+    """Explicit join is also refused while degraded (a shared key would let two
+    windows overwrite one binding); the user must pass --pair-id instead."""
+    shared = _shared(monkeypatch, tmp_path)
+    _mk_session(shared, "20260530-x")
+    _degrade(monkeypatch)
+    assert relay.cmd_pair_join(_args(slug="20260530-x")) == 2
+    assert relay.list_bindings(shared) == []

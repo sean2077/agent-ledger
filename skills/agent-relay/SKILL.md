@@ -109,8 +109,9 @@ Interpret the `action` field (the CLI does the mechanical decision; you only han
 | `choose` | several joinable pairs (see `candidates`) | **ask the user** which to join, then `"$RELAY" pair join <slug>` |
 | `bootstrap` | no active pair exists | ask the user for a topic, then run the **bootstrap** intent |
 | `full` | pair(s) exist but none joinable (full, or already hold a same-author instance) | tell the user; offer to `bootstrap` a new pair or wait |
+| `degraded` | your agent session id is unresolvable (no platform id / tty / atuin), so auto-binding can't be done safely | **ask the user** to pass `--pair-id <slug>` per command, or `export RELAY_AGENT_SESSION_ID=<stable per-window value>` |
 
-`relay whoami` shows your instance id (`<author>:<short-session-id>`) and current binding. Same-agent pairs (claude+claude) are not supported — `ensure` excludes them. Only `choose` / `bootstrap` / `full` interrupt the user; `use` / `joined` proceed silently.
+`relay whoami` shows your instance id (`<author>:<short-session-id>`) and current binding. Same-agent pairs (claude+claude) are not supported — `ensure` excludes them. Only `choose` / `bootstrap` / `full` / `degraded` interrupt the user; `use` / `joined` proceed silently.
 
 ## Decide intent from user input
 

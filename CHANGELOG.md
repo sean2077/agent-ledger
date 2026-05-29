@@ -56,6 +56,11 @@ changed. A product rename is a separate future pass.)
 - **Same-agent pairs (claude+claude) are unsupported**: artifacts route by
   `author`, so `join`/`ensure` refuse a pair already holding a live same-author
   instance. The canonical claude+codex pair is unaffected.
+- **Degraded identity fallback is ephemeral.** When no platform id / tty / atuin
+  signal can distinguish two same-author windows on a host, `resolve_instance_id`
+  mints a per-process id (never persisted), `pair ensure` returns `degraded`, and
+  `pair join` refuses — so two such windows can't silently collapse onto one
+  binding/pair. Pass `--pair-id` (or set `RELAY_AGENT_SESSION_ID`) instead.
 
 ## 0.12.0 — 2026-05-29
 

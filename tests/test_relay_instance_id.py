@@ -46,31 +46,48 @@ def test_claude_then_codex_precedence(monkeypatch):
 
 
 def test_fallback_mints_and_persists(monkeypatch, tmp_path):
-    """No platform id -> mint a per-terminal id, persist it, and return the SAME
-    id on the next call (so a binding survives across relay invocations)."""
+    """A stable per-terminal signal (atuin/tty) -> mint, persist, and return the
+    SAME id on the next call (so a binding survives across relay invocations)."""
     _clear_id_env(monkeypatch)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(relay, "_terminal_signal", lambda: ("ttyhash", "tty"))
     first_id, first_src = relay.resolve_instance_id("codex")
     assert first_id  # never empty -> never hard-fails
-    assert first_src.startswith("fallback-")
+    assert first_src == "fallback-tty"
     second_id, second_src = relay.resolve_instance_id("codex")
-    assert second_id == first_id
+    assert second_id == first_id  # persisted -> stable across calls
     assert second_src == first_src
     # a different author keys a different fallback file -> different id
     other_id, _ = relay.resolve_instance_id("claude")
     assert other_id != first_id
 
 
+def test_fallback_degraded_is_ephemeral_not_shared(monkeypatch, tmp_path):
+    """Degraded fallback (no per-window signal) must NOT persist a shared id:
+    two calls (i.e. two same-author windows) get DIFFERENT ids, so they cannot
+    collapse onto one binding/pair (codex code-review must-fix)."""
+    _clear_id_env(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(relay, "_terminal_signal", lambda: ("shared", "degraded"))
+    a, a_src = relay.resolve_instance_id("claude")
+    b, b_src = relay.resolve_instance_id("claude")
+    assert a_src == b_src == "fallback-degraded"
+    assert a != b  # ephemeral -> never shared between windows
+    persisted = list((tmp_path / "relay").rglob("*.id")) if (tmp_path / "relay").is_dir() else []
+    assert persisted == []  # nothing written to a shared file
+
+
 def test_fallback_survives_unwritable_runtime_dir(monkeypatch, tmp_path):
     """Even if the fallback file can't be persisted, the call still returns a
     minted id for this run (best-effort, never raises)."""
     _clear_id_env(monkeypatch)
+    monkeypatch.setattr(relay, "_terminal_signal", lambda: ("ttyhash", "tty"))
     blocker = tmp_path / "blocker"
     blocker.write_text("not a dir")
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(blocker))  # mkdir under a file fails
     got, src = relay.resolve_instance_id("codex")
     assert got
-    assert src.startswith("fallback-")
+    assert src == "fallback-tty"
 
 
 def test_short_instance_id_forms():

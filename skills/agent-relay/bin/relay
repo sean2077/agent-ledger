@@ -432,6 +432,14 @@ def resolve_instance_id(author: Optional[str]) -> tuple[Optional[str], str]:
     if codex:
         return codex, "platform-codex"
     sig, sig_source = _terminal_signal()
+    if sig_source == "degraded":
+        # No per-window discriminator: persisting a shared id would collapse two
+        # same-author windows onto it (they'd share one binding/pair, breaking
+        # the same-author invariant — codex code-review must-fix). Mint an
+        # EPHEMERAL id instead — distinct per process, never persisted — so two
+        # windows never collide. A degraded instance therefore has no stable
+        # binding and must select its pair explicitly (--pair-id).
+        return uuid.uuid4().hex, "fallback-degraded"
     fdir = _instance_fallback_dir()
     fpath = fdir / f"instance-{author}-{sig}.id"
     try:
@@ -572,6 +580,12 @@ def join_pair(env: "Env", root: Path, pair_slug: str) -> int:
     if not env.author or not env.agent_session_id:
         print("relay: cannot bind without RELAY_AUTHOR and a resolvable agent "
               "session id", file=sys.stderr)
+        return 2
+    if env.agent_session_id_source == "fallback-degraded":
+        print("relay: agent session id is unresolved (degraded — no platform id, "
+              "tty, or atuin); cannot hold a stable binding. Pass --pair-id per "
+              "command, or export RELAY_AGENT_SESSION_ID to a stable per-window "
+              "value.", file=sys.stderr)
         return 2
     session = root / pair_slug
     if not (session / "session.json").exists():
@@ -4080,6 +4094,16 @@ def cmd_pair_ensure(args) -> int:
     if not env.author or not env.agent_session_id:
         return _ensure_emit(args, {"action": "error",
             "detail": "no instance identity (set RELAY_AUTHOR)"}, rc=2)
+    if env.agent_session_id_source == "fallback-degraded":
+        # Identity can't be told apart from another same-author window here, so
+        # never auto-bind (that would silently share a pair). Require explicit
+        # selection. (codex code-review must-fix.)
+        return _ensure_emit(args, {
+            "action": "degraded",
+            "detail": "agent session id unresolved (no platform id / tty / atuin); "
+                      "pass --pair-id <slug> or export RELAY_AGENT_SESSION_ID",
+            "pairs": [s.name for s in active_sessions(root)],
+        }, rc=3)
     # 1. already bound to a live pair -> use it (fast path)
     b = read_binding(root, env.author, env.agent_session_id)
     if b:
