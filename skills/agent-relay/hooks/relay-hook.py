@@ -23,12 +23,20 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
+
+
+def now_iso() -> str:
+    """Local time with offset, no microseconds — MUST match bin/relay's
+    now_iso() so the hook trail reads consistently next to session artifacts
+    and the issue ledger (issue 20260529T093645: the trail previously used
+    UTC + microseconds, which looked 'zoneless'/wrong beside `+08:00` stamps)."""
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 HOOK_QUIET = os.environ.get("RELAY_HOOK_QUIET", "1") != "0"
 HOOK_VERBOSE = os.environ.get("RELAY_HOOK_VERBOSE", "0") == "1"
@@ -204,7 +212,7 @@ def append_trail(shared_root: Path, entry: dict) -> None:
         log.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return
-    entry = {"ts": datetime.now(timezone.utc).isoformat(), **entry}
+    entry = {"ts": now_iso(), **entry}
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     try:
         with open(log, "a", encoding="utf-8") as f:
@@ -413,7 +421,7 @@ def handle_stop(payload: dict, shared_root: Path,
         return None
 
     cache["fingerprint"] = fingerprint
-    cache["updated_at"] = datetime.now(timezone.utc).isoformat()
+    cache["updated_at"] = now_iso()
     write_state_cache_atomic(cache_path, cache)
 
     pubs = status.get("published", []) or []

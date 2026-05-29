@@ -607,23 +607,25 @@ def test_installer_command_is_path_independent(monkeypatch, tmp_path):
             managed = [e for e in cfg["hooks"][event] if e.get("_agent_relay_managed")]
             assert managed, f"{target}/{event}: missing managed entry"
             cmd = managed[0]["hooks"][0]["command"]
-            parts = shlex.split(cmd)
-            assert len(parts) == 2, (
-                f"{target}/{event}: expected `<python> <script>`, got {cmd!r}"
+            # v0.10.1 form: `[ -f <script> ] || exit 0; exec <python> <script>`
+            # — a shell-evaluated fail-open guard (issue 20260529T092859) plus
+            # the PATH-independent absolute interpreter.
+            assert "|| exit 0" in cmd, (
+                f"{target}/{event}: command must fail open if script missing; got {cmd!r}"
             )
-            interp, script = parts
+            assert "exec " in cmd, f"{target}/{event}: expected exec form; got {cmd!r}"
+            # The exec'd part carries the interpreter + script.
+            exec_part = cmd.split("exec ", 1)[1]
+            interp, script = shlex.split(exec_part)
             assert interp == sys.executable, (
                 f"{target}/{event}: interpreter must be absolute sys.executable; "
                 f"got {interp!r}"
             )
-            assert Path(interp).is_absolute(), (
-                f"{target}/{event}: interpreter path is not absolute: {interp!r}"
-            )
-            assert Path(interp).is_file(), (
-                f"{target}/{event}: interpreter must exist on disk: {interp!r}"
+            assert Path(interp).is_absolute() and Path(interp).is_file(), (
+                f"{target}/{event}: interpreter must be an absolute existing path: {interp!r}"
             )
             assert script.endswith("relay-hook.py"), (
-                f"{target}/{event}: second arg must be the hook script: {script!r}"
+                f"{target}/{event}: exec target must be the hook script: {script!r}"
             )
             assert Path(script).is_absolute(), (
                 f"{target}/{event}: script path is not absolute: {script!r}"
@@ -632,3 +634,54 @@ def test_installer_command_is_path_independent(monkeypatch, tmp_path):
                 f"{target}/{event}: script path must exist on disk "
                 f"(catches double-nested install bugs): {script!r}"
             )
+            # The guard must test the SAME script it execs.
+            guard_part = cmd.split("||", 1)[0]
+            assert shlex.split(guard_part) == ["[", "-f", script, "]"], (
+                f"{target}/{event}: guard must test the exec'd script; got {guard_part!r}"
+            )
+
+
+def test_hook_trail_timestamp_is_local_offset_no_microseconds(monkeypatch, tmp_path):
+    """Issue 20260529T093645: hook-trail.log `ts` must use the project's
+    now_iso() shape — local offset, no microseconds — not UTC+microseconds."""
+    import re as _re
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    pub = _publish_artifact(session, 1, "claude", "codex", "plan", os.environ)
+    # A PreToolUse deny writes a trail entry.
+    payload = _claude_pretool(repo, "Edit", {"file_path": str(pub)})
+    _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"), "RELAY_AUTHOR": "claude",
+    })
+    trail = repo / ".shared" / "_relay" / "hook-trail.log"
+    lines = [l for l in trail.read_text().splitlines() if l.strip()]
+    assert lines, "expected at least one trail entry"
+    ts = json.loads(lines[-1])["ts"]
+    # local offset, seconds precision, no fractional seconds, no bare 'Z'
+    assert _re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$", ts), (
+        f"ts must be local-offset, no microseconds; got {ts!r}"
+    )
+
+
+def test_installer_command_fails_open_when_script_missing(monkeypatch, tmp_path):
+    """Issue 20260529T092859: if the dispatcher script is missing, the rendered
+    hook command must exit 0 (allow the edit) instead of erroring and blocking
+    every Edit/Write. Command hooks are shell-evaluated, so run it via `sh -c`."""
+    import subprocess as sp
+    import sys as _sys
+
+    missing = tmp_path / "gone" / "relay-hook.py"   # does not exist
+    monkeypatch.setattr(relay, "HOOK_SCRIPT", missing)
+    cmd = relay._hooks_render_command()
+    r = sp.run(["sh", "-c", cmd], input="{}", text=True, capture_output=True)
+    assert r.returncode == 0, (
+        f"missing-script hook must fail open (exit 0); got {r.returncode}, cmd={cmd!r}"
+    )
+
+    # And with the real present script + empty payload, also exit 0 (allow).
+    monkeypatch.setattr(relay, "HOOK_SCRIPT",
+                        Path(relay.__file__).resolve().parent.parent / "hooks" / "relay-hook.py")
+    cmd2 = relay._hooks_render_command()
+    r2 = sp.run(["sh", "-c", cmd2], input="{}", text=True, capture_output=True)
+    assert r2.returncode == 0, (
+        f"present-script hook on empty input must exit 0; got {r2.returncode}, stderr={r2.stderr!r}"
+    )

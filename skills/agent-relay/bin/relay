@@ -48,7 +48,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -3548,14 +3548,25 @@ def _hooks_target_path(target: str) -> Path:
 
 
 def _hooks_render_command() -> str:
-    """Render the hook command as `<python> <script>` with both args shell-quoted.
+    """Render the hook command, shell-quoted and PATH-independent.
 
-    Codex spawns hooks with a stripped PATH (no /usr/bin), so the `#!/usr/bin/env
-    python3` shebang on relay-hook.py can't resolve `python3` and the host
-    reports exit 127. Embedding `sys.executable` as an absolute path makes the
-    command PATH-independent. The same form is fine for Claude Code.
+    Two robustness requirements baked in:
+
+    1. `sys.executable` as an absolute path: Codex spawns hooks with a
+       stripped PATH (no /usr/bin), so a `#!/usr/bin/env python3` shebang
+       can't resolve `python3` (exit 127). Absolute interpreter fixes it.
+    2. **Fail open if the dispatcher script is missing** (issue
+       20260529T092859): command hooks are run via the shell, so we guard
+       with `[ -f <script> ] || exit 0` BEFORE exec'ing python. If
+       relay-hook.py is absent (e.g. the package dir got moved/deleted),
+       the hook exits 0 (allow) instead of the OS erroring `can't open
+       file` and the host blocking every Edit/Write — which previously
+       wedged the whole session. `exec` keeps stdin (the event JSON) and
+       the response stdout intact; shell builtins `[`/`exec` need no PATH.
     """
-    return shlex.quote(sys.executable) + " " + shlex.quote(str(HOOK_SCRIPT))
+    py = shlex.quote(sys.executable)
+    script = shlex.quote(str(HOOK_SCRIPT))
+    return f"[ -f {script} ] || exit 0; exec {py} {script}"
 
 
 def _hooks_load_fragment(target: str) -> dict:

@@ -4,6 +4,41 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.10.1 — 2026-05-29
+
+Hooks robustness + consistency, driven by the first two entries the
+v0.10 issue ledger captured (session `20260529-v010-hook-fixes`).
+
+### Fixed
+
+- **Hook fails open when its dispatcher is missing.** Previously, if
+  `relay-hook.py` was absent (e.g. the package dir was moved/deleted),
+  the rendered command `<python> <script>` errored at the OS level
+  (`can't open file`, exit 2) and the host treated that as a blocking
+  hook failure — wedging *every* `Edit`/`Write` until a human diagnosed
+  it. Hit live during the v0.10 review session. `_hooks_render_command`
+  now renders a shell-evaluated guard: `[ -f <script> ] || exit 0;
+  exec <python> <script>`. Missing script → exit 0 (allow); present →
+  exec python (whose `main()` already fails open on any internal
+  error). Still PATH-independent (absolute interpreter; `[`/`exec` are
+  shell builtins). Re-run `relay hooks install` to pick up the new
+  command form.
+- **hook-trail.log timestamps now match the project convention.** The
+  trail and the Stop-hook state cache used `datetime.now(timezone.utc)`
+  → UTC with microseconds (`...T01:23:01.690549+00:00`), inconsistent
+  with `now_iso()` used everywhere else (local offset, no microseconds,
+  e.g. `...T09:23:01+08:00`). Both now use a hook-local `now_iso()`
+  mirroring `bin/relay`.
+
+### Notes
+
+- Bug source: this release fixes the two issues filed in the v0.10
+  ledger (`major/hooks` dispatcher-missing, `minor/hooks` timestamp).
+  Both are marked resolved there.
+- Tests: fail-open command (missing + present script via `sh -c`),
+  trail timestamp shape, and the updated path-independence installer
+  regression (now parses the guarded `exec` form). Suite 298 -> 300.
+
 ## 0.10.0 — 2026-05-29
 
 Adds a feedback channel. The tool is early-stage and agents hit rough
