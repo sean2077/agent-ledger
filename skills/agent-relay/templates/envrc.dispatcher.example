@@ -9,10 +9,10 @@
 #   1) direnv installed:  `direnv allow` once; auto-loads on cd.
 #   2) no direnv:         `source .envrc` manually.
 #
-# Setup (v0.6+):
+# Setup:
 #   # same-host: two agents on one machine (default identity codex; the
 #   # other terminal exports RELAY_AUTHOR=claude before sourcing)
-#   relay init --role same-host
+#   relay init --same-host
 #
 #   # explicit per-side (any topology, including two-machine with rsync):
 #   relay init --author <name> --peer <name> --sync <none|rsync>
@@ -33,6 +33,6 @@ if [ -f "$LOCAL_ENVRC" ]; then
   source "$LOCAL_ENVRC"
 else
   echo "warning: no $LOCAL_ENVRC found." >&2
-  echo "  Run \`relay init --role same-host\` (two agents on one machine)" >&2
+  echo "  Run \`relay init --same-host\` (two agents on one machine)" >&2
   echo "  or   \`relay init --author <name> --peer <name> --sync <none|rsync>\`" >&2
 fi

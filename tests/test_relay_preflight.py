@@ -144,8 +144,7 @@ def test_preflight_sentinel_missing(monkeypatch, capsys, tmp_path):
 
 def test_preflight_shape_a_does_not_require_remote_vars(monkeypatch, capsys, tmp_path):
     """Fuse-mounted project root (shape A) without explicit RELAY_SYNC should
-    infer SYNC=none and not require RELAY_REMOTE_*. v0.6: this used to be
-    the RELAY_ROLE=host + shape A path; now it's the bare shape-A-infer."""
+    infer SYNC=none and not require RELAY_REMOTE_*."""
     subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path / "repo")], check=True)
     repo = tmp_path / "repo"
     monkeypatch.chdir(repo)
@@ -263,7 +262,7 @@ def _bootstrap_repo_with_shared(tmp_path: Path) -> Path:
 
 
 def test_preflight_resolves_sync_from_explicit_env(monkeypatch, capsys, tmp_path):
-    """v0.5: RELAY_SYNC=rsync drives sync resolution; RELAY_ROLE not needed."""
+    """RELAY_SYNC=rsync drives sync resolution."""
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
@@ -280,8 +279,6 @@ def test_preflight_resolves_sync_from_explicit_env(monkeypatch, capsys, tmp_path
     assert sync_check["status"] == "pass"
     assert "source: env" in sync_check["detail"]
     assert rc == 0
-    # No deprecation warn when RELAY_SYNC is explicit.
-    assert not any(c["name"] == "env.RELAY_ROLE.deprecated" for c in data["checks"])
 
 
 def test_preflight_shape_a_infers_sync_none(monkeypatch, capsys, tmp_path):
@@ -291,7 +288,7 @@ def test_preflight_shape_a_infers_sync_none(monkeypatch, capsys, tmp_path):
     _isolated_env(monkeypatch,
         RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
-        # Deliberately omit BOTH RELAY_SYNC and RELAY_ROLE.
+        # Deliberately omit RELAY_SYNC.
     )
     monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: True)
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
@@ -321,13 +318,15 @@ def test_preflight_shape_b_no_sync_fails(monkeypatch, capsys, tmp_path):
     assert rc == 2
 
 
-def test_preflight_fails_with_migration_hint_when_role_set_without_sync(monkeypatch, capsys, tmp_path):
-    """v0.6: RELAY_ROLE alias removed. Preflight must hard-fail (exit 2) with
-    an explicit migration line, not silently ignore the legacy var."""
+def test_preflight_ignores_leftover_relay_role(monkeypatch, capsys, tmp_path):
+    """RELAY_ROLE is fully retired: a leftover value is an inert unknown env
+    var, not a special migration check. With no RELAY_SYNC in shape B,
+    preflight falls through to the generic 'RELAY_SYNC not set' failure and
+    emits no env.RELAY_ROLE.* check of any kind."""
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
-        RELAY_ROLE="host",
+        RELAY_ROLE="host",  # leftover from a pre-cleanup envrc — must be ignored
         RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
     )
@@ -335,60 +334,11 @@ def test_preflight_fails_with_migration_hint_when_role_set_without_sync(monkeypa
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    removed = next(c for c in data["checks"] if c["name"] == "env.RELAY_ROLE.removed")
-    assert removed["status"] == "fail"
-    # Mapping table must appear so the user can fix without reading docs.
-    assert "RELAY_SYNC=rsync" in removed["detail"]
-    # No deprecation warn anywhere — the var name was retired.
-    assert not any(c["name"] == "env.RELAY_ROLE.deprecated" for c in data["checks"])
-    assert rc == 2
-
-
-def test_preflight_role_removed_on_shape_a_points_at_sync_none_not_rsync(monkeypatch, capsys, tmp_path):
-    """v0.6 post-commit-review seq 2 Blocker 2.
-
-    Even with legacy RELAY_ROLE=host (which normally maps to rsync), if the
-    project root is a fuse mount (shape A) the migration hint must NOT
-    suggest RELAY_SYNC=rsync — that contradicts the same preflight's
-    project.shape line. Point at none + explain why.
-    """
-    repo = _bootstrap_repo_with_shared(tmp_path)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch,
-        RELAY_ROLE="host",  # legacy var that USED to map to rsync
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
-        RELAY_SHARED_ROOT=str(repo / ".shared"),
-    )
-    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: True)
-    rc = relay.cmd_preflight(type("A", (), {"json": True})())
-    import json
-    data = json.loads(capsys.readouterr().out)
-    removed = next(c for c in data["checks"] if c["name"] == "env.RELAY_ROLE.removed")
-    assert removed["status"] == "fail"
-    # The actionable target must be `none`, not `rsync`.
-    assert "RELAY_SYNC=none" in removed["detail"]
-    assert "shape A" in removed["detail"]
-    # NEGATIVE: must not tell the user to do the impossible thing.
-    assert "export RELAY_SYNC=rsync" not in removed["detail"]
-    assert rc == 2
-
-
-def test_preflight_role_remote_maps_to_sync_none_in_hint(monkeypatch, capsys, tmp_path):
-    """The migration hint must give the right mapping for each legacy value."""
-    repo = _bootstrap_repo_with_shared(tmp_path)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch,
-        RELAY_ROLE="remote",
-        RELAY_AUTHOR="claude", RELAY_PEER="codex",
-        RELAY_SHARED_ROOT=str(repo / ".shared"),
-    )
-    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
-    rc = relay.cmd_preflight(type("A", (), {"json": True})())
-    import json
-    data = json.loads(capsys.readouterr().out)
-    removed = next(c for c in data["checks"] if c["name"] == "env.RELAY_ROLE.removed")
-    # remote -> none specifically
-    assert "RELAY_SYNC=none" in removed["detail"]
+    sync_check = next(c for c in data["checks"] if c["name"] == "env.RELAY_SYNC")
+    assert sync_check["status"] == "fail"
+    assert "RELAY_SYNC not set" in sync_check["detail"]
+    # No RELAY_ROLE check survives anywhere.
+    assert not any(c["name"].startswith("env.RELAY_ROLE") for c in data["checks"])
     assert rc == 2
 
 

@@ -46,43 +46,17 @@ def test_sync_refuses_when_sync_none(monkeypatch, tmp_path, capsys):
     assert "'none'" in err
 
 
-def test_sync_role_removed_on_shape_a_suggests_sync_none(monkeypatch, tmp_path, capsys):
-    """v0.6 post-commit-review seq 2 Blocker 2 (sync side).
-
-    Same logic as the preflight regression: legacy RELAY_ROLE=host + shape A
-    must NOT route the user to RELAY_SYNC=rsync. cmd_sync's role-removed
-    arm needs to detect shape A and tell the user to set none instead.
-    """
+def test_sync_ignores_leftover_relay_role(monkeypatch, tmp_path, capsys):
+    """RELAY_ROLE is retired: a leftover value no longer drives a special
+    migration refusal. With no RELAY_SYNC, `relay sync` falls through to the
+    generic 'RELAY_SYNC not set' refusal (and never mentions RELAY_ROLE)."""
     repo = tmp_path / "myproj"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     monkeypatch.chdir(repo)
     for k in list(os.environ):
         if k.startswith("RELAY_"):
             monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("RELAY_ROLE", "host")
-    monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
-    monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
-    monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: True)  # shape A
-    rc = relay.cmd_sync(_args())
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "shape A" in err
-    assert "RELAY_SYNC=none" in err
-    # NEGATIVE: don't route them into the contradiction.
-    assert "set RELAY_SYNC=rsync" not in err
-
-
-def test_sync_refuses_with_migration_hint_when_legacy_role_set(monkeypatch, tmp_path, capsys):
-    """v0.6: RELAY_ROLE alone (no RELAY_SYNC) used to drive sync via the alias.
-    Now it must refuse and emit a migration hint pointing at the new var."""
-    repo = tmp_path / "myproj"
-    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-    monkeypatch.chdir(repo)
-    for k in list(os.environ):
-        if k.startswith("RELAY_"):
-            monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("RELAY_ROLE", "host")
+    monkeypatch.setenv("RELAY_ROLE", "host")  # leftover — must be inert
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
     monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
@@ -90,9 +64,8 @@ def test_sync_refuses_with_migration_hint_when_legacy_role_set(monkeypatch, tmp_
     rc = relay.cmd_sync(_args())
     assert rc == 2
     err = capsys.readouterr().err
-    assert "RELAY_ROLE" in err
-    assert "removed in v0.6" in err
-    assert "RELAY_SYNC=rsync" in err  # mapping for host
+    assert "RELAY_SYNC not set" in err
+    assert "RELAY_ROLE" not in err
 
 
 def test_sync_refuses_when_no_remote_env(monkeypatch, tmp_path, capsys):

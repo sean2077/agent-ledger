@@ -18,7 +18,7 @@ def _isolated_env(monkeypatch, **kwargs):
 
 
 def _args(**kw):
-    base = {"role": None, "author": None, "peer": None, "sync": None}
+    base = {"same_host": False, "author": None, "peer": None, "sync": None}
     base.update(kw)
     return type("A", (), base)()
 
@@ -99,35 +99,8 @@ def test_init_fails_without_shared_root_outside_git(monkeypatch, tmp_path, capsy
     assert "RELAY_SHARED_ROOT" in err
 
 
-def test_init_role_host_rejected_with_migration_hint(monkeypatch, tmp_path, capsys):
-    """v0.6: --role host was removed. Init must refuse with a migration line."""
-    repo = tmp_path / "myproj"
-    _init_git_repo(repo)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(role="host"))
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "removed in v0.6" in err
-    # Suggest the new explicit-flags form with the right sync value.
-    assert "--sync rsync" in err
-
-
-def test_init_role_remote_rejected_with_migration_hint(monkeypatch, tmp_path, capsys):
-    """v0.6: --role remote was removed; mapping must hint --sync none."""
-    repo = tmp_path / "myproj"
-    _init_git_repo(repo)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(role="remote"))
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "removed in v0.6" in err
-    assert "--sync none" in err
-
-
 def test_init_hints_lead_with_same_host_and_flag_alternatives(monkeypatch, tmp_path, capsys):
-    """v0.6: missing .envrc.<hostname> hint mentions same-host AND the explicit flags."""
+    """Missing .envrc.<hostname> hint mentions same-host AND the explicit flags."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
@@ -135,15 +108,14 @@ def test_init_hints_lead_with_same_host_and_flag_alternatives(monkeypatch, tmp_p
     rc = relay.cmd_init(_args())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "--role same-host" in out
+    assert "--same-host" in out
     assert "--author" in out and "--peer" in out and "--sync" in out
-    # Legacy --role host/remote should NOT appear in hints anymore.
-    assert "--role host" not in out
-    assert "--role remote" not in out
+    # The retired --role flag must not reappear in hints.
+    assert "--role" not in out
 
 
 def test_init_same_host_emits_direnv_aware_next_step(monkeypatch, tmp_path, capsys):
-    """After --role same-host copies envrc, output names direnv or source."""
+    """After --same-host copies envrc, output names direnv or source."""
     import shutil as _shutil
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
@@ -151,7 +123,7 @@ def test_init_same_host_emits_direnv_aware_next_step(monkeypatch, tmp_path, caps
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
     monkeypatch.setattr(_shutil, "which", lambda name: "/fake/direnv" if name == "direnv" else None)
     monkeypatch.setattr(relay.shutil, "which", lambda name: "/fake/direnv" if name == "direnv" else None)
-    rc = relay.cmd_init(_args(role="same-host"))
+    rc = relay.cmd_init(_args(same_host=True))
     assert rc == 0
     out = capsys.readouterr().out
     assert "direnv allow" in out
@@ -165,20 +137,20 @@ def test_init_same_host_emits_direnv_aware_next_step(monkeypatch, tmp_path, caps
     (repo / f".envrc.{hostname}").unlink()
     monkeypatch.setattr(relay.shutil, "which", lambda name: None)
     capsys.readouterr()
-    rc = relay.cmd_init(_args(role="same-host"))
+    rc = relay.cmd_init(_args(same_host=True))
     assert rc == 0
     out = capsys.readouterr().out
     assert "source .envrc" in out
     assert "install direnv" in out
 
 
-def test_init_role_same_host_copies_template(monkeypatch, tmp_path, capsys):
-    """v0.5: --role same-host copies envrc.same-host.example to .envrc.<hostname>."""
+def test_init_same_host_copies_template(monkeypatch, tmp_path, capsys):
+    """--same-host copies envrc.same-host.example to .envrc.<hostname>."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(role="same-host"))
+    rc = relay.cmd_init(_args(same_host=True))
     assert rc == 0
     hostname = relay._hostname_short()
     target = repo / f".envrc.{hostname}"
@@ -187,8 +159,8 @@ def test_init_role_same_host_copies_template(monkeypatch, tmp_path, capsys):
     # Defining marks of the same-host template:
     assert "RELAY_SYNC=none" in body
     assert "RELAY_AUTHOR=" in body
-    # The same-host template MUST NOT set the legacy RELAY_ROLE.
-    assert "RELAY_ROLE=" not in body
+    # The same-host template must be RELAY_SYNC-first; no retired RELAY_ROLE.
+    assert "RELAY_ROLE" not in body
     # Dispatcher must also exist.
     assert (repo / ".envrc").is_file()
 
@@ -244,7 +216,7 @@ def test_same_host_template_produces_distinct_identities_on_one_hostname(monkeyp
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    assert relay.cmd_init(_args(role="same-host")) == 0
+    assert relay.cmd_init(_args(same_host=True)) == 0
     target = repo / f".envrc.{relay._hostname_short()}"
     body = target.read_text()
 
@@ -276,7 +248,7 @@ def test_same_host_template_invalid_author_unsets_peer(monkeypatch, tmp_path):
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    assert relay.cmd_init(_args(role="same-host")) == 0
+    assert relay.cmd_init(_args(same_host=True)) == 0
     target = repo / f".envrc.{relay._hostname_short()}"
     body = target.read_text()
 
@@ -322,11 +294,10 @@ def test_init_hint_lists_same_host_first(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_init(_args())
     assert rc == 0
     out = capsys.readouterr().out
-    # v0.6: same-host is the only --role option in the hint; the explicit
-    # --author/--peer/--sync trio is the secondary path.
-    assert "--role same-host" in out
-    assert "--role host" not in out
-    assert "--role remote" not in out
+    # same-host leads the hint; the explicit --author/--peer/--sync trio is
+    # the secondary path. The retired --role flag must not appear.
+    assert "--same-host" in out
+    assert "--role" not in out
     assert "--author" in out and "--peer" in out and "--sync" in out
 
 
@@ -344,30 +315,11 @@ def test_init_suppresses_envrc_nag_when_sync_env_set(monkeypatch, tmp_path, caps
     rc = relay.cmd_init(_args())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "--role" not in out
+    assert "--same-host" not in out
     assert "not found" not in out
 
 
-def test_init_suppresses_envrc_nag_when_legacy_role_env_set(monkeypatch, tmp_path, capsys):
-    """If the user still has RELAY_ROLE set (pre-v0.6 envrc), init does NOT
-    spam template-setup advice. They need a migration edit, not a template;
-    preflight surfaces the migration hint separately. init stays quiet here."""
-    repo = tmp_path / "myproj"
-    _init_git_repo(repo)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch,
-                  RELAY_SHARED_ROOT=str(repo / ".shared"),
-                  RELAY_ROLE="host")
-    hostname = relay._hostname_short()
-    assert not (repo / f".envrc.{hostname}").exists()  # precondition
-    rc = relay.cmd_init(_args())
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "--role" not in out
-    assert "not found" not in out
-
-
-# v0.6: new explicit-flags init tests.
+# Explicit-flags init tests.
 
 def test_init_author_peer_sync_renders_envrc(monkeypatch, tmp_path, capsys):
     """`relay init --author X --peer Y --sync none` writes a working envrc."""
@@ -402,13 +354,13 @@ def test_init_author_peer_sync_rsync_advises_remote_vars(monkeypatch, tmp_path, 
     assert "RELAY_REMOTE_SSH" in err
 
 
-def test_init_role_and_author_are_mutually_exclusive(monkeypatch, tmp_path, capsys):
-    """Pick one: --role same-host OR --author/--peer/--sync."""
+def test_init_same_host_and_author_are_mutually_exclusive(monkeypatch, tmp_path, capsys):
+    """Pick one: --same-host OR --author/--peer/--sync."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(role="same-host", author="codex", peer="claude", sync="none"))
+    rc = relay.cmd_init(_args(same_host=True, author="codex", peer="claude", sync="none"))
     assert rc == 2
     err = capsys.readouterr().err
     assert "mutually exclusive" in err

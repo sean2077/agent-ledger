@@ -19,7 +19,7 @@ def assert_no_deleted_envrc_template_refs(text: str, label: str) -> None:
     for needle in DELETED_V05_ENVRC_TEMPLATES:
         assert needle not in text, (
             f"{label} still references deleted v0.5 path {needle!r}; "
-            "update guidance to use `relay init --role same-host` or "
+            "update guidance to use `relay init --same-host` or "
             "`relay init --author/--peer/--sync`"
         )
 
@@ -124,7 +124,7 @@ def test_committed_envrc_does_not_reference_deleted_v05_templates():
     """F2/F3: committed .envrc guidance must not point at deleted templates."""
     text = (ROOT / ".envrc").read_text(encoding="utf-8")
     assert_no_deleted_envrc_template_refs(text, ".envrc")
-    assert "relay init --role same-host" in text
+    assert "relay init --same-host" in text
     assert "relay init --author <name> --peer <name> --sync <none|rsync>" in text
 
 
@@ -320,16 +320,19 @@ def test_skill_opening_does_not_call_protocol_a_no_autopilot_loop():
 
 
 def test_skill_does_not_imply_relay_role_inference_fallback():
-    """Finding C2: SKILL.md L264 used to say preflight infers RELAY_SYNC=none
-    when neither RELAY_SYNC nor RELAY_ROLE is set. _resolve_sync no longer
-    consults RELAY_ROLE for inference (since v0.6); only the migration-fail
-    path remains. Wording must not imply a fallback that doesn't exist."""
+    """Finding C2: SKILL.md once implied preflight infers RELAY_SYNC=none when
+    neither RELAY_SYNC nor RELAY_ROLE is set. RELAY_ROLE is fully retired —
+    only RELAY_SYNC matters for inference. Wording must not resurrect it."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
     # The exact old phrasing
     bad = "neither `RELAY_SYNC` nor `RELAY_ROLE` is set"
     assert bad not in text, (
         f"SKILL.md still implies RELAY_ROLE as an inference fallback "
-        f"({bad!r}); since v0.6 only RELAY_SYNC matters for inference."
+        f"({bad!r}); only RELAY_SYNC matters for inference."
+    )
+    # RELAY_ROLE must not appear anywhere in the skill surface anymore.
+    assert "RELAY_ROLE" not in text, (
+        "SKILL.md still mentions the retired RELAY_ROLE var"
     )
 
 

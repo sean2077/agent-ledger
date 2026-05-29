@@ -48,7 +48,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.10.1"
+__version__ = "0.11.0"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -327,7 +327,6 @@ def _preflight_exit_code(checks: list[dict]) -> int:
 
 @dataclasses.dataclass
 class Env:
-    role: Optional[str]
     author: Optional[str]
     peer: Optional[str]
     shared_root: Optional[Path]
@@ -335,8 +334,8 @@ class Env:
     remote_ssh: Optional[str]
     remote_path: Optional[str]
     # `sync_raw` is the literal value from RELAY_SYNC (or None if unset);
-    # `sync_source` is one of "env" | "role-alias" | "shape-a-infer" | None,
-    # so preflight can warn appropriately. Resolution lives in `_resolve_sync`.
+    # `sync_source` is one of "env" | "shape-a-infer" | None, so preflight can
+    # warn appropriately. Resolution lives in `_resolve_sync`.
     sync_raw: Optional[str] = None
 
 
@@ -347,7 +346,6 @@ def load_env() -> Env:
     shared = os.environ.get("RELAY_SHARED_ROOT")
     shared_path = Path(shared).expanduser().resolve() if shared else None
     return Env(
-        role=os.environ.get("RELAY_ROLE") or None,
         author=os.environ.get("RELAY_AUTHOR") or None,
         peer=os.environ.get("RELAY_PEER") or None,
         shared_root=shared_path,
@@ -360,22 +358,15 @@ def load_env() -> Env:
 
 def _resolve_sync(env: Env, *, is_shape_a: bool) -> tuple[Optional[str], str]:
     """Return (effective_sync, source) where source is 'env', 'shape-a-infer',
-    'env-invalid', 'role-removed', or 'unset'. `effective_sync` is in
-    SYNC_VALUES or None.
+    'env-invalid', or 'unset'. `effective_sync` is in SYNC_VALUES or None.
 
     Precedence: explicit RELAY_SYNC wins; else shape-A infers `none`; else
-    unset. The legacy RELAY_ROLE alias was removed in v0.6 — if the user
-    still has RELAY_ROLE set but no RELAY_SYNC, we surface a specific
-    'role-removed' source so the caller can emit a clear migration hint
-    rather than a generic 'unset' failure.
+    unset.
     """
     if env.sync_raw is not None:
         if env.sync_raw in SYNC_VALUES:
             return env.sync_raw, "env"
         return None, "env-invalid"
-    if env.role:
-        # Legacy var still in the user's envrc — refuse rather than guess.
-        return None, "role-removed"
     if is_shape_a:
         return "none", "shape-a-infer"
     return None, "unset"
@@ -844,7 +835,7 @@ def _print_env_template() -> None:
         "  This project uses a per-host .envrc.<hostname> file dispatched\n"
         "  by the committed .envrc. Pick one of:\n\n"
         "    # same-host (two agents on one machine):\n"
-        "    relay init --role same-host\n"
+        "    relay init --same-host\n"
         "    source .envrc                           # codex terminal (default)\n"
         "    # in the OTHER terminal:\n"
         "    export RELAY_AUTHOR=claude && source .envrc\n\n"
@@ -861,9 +852,8 @@ def cmd_preflight(args) -> int:
     env = load_env()
     out: dict = {"exit_code": 0, "env": {}, "checks": []}
 
-    # Detect project shape unconditionally (independent of RELAY_ROLE, per
-    # codex seq 4 ack on D1 — otherwise same-host setups without a legacy
-    # role never reach the shape-A inference path):
+    # Detect project shape unconditionally so same-host setups still reach the
+    # shape-A inference path:
     #   shape A: PROJECT_ROOT is itself a fuse mount → rsync structurally
     #            inapplicable; RELAY_REMOTE_SSH / RELAY_REMOTE_PATH irrelevant.
     #   shape B: PROJECT_ROOT is local; only .shared/ may be mounted.
@@ -886,42 +876,16 @@ def cmd_preflight(args) -> int:
             "detail": "set" if val else "not set",
         })
 
-    # Sync resolution check — surfaces effective sync mode plus migration hints.
+    # Sync resolution check — surfaces effective sync mode plus fix-it hints.
     if sync_source == "env-invalid":
         out["checks"].append({
             "name": "env.RELAY_SYNC", "status": "fail",
             "detail": f"RELAY_SYNC={env.sync_raw!r} invalid; expected one of "
                       f"{sorted(SYNC_VALUES)}",
         })
-    elif sync_source == "role-removed":
-        # v0.6 breaking change: RELAY_ROLE alias removed. Give the user the
-        # exact migration line. Shape-A carve-out: if the project root is a
-        # fuse mount, rsync is structurally inapplicable regardless of which
-        # legacy role they had, so the hint must point at `none`, not the
-        # default host->rsync mapping (would contradict the project.shape
-        # check in the same output).
-        if is_shape_a:
-            target = "none"
-            extra = (
-                " (shape A detected: the project root is a fuse mount, so "
-                "rsync is structurally inapplicable on this side — RELAY_SYNC=none "
-                "is the right call regardless of the legacy role value)"
-            )
-        else:
-            target = "rsync" if env.role == "host" else "none"
-            extra = ""
-        out["checks"].append({
-            "name": "env.RELAY_ROLE.removed", "status": "fail",
-            "detail": (
-                f"RELAY_ROLE={env.role!r} is no longer recognized (removed in v0.6). "
-                f"Migrate: replace it with `export RELAY_SYNC={target}` in your "
-                f".envrc.<hostname>. Standard mapping: host -> RELAY_SYNC=rsync, "
-                f"remote -> RELAY_SYNC=none.{extra}"
-            ),
-        })
     elif sync_effective is None:
-        # Neither RELAY_SYNC nor legacy var set, and shape detection
-        # could not infer (shape B or no git toplevel). Fail with a hint.
+        # RELAY_SYNC unset and shape detection could not infer (shape B or
+        # no git toplevel). Fail with a hint.
         hint = (
             "set RELAY_SYNC=rsync (this side owns rsync transport) "
             "or RELAY_SYNC=none (this side does not sync)"
@@ -1092,19 +1056,13 @@ def _hostname_short() -> str:
     return os.uname().nodename.split(".")[0]
 
 
-def _copy_envrc_template(role: str, project_root: Path) -> tuple[Path, bool]:
-    """Copy envrc.<role>.example to <project>/.envrc.<hostname>. Returns (target, created).
+def _copy_same_host_template(project_root: Path) -> tuple[Path, bool]:
+    """Copy envrc.same-host.example to <project>/.envrc.<hostname>.
 
-    v0.6: only `role == "same-host"` is supported. The legacy `host`/`remote`
-    templates were removed; cmd_init handles those values with an explicit
-    migration error before this helper is called.
+    Returns (target, created). Used by `relay init --same-host`: one file
+    serves both terminals via a per-terminal RELAY_AUTHOR override.
     """
-    if role != "same-host":
-        raise SystemExit(
-            f"relay init: --role {role!r} no longer maps to a template (legacy host/remote "
-            "templates removed in v0.6; expected `same-host` here)"
-        )
-    template = RELAY_PACKAGE_DIR / "templates" / f"envrc.{role}.example"
+    template = RELAY_PACKAGE_DIR / "templates" / "envrc.same-host.example"
     if not template.exists():
         raise SystemExit(f"relay init: template not found: {template}")
     target = project_root / f".envrc.{_hostname_short()}"
@@ -1150,30 +1108,16 @@ def cmd_init(args) -> int:
     elif existed:
         print(f"relay init: shared root already initialized at {root}")
 
-    role = getattr(args, "role", None)
+    same_host = getattr(args, "same_host", False)
     author = getattr(args, "author", None)
     peer = getattr(args, "peer", None)
     sync = getattr(args, "sync", None)
 
-    # v0.6: --role host|remote removed. Catch the legacy invocation early
-    # so users hit a clear migration message, not a "template not found".
-    if role in ("host", "remote"):
-        mapping = {"host": "rsync", "remote": "none"}
-        print(
-            f"relay init: --role {role!r} was removed in v0.6. "
-            f"Use the explicit flags instead:\n"
-            f"  relay init --author <name> --peer <name> --sync {mapping[role]}\n"
-            f"or for two terminals on one machine:\n"
-            f"  relay init --role same-host",
-            file=sys.stderr,
-        )
-        return 2
-
-    # --role same-host and the explicit flag set are mutually exclusive.
+    # --same-host and the explicit flag set are mutually exclusive.
     explicit_flags = any(v is not None for v in (author, peer, sync))
-    if role == "same-host" and explicit_flags:
+    if same_host and explicit_flags:
         print(
-            "relay init: --role same-host is mutually exclusive with "
+            "relay init: --same-host is mutually exclusive with "
             "--author/--peer/--sync. Pick one.",
             file=sys.stderr,
         )
@@ -1181,14 +1125,14 @@ def cmd_init(args) -> int:
 
     envrc_just_created = False
     dispatcher_just_created = False
-    if role == "same-host" and project_root:
+    if same_host and project_root:
         # Same-host setup: copy the template (handles per-terminal override).
         dispatcher_target, dispatcher_just_created = _copy_envrc_dispatcher(project_root)
         if dispatcher_just_created:
             print(f"relay init: created {dispatcher_target} (from envrc.dispatcher.example)")
         else:
             print(f"relay init: {dispatcher_target} already present")
-        envrc_target, envrc_just_created = _copy_envrc_template("same-host", project_root)
+        envrc_target, envrc_just_created = _copy_same_host_template(project_root)
         if envrc_just_created:
             print(f"relay init: created {envrc_target} (from envrc.same-host.example)")
         else:
@@ -1196,11 +1140,11 @@ def cmd_init(args) -> int:
     elif explicit_flags and project_root:
         # Explicit flag path: render the envrc body inline. No template copy.
         if not author:
-            print("relay init: --author is required with --peer/--sync (or use --role same-host)",
+            print("relay init: --author is required with --peer/--sync (or use --same-host)",
                   file=sys.stderr)
             return 2
         if not peer:
-            print("relay init: --peer is required with --author/--sync (or use --role same-host)",
+            print("relay init: --peer is required with --author/--sync (or use --same-host)",
                   file=sys.stderr)
             return 2
         # Finding 8: --author / --peer values land verbatim in a sourceable
@@ -1248,13 +1192,13 @@ def cmd_init(args) -> int:
                   "are not exported. Add them to your shell before `source .envrc` "
                   "or `relay sync` will refuse.", file=sys.stderr)
 
-    if project_root and not role and not explicit_flags and not env.role and not env.sync_raw:
+    if project_root and not same_host and not explicit_flags and not env.sync_raw:
         # Nag only when no env is loaded yet AND .envrc.<hostname> is missing.
         hostname = _hostname_short()
         if not (project_root / f".envrc.{hostname}").exists():
             print(f"\nhint: .envrc.{hostname} not found.")
             print("  same-host (two agents on one machine):")
-            print("    relay init --role same-host")
+            print("    relay init --same-host")
             print("  explicit per-side flags:")
             print("    relay init --author codex --peer claude --sync none   # local side")
             print("    relay init --author codex --peer claude --sync rsync  # rsync owner")
@@ -1267,7 +1211,7 @@ def cmd_init(args) -> int:
         else:
             print(f"next: cd {project_root} && source .envrc")
             print("  (install direnv for auto-load on cd)")
-        if role == "same-host":
+        if same_host:
             print("  in the OTHER terminal: export RELAY_AUTHOR=claude && source .envrc")
             print("  (defaults to RELAY_AUTHOR=codex; peer derived automatically)")
 
@@ -1277,9 +1221,9 @@ def cmd_init(args) -> int:
 def _render_envrc_body(author: str, peer: str, sync: str) -> str:
     """Render a per-host .envrc body from explicit identity + sync flags.
 
-    Used by `relay init --author --peer --sync` (the v0.6+ path that doesn't
-    go through a template file). Same shape as envrc.same-host.example but
-    with the author/peer/sync pinned by the caller instead of derived.
+    Used by `relay init --author --peer --sync` (the path that doesn't go
+    through a template file). Same shape as envrc.same-host.example but with
+    the author/peer/sync pinned by the caller instead of derived.
     """
     body = [
         f"# Per-host relay config generated by `relay init --author {author} "
@@ -2396,20 +2340,6 @@ def cmd_sync(args) -> int:
         elif sync_source == "shape-a-infer":
             reason = (f"$PROJECT_ROOT={project_root} is a fuse mount (shape A); "
                       "no sync needed (edits land on the remote directly)")
-        elif sync_source == "role-removed":
-            # Shape-A carve-out: rsync is structurally inapplicable when the
-            # project root IS the fuse mount, so don't suggest RELAY_SYNC=rsync
-            # even if the legacy role was `host` — that'd contradict the
-            # topology preflight surfaces in the same checkout.
-            if is_shape_a:
-                reason = (f"RELAY_ROLE={env.role!r} is no longer recognized "
-                          "(removed in v0.6) and this is shape A (project root "
-                          "is a fuse mount; rsync structurally inapplicable); "
-                          "set RELAY_SYNC=none instead — no sync is needed here")
-            else:
-                mapping = "rsync" if env.role == "host" else "none"
-                reason = (f"RELAY_ROLE={env.role!r} is no longer recognized "
-                          f"(removed in v0.6); set RELAY_SYNC={mapping} instead")
         else:
             reason = ("RELAY_SYNC not set; "
                       "set RELAY_SYNC=rsync on the side that owns the rsync transport")
@@ -3780,14 +3710,14 @@ def build_parser() -> argparse.ArgumentParser:
     pp.set_defaults(func=cmd_preflight)
 
     pi = sub.add_parser("init", help="Idempotently create RELAY_SHARED_ROOT + sentinel.")
-    pi.add_argument("--role", choices=["host", "remote", "same-host"], default=None,
-                    help="`same-host` copies envrc.same-host.example to .envrc.<hostname>. "
-                         "`host`/`remote` were removed in v0.6 — they now print a migration "
-                         "hint and exit. Use --author/--peer/--sync for the explicit per-side "
-                         "config.")
+    pi.add_argument("--same-host", action="store_true",
+                    help="Two agents on one machine: copy envrc.same-host.example to "
+                         ".envrc.<hostname> (one file serves both terminals via a "
+                         "per-terminal RELAY_AUTHOR override). Mutually exclusive with "
+                         "--author/--peer/--sync.")
     pi.add_argument("--author", default=None,
                     help="Agent identity for this side (e.g. codex, claude). Renders "
-                         ".envrc.<hostname> inline; mutually exclusive with --role same-host.")
+                         ".envrc.<hostname> inline; mutually exclusive with --same-host.")
     pi.add_argument("--peer", default=None,
                     help="Peer agent identity. Required with --author.")
     pi.add_argument("--sync", default=None, choices=["none", "rsync"],

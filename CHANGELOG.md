@@ -4,6 +4,52 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.11.0 — 2026-05-29
+
+Pre-1.0 cleanup: the `role` concept is fully retired. v0.6 split the old
+unified "role" into explicit `RELAY_SYNC` (sync capability) + an
+`--author/--peer/--sync` setup path, but left behind a migration/warning
+layer and the `--role` flag name. Both are now gone. There is no `role`
+anywhere in the CLI, env, docs, or tests.
+
+### Breaking changes
+
+- **`RELAY_ROLE` is no longer recognized at all.** v0.6 kept a fail-level
+  `env.RELAY_ROLE.removed` preflight check (and matching `relay sync`
+  refusal) that detected a leftover `RELAY_ROLE=host|remote` and printed a
+  migration hint. That check is removed. `RELAY_ROLE` is now an ordinary
+  unknown environment variable: ignored. If your `.envrc.<hostname>` still
+  exports it, delete the line and set `RELAY_SYNC` instead
+  (`host -> RELAY_SYNC=rsync`, `remote -> RELAY_SYNC=none`); otherwise
+  preflight just falls through to the normal "RELAY_SYNC not set" failure
+  outside shape A.
+
+- **`relay init --role` is removed; use `--same-host`.** The only live
+  value (`--role same-host`) is replaced by a boolean `--same-host` flag
+  with identical behavior (copies `envrc.same-host.example` to
+  `.envrc.<hostname>`; one file serves both terminals via a per-terminal
+  `RELAY_AUTHOR` override). The already-rejected `--role host|remote` are
+  gone from the parser entirely — passing `--role` is now an
+  "unrecognized arguments" error. `--same-host` stays mutually exclusive
+  with `--author/--peer/--sync`.
+
+### Internals
+
+- `Env.role` field and the `RELAY_ROLE` read in `load_env` removed.
+- `_resolve_sync` lost its `role-removed` source; it now returns only
+  `env` / `shape-a-infer` / `env-invalid` / `unset`.
+- `cmd_preflight` and `cmd_sync` lost their `role-removed` arms.
+- `_copy_envrc_template(role, ...)` is now `_copy_same_host_template(...)`.
+- Docs (`README`, `SKILL.md`, `docs/why.md`), the committed `.envrc`, and
+  `envrc.dispatcher.example` drop all `--role` / `RELAY_ROLE` references.
+  The historical 0.6.0 migration table below is preserved as a record.
+
+### Notes
+
+- Tests: the v0.6 migration tests (preflight/sync/init `RELAY_ROLE` and
+  `--role host|remote` arms) were deleted; two new tests assert a leftover
+  `RELAY_ROLE` is now inert in `preflight` and `sync`. Suite 300 -> 294.
+
 ## 0.10.1 — 2026-05-29
 
 Hooks robustness + consistency, driven by the first two entries the

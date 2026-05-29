@@ -75,7 +75,7 @@ Before any other action:
 
 `init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. If `RELAY_SHARED_ROOT` is unset, `init` defaults to `<git_toplevel>/.shared`; outside a git repo it fails clearly.
 
-For the first time on a machine, the user picks one of two setup paths: `relay init --role same-host` (two terminals on one box) or `relay init --author <name> --peer <name> --sync <none|rsync>` (any other topology). The skill prelude runs the no-arg form; if init prints a setup hint, surface it to the user — that's the only path the prelude can't auto-resolve.
+For the first time on a machine, the user picks one of two setup paths: `relay init --same-host` (two terminals on one box) or `relay init --author <name> --peer <name> --sync <none|rsync>` (any other topology). The skill prelude runs the no-arg form; if init prints a setup hint, surface it to the user — that's the only path the prelude can't auto-resolve.
 
 Interpret the preflight exit code as three levels:
 
@@ -89,8 +89,6 @@ Interpret the preflight exit code as three levels:
 - `fs.mtime_monotonic` "mtime unchanged …coarse resolution" — typical on sshfs with attribute caching; the protocol uses `.sha256` + `.ready` sentinels, not mtime.
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
-
-`env.RELAY_ROLE.removed` is a **fail-level** check (exit 2) introduced in v0.6: if the user's envrc still sets `RELAY_ROLE=host|remote` from the v0.4-era alias, preflight refuses with an explicit migration line (`host -> RELAY_SYNC=rsync`, `remote -> RELAY_SYNC=none`). The fix is one envrc edit.
 
 `fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which `init` handles), `project.consistency` mismatch, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken.
 
@@ -243,7 +241,7 @@ Report to user:
 
 ## Intent: sync
 
-Only on the side with `RELAY_SYNC=rsync` (the side that owns the rsync transport). The other side, and any same-host setup (`RELAY_SYNC=none`), cannot run sync. (v0.5's `RELAY_ROLE=host` alias was removed in v0.6 — migration table is in `CHANGELOG.md`.)
+Only on the side with `RELAY_SYNC=rsync` (the side that owns the rsync transport). The other side, and any same-host setup (`RELAY_SYNC=none`), cannot run sync.
 
 ```bash
 "$RELAY" sync push --dry-run    # ALWAYS first
@@ -261,7 +259,7 @@ Pull works the same way:
 
 `--delete` mirrors deletions; **off by default**. Only enable when the user explicitly says "mirror" or "delete extras".
 
-If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole project mounted from the other side). No sync needed; edits land on the remote filesystem directly. `relay preflight` infers `RELAY_SYNC=none` automatically in shape A when `RELAY_SYNC` is unset. (`RELAY_ROLE` was removed in v0.6 and is no longer consulted for inference — the only remaining `RELAY_ROLE` code path is the fail-level migration check.)
+If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole project mounted from the other side). No sync needed; edits land on the remote filesystem directly. `relay preflight` infers `RELAY_SYNC=none` automatically in shape A when `RELAY_SYNC` is unset.
 
 ---
 
@@ -295,7 +293,6 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay publish` rejects with "body is empty"**: scaffold body is the placeholder comment; replace it with real content.
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
 - **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` or unset). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
-- **`relay preflight` fails `env.RELAY_ROLE.removed`**: user's envrc still uses the v0.5 alias. Tell them to replace it per the migration table — `RELAY_ROLE=host -> RELAY_SYNC=rsync`, `RELAY_ROLE=remote -> RELAY_SYNC=none` — then `source .envrc`.
 - **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts older than the threshold. Doctor never signals a live PID.
 
 ## Filing issues (feedback ledger)

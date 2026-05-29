@@ -91,8 +91,8 @@ vs shape B).
 
 - **Same-host.** One machine, one checkout, two terminals. Both agents
   see the exact same files via the same kernel. `RELAY_SYNC=none` on
-  both sides; no rsync involved. This is the v0.5+ default recommendation
-  and what `relay init --role same-host` sets up. Identity per terminal
+  both sides; no rsync involved. This is the default recommendation
+  and what `relay init --same-host` sets up. Identity per terminal
   is picked from a pre-source `export RELAY_AUTHOR=...`.
 - **Two-machine.** Two boxes. One side runs Codex CLI, the other runs
   Claude Code. The ledger has to be reachable from both. Combine with
@@ -126,9 +126,7 @@ to mount or sync. Shape A and shape B are exclusive to the two-machine
 case.
 
 In every shape-B case, an explicit `RELAY_SYNC` is required; preflight
-will not silently infer `none` outside shape A. (The v0.5-era
-`RELAY_ROLE=host|remote` alias was removed in v0.6; see `CHANGELOG.md`
-for the migration table.)
+will not silently infer `none` outside shape A.
 
 ## Why a file ledger beats copy-paste
 

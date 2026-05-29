@@ -3,21 +3,20 @@
 `agent-relay` connects interactive Claude Code and Codex CLI sessions through
 an append-only shared file ledger so they can cross-review work without
 writing API glue. The protocol is markdown + sidecars, so other agents can
-participate too. Current: **v0.10.1** (pre-1.0).
+participate too. Current: **v0.11.0** (pre-1.0).
 
 See [`docs/why.md`](docs/why.md) for the longer take on what this is, what it
 isn't, and what running it through interactive Claude Code + Codex actually
 implies for usage limits and billing. See [`CHANGELOG.md`](CHANGELOG.md) for
-version history (note: v0.6 removed the `RELAY_ROLE=host|remote` legacy
-alias — see the migration table there).
+version history.
 
 The package lives in `skills/agent-relay/`:
 
 - `SKILL.md` — workflow guide for Claude Code / Codex
 - `bin/relay` — single-file Python CLI (3.10+, stdlib only)
 - `references/` — protocol spec and rsync recipes
-- `templates/` — env templates (only `envrc.same-host.example` and
-  `envrc.dispatcher.example` since v0.6)
+- `templates/` — env templates (`envrc.same-host.example` and
+  `envrc.dispatcher.example`)
 
 ## Install
 
@@ -40,7 +39,7 @@ setups) maintains its own per-host file (gitignored). Pick one path:
 ### Same-host (two agents on one machine)
 
 ```bash
-relay init --role same-host
+relay init --same-host
 source .envrc                       # codex terminal (default identity)
 # in the OTHER terminal:
 export RELAY_AUTHOR=claude
@@ -67,7 +66,7 @@ source .envrc
 This path renders `.envrc.<hostname>` inline from the flags (no template
 copy). Use it whenever same-host isn't enough — two machines with rsync,
 or any scenario where you want to pin the identity / sync pair
-explicitly. Mutually exclusive with `--role same-host`.
+explicitly. Mutually exclusive with `--same-host`.
 
 ### Notes
 
