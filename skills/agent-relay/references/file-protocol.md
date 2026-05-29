@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.8.0; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.9.0; session schema v3.
 
 ## 1. Directory layout
 
@@ -213,16 +213,19 @@ If you need to mark something as closed/cancelled/failed/timed_out, write a *new
 3. If `.draft/NNN-*.md` already exists from another concurrent claim, increment seq and retry. Up to 10 total attempts with `random.uniform(0.01, 0.05)` jitter between attempts after the first.
 4. After exhausting 10 attempts, exit 2. The stderr message points at `relay doctor` so the operator can inspect for abandoned drafts before retrying.
 
-`relay publish`:
+`relay publish` (v0.9 exclusive-reservation semantics):
 
 1. Validate the draft (see §8).
-2. Atomically rename `.draft/NNN-*.md` → `NNN-*.md`.
-3. If the published path is already taken (extremely rare), increment seq and retry. Up to 10 total attempts with the same jitter as claim.
-4. After exhausting 10 attempts, exit 2 with the same `relay doctor` recovery hint.
+2. **Reserve the final `.md` path exclusively** via `open(..., O_CREAT|O_EXCL)` (`atomic_reserve_text`), write the rendered content into the reserved fd, and fsync. This is the concurrency primitive — a second publisher racing the same seq gets `FileExistsError`, never a silent clobber. (v0.8 used tmp+`os.replace`, which is atomic but *unconditional*: two publishers could both pass an `exists()` check and the later `os.replace` would overwrite the earlier `.md`. Fixed in v0.9.)
+3. On `FileExistsError`, increment seq and retry, emitting a `seq NNN taken by concurrent publisher, retrying as NNN` line to stderr so the bump is observable. Up to 10 total attempts with `random.uniform(0.05, 0.20)` jitter.
+4. Write sidecars **after** the visible `.md`: compute sha256 → `<published>.md.sha256`, then touch `<published>.ready`, then fsync the session dir. The original draft is unlinked once the triad is in place.
+5. After exhausting 10 attempts, exit 2 with the `relay doctor` recovery hint.
+
+**Incomplete-triad invisibility.** Between step 2 and step 4 the `.md` exists on disk without its `.sha256`/`.ready` siblings. This partial state is **invisible to protocol-compliant readers**: `list_published()` (and everything that funnels through it — `status`, wait, sessions-list, latest-artifact helpers) returns a `.md` only when both `.ready` and `.md.sha256` exist AND the re-hashed `.md` matches the recorded digest. A reader MUST gate on `.ready` + sha256 match; it MUST NOT treat a bare `NNN-*.md` as published.
 
 ### 7.2 No locks
 
-POSIX same-directory `rename(2)` is atomic. Sequence collisions are extremely rare with human-driven turns. No `fcntl` advisory locks, no `mkdir` lease locks — protocol relies on rename atomicity and the seq retry.
+Exclusive `O_CREAT|O_EXCL` final-path reservation is the only concurrency primitive; sequence collisions are resolved by the seq-bump retry above. No `fcntl` advisory locks, no `mkdir` lease locks. (Pre-v0.9 the protocol relied on `rename(2)` atomicity instead; the reservation form additionally prevents the unconditional-overwrite race.)
 
 ## 8. Publish validation
 
@@ -236,14 +239,17 @@ POSIX same-directory `rename(2)` is atomic. Sequence collisions are extremely ra
 - `prompt_for_next` is empty or whitespace-only.
 - Body (everything after the frontmatter close `---`) is empty or whitespace-only.
 
+- `corrects` is set on a kind that may not carry it. Only `correction` (required) and `addendum` (optional) may set `corrects`; any other kind with a non-null `corrects` is rejected. A non-null `corrects` must be a positive int strictly less than the artifact's own `seq` (no self/future references).
+- The active `RELAY_AUTHOR` is unset, or does not equal the draft's `author`. Publish is the authorship boundary and fails closed when identity is missing or mismatched.
+
 On success:
 
 1. Frontmatter `status` flipped to `ready` (or honoring the author's choice of `closed/cancelled/failed/timed_out` if explicitly set).
 2. Frontmatter `created` filled with current ISO 8601 + timezone.
-3. Atomic rename to the published path.
-4. Compute sha256, write `<published>.sha256`.
+3. Exclusive `O_CREAT|O_EXCL` reservation of the published `.md` path, content written + fsync'd (see §7.1 for the concurrency rationale and the incomplete-triad invisibility guarantee).
+4. Compute sha256, write `<published>.md.sha256`.
 5. Touch `<published>.ready`.
-6. fsync the session dir.
+6. fsync the session dir; unlink the draft.
 
 `relay publish` refuses inactive sessions by default. The escape hatch is limited to terminal append-only notes: `--force --force-reason TEXT --status <closed|cancelled|failed|timed_out>`. The override reason is recorded as `force_reason: TEXT` in the published frontmatter.
 
@@ -302,13 +308,25 @@ POSIX file modes: `relay` creates files with `0600` and dirs with `0700` to alig
 
 ## 13. Active marker and multi-session recovery
 
-`relay bootstrap` writes `.shared/.active-session` with the session slug. The marker is an advisory fast path, but `preflight` treats mismatch as corruption:
+`relay bootstrap` writes `.shared/.active-session` with the session slug. The marker is the disambiguator for which active session is "current":
 
 ```
-.active-session exists iff exactly one flat session satisfies session_is_active()
-and the marker content equals that session slug
+With 0 active sessions  → no marker; resolution fails with "no active session".
+With 1 active session   → marker optional; resolution returns that session.
+With N>1 active sessions → marker REQUIRED to disambiguate; it must name one of
+                           the active sessions, and resolution returns it.
 ```
+
+`preflight` classifies the marker state (v0.9):
+
+- no marker + 0 active → pass
+- no marker + 1 active → pass (marker not needed)
+- no marker + N>1 active → **warn** (parallel mode; pass `--session-id` or set a marker)
+- marker naming an active session (whether 1 or one-of-N) → pass
+- marker naming a missing / no-longer-active session → **fail** (corruption)
+
+`resolve_active_session()` honors the marker to disambiguate when N>1 active sessions exist, so a preflight that passes implies default commands resolve to the same session (they no longer fail with "multiple active sessions" when a valid marker is present). If the marker names none of the active sessions, resolution still fails and names the candidates.
 
 `relay close` and terminal `relay publish --status ...` clear the marker when they make the marked session inactive.
 
-Parallel active sessions are exceptional. `relay bootstrap --force` may create one, but normal operations must then use `--session-id <session-id>`. `relay sessions list` lists all flat sessions and their category (`active`, `terminal`, `closed`, or `inactive`) without trying to resolve a single active session.
+Parallel active sessions are exceptional. `relay bootstrap --force` may create one. `relay sessions list` lists all flat sessions and their category (`active`, `terminal`, `closed`, or `inactive`) without trying to resolve a single active session.

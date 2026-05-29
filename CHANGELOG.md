@@ -8,8 +8,37 @@ the protocol stabilizes.
 
 Full-audit cleanup release. A cross-review session
 (`.shared/20260529-full-audit-cleanup/`) surfaced two BLOCKERs and
-seven MAJORs in the v0.8.0 surface. All are fixed in this version;
-suite went from 207 to 251 tests with regressions for each finding.
+seven MAJORs in the v0.8.0 surface. A follow-up independent
+verification session (`.shared/20260529-v090-cross-verify/`) where
+codex audited those fixes before push then found one more BLOCKER and
+four further issues in the v0.9.0 code itself. All are fixed in this
+version; suite went from 207 to 261 tests with regressions for each
+finding.
+
+### Fixed (codex cross-verification round, pre-push)
+
+- **BLOCKER** `relay draft set` could rewrite another author's draft.
+  The new fill primitive checked only path-under-`.draft/`, never
+  author ownership, reopening the authorship-forgery class at the new
+  write boundary (a peer can discover draft paths via `relay status`).
+  Now requires `RELAY_AUTHOR` and refuses when it != the draft author.
+- **MAJOR** `relay publish` skipped the author guard when
+  `RELAY_AUTHOR` was unset (`if env.author and ...` fail-open). Publish
+  is the authorship boundary and now fails closed on missing identity,
+  including the `--force` terminal-note path.
+- **MAJOR** `corrects` could be published on any kind, including
+  self-references (`plan` with `corrects: 1`). Now only
+  `correction`/`addendum` may carry it, value must be a positive int
+  strictly less than `seq`, enforced at claim, `draft set`, and publish.
+- **MINOR** `file-protocol.md` still described v0.8 atomic-rename
+  publish semantics; rewritten around the v0.9 exclusive
+  `O_CREAT|O_EXCL` reservation, sidecars-last ordering, and
+  incomplete-triad invisibility guarantee.
+- **MINOR** marker-disambiguated parallel mode passed preflight but
+  default commands still failed with "multiple active sessions".
+  `resolve_active_session()` now honors `.active-session` to
+  disambiguate when N>1 sessions are active, so preflight-pass implies
+  command-success.
 
 ### Added
 

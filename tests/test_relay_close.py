@@ -118,6 +118,11 @@ def test_close_preserves_multiple_active_error_when_closed_sentinel_exists(monke
         "close_reason": "preexisting", "participants": [],
     }))
     (closed / "CLOSED").write_text('reason = "preexisting"\n')
+    # _bootstrap wrote .active-session → 'first'. Finding 5 made a valid marker
+    # disambiguate, which would let close resolve+close 'first' instead of
+    # surfacing the ambiguity. Clear it so the genuine multiple-active error
+    # path (no disambiguator) is what's under test.
+    relay.clear_active_marker(shared)
     rc = relay.cmd_close(type("A", (), {"reason": "done", "outcome": None, "project": None})())
     err = capsys.readouterr().err
     assert rc == 2

@@ -283,6 +283,39 @@ def test_resolve_active_session_multiple_raises(monkeypatch, tmp_path):
         "created_at": "2099-01-01T00:00:00+00:00", "closed_at": None,
         "close_reason": None, "participants": [],
     }))
+    # bootstrap wrote .active-session → session 'a'. Clear it so we exercise
+    # the genuine no-disambiguator ambiguity (finding 5: a valid marker now
+    # disambiguates; see the next test for that path).
+    relay.clear_active_marker(shared)
     env = relay.load_env()
     with pytest.raises(SystemExit, match="multiple active"):
         relay.resolve_active_session(env)
+
+
+def test_resolve_active_session_marker_disambiguates_parallel(monkeypatch, tmp_path):
+    """Finding 5 (codex seq 2): with N>1 active sessions, a `.active-session`
+    marker naming one of them resolves to that session instead of raising —
+    so preflight-pass and command-success agree in parallel mode."""
+    shared = _setup_shared(monkeypatch, tmp_path)
+    relay.cmd_bootstrap(type("A", (), {"topic": "a", "title": None})())
+    first = relay.read_active_marker(shared)
+    assert first is not None
+    sess2 = shared / "20990101-other"
+    sess2.mkdir(parents=True)
+    (sess2 / "session.json").write_text(json.dumps({
+        "schema_version": 3, "project": "myproj", "session_id": "20990101-other",
+        "title": "x", "state": "active",
+        "created_at": "2099-01-01T00:00:00+00:00", "closed_at": None,
+        "close_reason": None, "participants": [],
+    }))
+    # marker still names the bootstrap session → resolve returns it.
+    assert relay.resolve_active_session(relay.load_env()).name == first
+
+    # Point the marker at the OTHER active session → resolve follows it.
+    relay.write_active_marker(shared, "20990101-other")
+    assert relay.resolve_active_session(relay.load_env()).name == "20990101-other"
+
+    # Marker naming a non-active session → still raises, naming candidates.
+    relay.write_active_marker(shared, "20990101-nonexistent")
+    with pytest.raises(SystemExit, match="multiple active"):
+        relay.resolve_active_session(relay.load_env())

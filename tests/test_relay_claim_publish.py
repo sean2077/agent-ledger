@@ -321,6 +321,158 @@ def test_publish_rejects_cross_author_env(monkeypatch, tmp_path, capsys):
     assert not pub_md.exists()
 
 
+def test_publish_rejects_missing_author_env(monkeypatch, tmp_path, capsys):
+    """Finding 2 (codex seq 2): publish must FAIL CLOSED when RELAY_AUTHOR is
+    unset. Pre-fix the guard was `if env.author and ...`, so an env-less
+    publish skipped the author check entirely and shipped the artifact."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+    monkeypatch.delenv("RELAY_AUTHOR", raising=False)
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "RELAY_AUTHOR is not set" in err
+    assert not (session / draft.name).exists()
+    assert draft.exists()
+
+
+def test_publish_force_terminal_still_requires_author_env(monkeypatch, tmp_path, capsys):
+    """Finding 2 (codex seq 2): the --force terminal-note path must not be a
+    backdoor around the missing-author guard."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "note", "in_reply_to": None, "project": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+    monkeypatch.delenv("RELAY_AUTHOR", raising=False)
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": "timed_out",
+        "force": True, "force_reason": "operator note",
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "RELAY_AUTHOR is not set" in err
+
+
+def test_draft_set_rejects_cross_author(monkeypatch, tmp_path, capsys):
+    """Finding 1 (codex seq 2, BLOCKER): draft set must enforce ownership.
+    A peer who discovers a draft path must not be able to rewrite another
+    author's draft. Repro: claim as codex, switch RELAY_AUTHOR=claude, set."""
+    session = _bootstrap(monkeypatch, tmp_path)  # author=codex
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "review", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    assert "codex" in draft.name
+    body_file = tmp_path / "b.txt"; body_file.write_text("injected body\n")
+    pfn_file = tmp_path / "p.txt"; pfn_file.write_text("injected pfn\n")
+    monkeypatch.setenv("RELAY_AUTHOR", "claude")
+    rc = relay.cmd_draft_set(type("A", (), {
+        "draft_path": str(draft),
+        "body_file": str(body_file), "prompt_for_next_file": str(pfn_file),
+        "sync_needed": False, "touched_path": [], "corrects": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "refusing to mutate draft authored by 'codex'" in err
+    # The draft body must be untouched (still the scaffold placeholder).
+    assert "injected body" not in draft.read_text()
+
+
+def test_draft_set_rejects_missing_author_env(monkeypatch, tmp_path, capsys):
+    """Finding 1 (codex seq 2): draft set with no RELAY_AUTHOR fails closed."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "review", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    body_file = tmp_path / "b.txt"; body_file.write_text("x\n")
+    monkeypatch.delenv("RELAY_AUTHOR", raising=False)
+    rc = relay.cmd_draft_set(type("A", (), {
+        "draft_path": str(draft),
+        "body_file": str(body_file), "prompt_for_next_file": None,
+        "sync_needed": False, "touched_path": [], "corrects": None,
+    })())
+    assert rc == 2
+    assert "RELAY_AUTHOR is not set" in capsys.readouterr().err
+
+
+def test_claim_rejects_corrects_on_non_correcting_kind(monkeypatch, tmp_path, capsys):
+    """Finding 3 (codex seq 2): --corrects is only valid for correction/addendum.
+    `relay claim --kind plan --corrects 1` must fail fast."""
+    _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": "plan", "in_reply_to": 1, "corrects": 1,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "corrects" in err.lower()
+
+
+def test_addendum_may_carry_corrects(monkeypatch, tmp_path, capsys):
+    """Finding 3 (codex seq 2): addendum MAY set corrects (optional). Verify
+    the allowed-kind path still works end to end."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    # plant seq 1 to point at
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    d1 = Path(capsys.readouterr().out.strip())
+    _fill_draft(d1)
+    relay.cmd_publish(type("A", (), {"draft_path": str(d1), "status": None,
+                                      "force": False, "force_reason": None,
+                                      "project": None, "session_id": None})())
+    capsys.readouterr()
+    rc = relay.cmd_claim(type("A", (), {"kind": "addendum", "in_reply_to": 1,
+                                         "corrects": 1,
+                                         "project": None, "session_id": None})())
+    assert rc == 0
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+    rc = relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None,
+                                           "force": False, "force_reason": None,
+                                           "project": None, "session_id": None})())
+    assert rc == 0
+    fm, _ = relay.parse_frontmatter(Path(capsys.readouterr().out.strip()).read_text())
+    assert fm["corrects"] == 1
+
+
+def test_publish_rejects_corrects_on_plan_kind(monkeypatch, tmp_path, capsys):
+    """Finding 3 (codex seq 2): even if a corrects value reaches a non-
+    correcting kind's frontmatter (hand-edit), publish must reject it."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None,
+                                     "corrects": None,
+                                     "project": None, "session_id": None})())
+    draft = Path(capsys.readouterr().out.strip())
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    fm["corrects"] = 1  # tamper: plan must not carry corrects
+    fm["prompt_for_next"] = "real instructions\n"
+    draft.write_text(relay.dump_frontmatter(fm, "\nbody\n"))
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "corrects" in err.lower()
+
+
 def test_publish_rejects_kind_mismatch(monkeypatch, tmp_path, capsys):
     """Bug fix MAJOR #3: frontmatter kind must match filename."""
     session = _bootstrap(monkeypatch, tmp_path)

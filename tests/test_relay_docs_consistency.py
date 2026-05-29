@@ -192,13 +192,38 @@ def test_file_protocol_version_and_failed_status_wording_are_current():
     """C4/C5: file protocol version and failed-status semantics stay current."""
     text = (ROOT / "skills/agent-relay/references/file-protocol.md").read_text(encoding="utf-8")
     header = text.split("\n\n", 2)[1]
-    assert "v0.8.0" in header
+    assert f"v{relay.__version__}" in header
     assert "session schema v3" in header
     assert "v0.3.0" not in header
     failed_line = next(line for line in text.splitlines() if line.startswith("| `failed` |"))
     assert "publish validation failed" not in failed_line
     assert "author or peer recorded" in failed_line
     assert "does not create a `failed` artifact" in text
+
+
+def test_file_protocol_describes_v09_exclusive_reservation_publish():
+    """Finding 4 (codex seq 2): file-protocol.md must describe the shipped
+    v0.9 publish semantics (exclusive O_CREAT|O_EXCL reservation, sidecars-
+    last, incomplete-triad invisibility) — not the stale v0.8 atomic-rename
+    story that no longer matches `atomic_reserve_text`."""
+    text = (ROOT / "skills/agent-relay/references/file-protocol.md").read_text(encoding="utf-8")
+    # New semantics must be present.
+    assert "O_CREAT|O_EXCL" in text
+    assert "incomplete-triad" in text.lower() or "incomplete triad" in text.lower()
+    assert "invisible to protocol-compliant readers" in text
+    # The stale claim that publish works by renaming the draft must be gone
+    # from the publish-steps section (rename may still be MENTIONED as the
+    # pre-v0.9 form, but must not be stated as the current success path).
+    assert "Atomically rename `.draft/NNN-*.md`" not in text
+    assert "Atomic rename to the published path." not in text
+
+
+def test_file_protocol_documents_corrects_kind_restriction():
+    """Finding 3 (codex seq 2): the spec must say only correction/addendum
+    may carry `corrects`, and publish enforces positive-int < seq."""
+    text = (ROOT / "skills/agent-relay/references/file-protocol.md").read_text(encoding="utf-8")
+    assert "may not carry it" in text or "may not carry" in text
+    assert "self/future" in text or "less than the artifact" in text
 
 
 def test_changelog_documents_v06_migration():
