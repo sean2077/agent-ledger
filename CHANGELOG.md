@@ -4,6 +4,45 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.10.0 — 2026-05-29
+
+Adds a feedback channel. The tool is early-stage and agents hit rough
+edges mid-session that previously evaporated unless a human noticed.
+The issue ledger captures them durably for later triage.
+
+### Added
+
+- `relay issue` — a machine-global feedback ledger, separate from the
+  per-session `.shared/` ledger:
+  - `relay issue add --title T [--severity minor|major]
+    [--area cli|hooks|docs|protocol|tests|build|other]
+    [--body TEXT | --body-file PATH|-]` records one issue file.
+  - `relay issue list [--status open|resolved|all] [--area A] [--json]`.
+  - `relay issue show <id|prefix>` and
+    `relay issue resolve <id|prefix> [--note "fixed in <sha>"]`.
+  - Stored at `~/.agent-ledger/relay-issues/` (override
+    `RELAY_ISSUES_DIR`), one file per issue with frontmatter
+    (`id`, `created`, `reporter`, `project`, `session`, `severity`,
+    `area`, `title`, `status`, `resolved_at`, `resolution`). The store
+    is intentionally outside any repo and outside `.shared/` so it
+    persists across every project/session on the machine. Issues are a
+    mutable tracker (resolve rewrites in place), not append-only
+    artifacts.
+- SKILL.md "Filing issues" section instructing agents to record
+  tool-level problems via `relay issue add` before moving on.
+- file-protocol.md §14 documenting the issue ledger.
+
+### Changed
+
+- Version bumped to 0.10.0 across `bin/relay`, the hook dispatcher,
+  README, and the file-protocol header.
+
+### Notes
+
+- v0.9.0 (commit `d86ca7a`) was independently verified by codex
+  (approve-verified) and is the recommended tag point for the audit
+  release; 0.10.0 is the first post-audit feature on top of it.
+
 ## 0.9.0 — 2026-05-29
 
 Full-audit cleanup release. A cross-review session

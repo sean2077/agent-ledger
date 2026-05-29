@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.9.0; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.10.0; session schema v3.
 
 ## 1. Directory layout
 
@@ -330,3 +330,29 @@ With N>1 active sessions → marker REQUIRED to disambiguate; it must name one o
 `relay close` and terminal `relay publish --status ...` clear the marker when they make the marked session inactive.
 
 Parallel active sessions are exceptional. `relay bootstrap --force` may create one. `relay sessions list` lists all flat sessions and their category (`active`, `terminal`, `closed`, or `inactive`) without trying to resolve a single active session.
+
+## 14. Issue ledger (out-of-band feedback, v0.10)
+
+Separate from the session ledger above. The issue ledger is a
+**machine-global** store where agents record problems they hit *while
+using the relay tool itself*, so a developer can triage them later.
+
+- **Location**: `~/.agent-ledger/relay-issues/`, overridable via
+  `RELAY_ISSUES_DIR`. Deliberately NOT under `.shared/` (per-session,
+  gitignored, ephemeral) and NOT under any repo — issues accrue across
+  every project and session on the machine.
+- **One file per issue**: `<id>.md` where `id` is
+  `YYYYMMDDThhmmss-<8hex>` (sortable, collision-resistant).
+- **Frontmatter**: `id`, `created`, `reporter` (`$RELAY_AUTHOR` or
+  `unknown`), `project` (sanitized, best-effort), `session` (active
+  session slug if resolvable, else null), `severity` (`minor`/`major`),
+  `area` (`cli`/`hooks`/`docs`/`protocol`/`tests`/`build`/`other`),
+  `title`, `status` (`open`/`resolved`), `resolved_at`, `resolution`.
+- **Mutability**: unlike published session artifacts, issues are a
+  mutable tracker — `relay issue resolve` rewrites the file in place.
+  They carry no `.ready`/`.sha256` sidecars and are not append-only.
+
+Commands: `relay issue add --title T [--severity S] [--area A]
+[--body TEXT | --body-file PATH|-]`, `relay issue list [--status
+open|resolved|all] [--area A] [--json]`, `relay issue show <id|prefix>`,
+`relay issue resolve <id|prefix> [--note "fixed in <sha>"]`.

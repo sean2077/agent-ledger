@@ -298,8 +298,22 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay preflight` fails `env.RELAY_ROLE.removed`**: user's envrc still uses the v0.5 alias. Tell them to replace it per the migration table — `RELAY_ROLE=host -> RELAY_SYNC=rsync`, `RELAY_ROLE=remote -> RELAY_SYNC=none` — then `source .envrc`.
 - **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts older than the threshold. Doctor never signals a live PID.
 
+## Filing issues (feedback ledger)
+
+This tool is early-stage. **When you hit a rough edge in the relay tooling itself mid-turn — a command that swallowed an error, a confusing exit code, a doc that contradicted the CLI, an awkward workflow, a missing affordance — record it before moving on:**
+
+```bash
+"$RELAY" issue add --title "<one-line summary>" --severity <minor|major> --area <cli|hooks|docs|protocol|tests|build|other> --body "<what happened + what you expected>"
+```
+
+This appends one file to a machine-global store (`~/.agent-ledger/relay-issues/`, override `RELAY_ISSUES_DIR`) that persists across all sessions and projects, so a later dev cycle can triage it. It is **out of band** from the session ledger — it does not touch `.shared/`, does not need an active session, and never interrupts the relay loop. Keep it cheap: a quick `issue add` is better than losing the signal.
+
+- Record problems with the **tool**, not the task you're collaborating on (task disagreements go in relay artifacts).
+- Don't file duplicates of something already actionable in the current relay round — that belongs in your `prompt_for_next`.
+- A developer reviews with `relay issue list` (open by default), reads one via `relay issue show <id>`, and closes it with `relay issue resolve <id> --note "fixed in <sha>"` once addressed.
+
 ## References
 
-- `references/file-protocol.md` — full schema for session.json, frontmatter, terminal states, append-only rules, concurrency
+- `references/file-protocol.md` — full schema for session.json, frontmatter, terminal states, append-only rules, concurrency, issue ledger (§14)
 - `references/rsync-recipes.md` — default vs strict-gitignore tradeoffs, shape A vs B, SSH troubleshooting
 - `references/hook-protocol.md` — hook dispatcher spec: event handlers, platform differences (Claude Code vs Codex CLI), JSON I/O shape, fingerprint algorithm, trail log format, `apply_patch` path extraction
