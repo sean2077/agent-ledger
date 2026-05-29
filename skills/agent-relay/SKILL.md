@@ -152,7 +152,7 @@ This is the core 95% case. Take one full turn in the relay.
     **Surface to user (step 11) if ANY of:**
     - latest-published `kind == "decision"`
     - latest-published `status` ∈ {`closed`, `cancelled`, `failed`, `timed_out`}
-    - your `prompt_for_next` body contains literal `@user:` (case-sensitive)
+    - your `prompt_for_next` has a **line whose trimmed text starts with `@user:`** (case-sensitive). The marker must be at line-start to count — a `@user:` mentioned mid-sentence (e.g. instructing the peer "do not escalate to `@user:` unless…") is **not** an escalation and must NOT trigger a surface. This line-start rule is deliberate: substring matching false-positived on artifacts that merely referenced the marker, which undercut the un-interrupted auto-loop.
     - in-memory consecutive-auto-round counter ≥ `RELAY_AUTO_ROUND_CAP` (default 5)
 
     **Otherwise — enter auto-loop:**
@@ -166,7 +166,7 @@ This is the core 95% case. Take one full turn in the relay.
        - `130` — SIGINT. Exit cleanly. User broke out.
        - `2` — env/protocol error on stderr. Stop and report like a preflight failure.
 
-    **Hard rule**: do NOT decide "this isn't important enough to surface." If a `kind: question` benefits from user attention, encode `@user:` in the prompt body. The round-cap is the catch-all backstop so the loop cannot run forever silently.
+    **Hard rule**: do NOT decide "this isn't important enough to surface." If a `kind: question` benefits from user attention, encode the escalation as a line that **starts with** `@user:` (e.g. a line reading `@user: which auth backend do you want?`). The round-cap is the catch-all backstop so the loop cannot run forever silently.
 
     **When hooks are installed**: the Stop hook will auto-continue the turn via `decision: "block"` whenever peer published an artifact addressed to you, so the auto-loop above happens implicitly between turns; you can rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
 
@@ -195,7 +195,7 @@ This is the part of the artifact that determines whether the peer can act effect
 - Set acceptance criteria. "Do X such that test Y passes" beats "do X".
 - Note risks or open questions the peer should address.
 - If the next round needs a specific `kind`, say so: "Please respond with `kind: review`."
-- If you're blocking on user input, write `prompt_for_next:` directed `@user:` and publish with `"$RELAY" publish "$DRAFT" --status timed_out`.
+- If you're blocking on user input, put the ask on its own line **starting with** `@user:` (the line-start marker is what triggers the surface — see step 10) and publish with `"$RELAY" publish "$DRAFT" --status timed_out`. Don't write `@user:` mid-sentence unless you actually intend to escalate; a line-start marker is the only form that counts, but keeping it off non-escalating lines avoids confusing future readers.
 
 Avoid:
 - Vague verbs without context ("review this", "improve that").

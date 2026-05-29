@@ -158,6 +158,22 @@ def test_skill_documents_terminal_timeout_publish_command():
     assert '"$RELAY" publish "$DRAFT" --status timed_out' in text
 
 
+def test_skill_escalation_marker_is_line_start_not_substring():
+    """Finding (codex seq 4): the @user: break trigger must be line-start,
+    not arbitrary substring — otherwise an artifact that merely mentions
+    @user: (e.g. 'do not escalate to @user: unless') false-positives and
+    undercuts the un-interrupted auto-loop. Lock in the line-start rule and
+    forbid the old broad-substring wording."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    # Required: the step-10 rule must describe line-start semantics.
+    assert "line whose trimmed text starts with `@user:`" in text
+    # The marker mentioned mid-sentence must be explicitly called out as a
+    # non-trigger.
+    assert "not** an escalation" in text or "not an escalation" in text
+    # Forbidden: the old substring phrasing must be gone from the break rule.
+    assert "body contains literal `@user:`" not in text
+
+
 def test_skill_documents_optional_parallel_wait_mode_as_advanced_only():
     """Q3: background wait is documented as optional, not the default path."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
