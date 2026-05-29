@@ -159,6 +159,9 @@ def test_init_same_host_copies_template(monkeypatch, tmp_path, capsys):
     # Defining marks of the same-host template:
     assert "RELAY_SYNC=none" in body
     assert "RELAY_AUTHOR=" in body
+    lines = [line.strip() for line in body.splitlines()]
+    assert '# export RELAY_SHARED_ROOT="$PWD/.shared"' in lines
+    assert 'export RELAY_SHARED_ROOT="$PWD/.shared"' not in lines
     # The same-host template must be RELAY_SYNC-first; no retired RELAY_ROLE.
     assert "RELAY_ROLE" not in body
     # Dispatcher must also exist.
@@ -301,14 +304,17 @@ def test_init_hint_lists_same_host_first(monkeypatch, tmp_path, capsys):
     assert "--author" in out and "--peer" in out and "--sync" in out
 
 
-def test_init_suppresses_envrc_nag_when_sync_env_set(monkeypatch, tmp_path, capsys):
-    """If RELAY_SYNC is set (v0.5+ path), no nag about missing .envrc.<hostname>."""
+def test_init_suppresses_envrc_nag_when_identity_env_set(monkeypatch, tmp_path, capsys):
+    """If identity env is set, no nag about missing .envrc.<hostname>.
+
+    RELAY_SYNC now defaults to none, so it is no longer required just to
+    suppress the first-run envrc hint.
+    """
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
                   RELAY_SHARED_ROOT=str(repo / ".shared"),
-                  RELAY_SYNC="none",
                   RELAY_AUTHOR="codex", RELAY_PEER="claude")
     hostname = relay._hostname_short()
     assert not (repo / f".envrc.{hostname}").exists()
@@ -335,6 +341,9 @@ def test_init_author_peer_sync_renders_envrc(monkeypatch, tmp_path, capsys):
     assert "RELAY_AUTHOR=codex" in body
     assert "RELAY_PEER=claude" in body
     assert "RELAY_SYNC=none" in body
+    lines = [line.strip() for line in body.splitlines()]
+    assert '# export RELAY_SHARED_ROOT="$PWD/.shared"' in lines
+    assert 'export RELAY_SHARED_ROOT="$PWD/.shared"' not in lines
     # No legacy RELAY_ROLE.
     assert "RELAY_ROLE=" not in body
     # Dispatcher still gets installed.

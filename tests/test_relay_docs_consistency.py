@@ -186,8 +186,9 @@ def test_hook_protocol_timeout_and_path_canonicalization_match_dispatcher():
     """F6/F7: hook protocol mirrors the dispatcher timeout and path base order."""
     text = (ROOT / "skills/agent-relay/references/hook-protocol.md").read_text(encoding="utf-8")
     src = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
-    assert "Soft timeout 3s" in text
-    assert "timeout: int = 3" in src
+    assert "Subprocess timeout 8s" in text
+    assert "timeout: int = 8" in src
+    assert "slower than 5s" in text
     assert "`payload.cwd`, then" in text
     assert "`CLAUDE_PROJECT_DIR`, then" in text
     assert "hook process cwd" in text
@@ -320,15 +321,14 @@ def test_skill_opening_does_not_call_protocol_a_no_autopilot_loop():
 
 
 def test_skill_does_not_imply_relay_role_inference_fallback():
-    """Finding C2: SKILL.md once implied preflight infers RELAY_SYNC=none when
-    neither RELAY_SYNC nor RELAY_ROLE is set. RELAY_ROLE is fully retired —
-    only RELAY_SYNC matters for inference. Wording must not resurrect it."""
+    """Finding C2: SKILL.md once implied RELAY_ROLE participated in sync
+    resolution. RELAY_ROLE is fully retired; wording must not resurrect it."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
     # The exact old phrasing
     bad = "neither `RELAY_SYNC` nor `RELAY_ROLE` is set"
     assert bad not in text, (
         f"SKILL.md still implies RELAY_ROLE as an inference fallback "
-        f"({bad!r}); only RELAY_SYNC matters for inference."
+        f"({bad!r}); RELAY_ROLE must stay inert."
     )
     # RELAY_ROLE must not appear anywhere in the skill surface anymore.
     assert "RELAY_ROLE" not in text, (

@@ -53,6 +53,25 @@ def test_bootstrap_creates_full_structure(monkeypatch, tmp_path, capsys):
     assert sj["participants"] == ["codex", "claude"]
 
 
+def test_bootstrap_defaults_shared_root_inside_git(monkeypatch, tmp_path, capsys):
+    repo = tmp_path / "myproj"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_SYNC", "none")
+    monkeypatch.setenv("RELAY_AUTHOR", "codex")
+    monkeypatch.setenv("RELAY_PEER", "claude")
+
+    rc = relay.cmd_bootstrap(type("A", (), {"topic": "default-root", "title": None})())
+    assert rc == 0
+    shared = repo / ".shared"
+    sessions = [p for p in shared.iterdir() if p.is_dir() and p.name != "_relay"]
+    assert len(sessions) == 1
+    assert (shared / "_relay" / ".sentinel").is_file()
+
+
 def test_bootstrap_refuses_duplicate(monkeypatch, tmp_path, capsys):
     _setup_shared(monkeypatch, tmp_path)
     args = type("A", (), {"topic": "dup", "title": None})()

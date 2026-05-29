@@ -35,7 +35,10 @@ esac
 # already on the same filesystem.
 export RELAY_SYNC=none
 
-export RELAY_SHARED_ROOT="$PWD/.shared"
+# Shared ledger root: normally leave unset. `relay` defaults to the current
+# git project's `.shared` (same as `$PWD/.shared` from the project root).
+# Uncomment only when you intentionally need a non-project-local ledger.
+# export RELAY_SHARED_ROOT="$PWD/.shared"
 
 # RELAY_REMOTE_SSH / RELAY_REMOTE_PATH are not needed when RELAY_SYNC=none.
 unset RELAY_REMOTE_SSH RELAY_REMOTE_PATH

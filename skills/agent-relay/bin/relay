@@ -5,7 +5,7 @@ Single-file executable, Python 3.10+, stdlib only. See companion spec:
   skills/agent-relay/references/file-protocol.md
 
 Commands:
-  init         idempotently create RELAY_SHARED_ROOT + sentinel; render .envrc
+  init         idempotently create shared root + sentinel; render .envrc
   preflight    env + mount + project + FS probes + POSIX mode
   bootstrap    create new session directory under .shared/
   status       list session artifacts + readiness + session-active rule
@@ -48,7 +48,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -330,12 +330,12 @@ class Env:
     author: Optional[str]
     peer: Optional[str]
     shared_root: Optional[Path]
+    shared_root_source: str
     project: Optional[str]
     remote_ssh: Optional[str]
     remote_path: Optional[str]
-    # `sync_raw` is the literal value from RELAY_SYNC (or None if unset);
-    # `sync_source` is one of "env" | "shape-a-infer" | None, so preflight can
-    # warn appropriately. Resolution lives in `_resolve_sync`.
+    # `sync_raw` is the literal value from RELAY_SYNC (or None if unset).
+    # Resolution lives in `_resolve_sync`; unset defaults to `none`.
     sync_raw: Optional[str] = None
 
 
@@ -344,11 +344,17 @@ SYNC_VALUES = {"none", "rsync"}
 
 def load_env() -> Env:
     shared = os.environ.get("RELAY_SHARED_ROOT")
-    shared_path = Path(shared).expanduser().resolve() if shared else None
+    if shared:
+        shared_path = Path(shared).expanduser().resolve()
+        shared_root_source = "env"
+    else:
+        shared_path = default_shared_root()
+        shared_root_source = "default" if shared_path else "unset"
     return Env(
         author=os.environ.get("RELAY_AUTHOR") or None,
         peer=os.environ.get("RELAY_PEER") or None,
         shared_root=shared_path,
+        shared_root_source=shared_root_source,
         project=os.environ.get("RELAY_PROJECT") or None,
         remote_ssh=os.environ.get("RELAY_REMOTE_SSH") or None,
         remote_path=os.environ.get("RELAY_REMOTE_PATH") or None,
@@ -357,19 +363,16 @@ def load_env() -> Env:
 
 
 def _resolve_sync(env: Env, *, is_shape_a: bool) -> tuple[Optional[str], str]:
-    """Return (effective_sync, source) where source is 'env', 'shape-a-infer',
-    'env-invalid', or 'unset'. `effective_sync` is in SYNC_VALUES or None.
+    """Return (effective_sync, source) where source is 'env', 'default',
+    or 'env-invalid'. `effective_sync` is in SYNC_VALUES or None.
 
-    Precedence: explicit RELAY_SYNC wins; else shape-A infers `none`; else
-    unset.
+    Precedence: explicit RELAY_SYNC wins; unset defaults to `none`.
     """
     if env.sync_raw is not None:
         if env.sync_raw in SYNC_VALUES:
             return env.sync_raw, "env"
         return None, "env-invalid"
-    if is_shape_a:
-        return "none", "shape-a-infer"
-    return None, "unset"
+    return "none", "default"
 
 
 def git_toplevel(start: Path | None = None) -> Optional[Path]:
@@ -384,6 +387,14 @@ def git_toplevel(start: Path | None = None) -> Optional[Path]:
         return Path(res.stdout.strip())
     except FileNotFoundError:
         return None
+
+
+def default_shared_root(start: Path | None = None) -> Optional[Path]:
+    """Project-local shared root used when RELAY_SHARED_ROOT is not exported."""
+    top = git_toplevel(start)
+    if top is None:
+        return None
+    return (top / ".shared").resolve()
 
 
 def sanitize_project_slug(raw: str) -> str:
@@ -864,7 +875,7 @@ def cmd_preflight(args) -> int:
 
     sync_effective, sync_source = _resolve_sync(env, is_shape_a=is_shape_a)
 
-    required = ["RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT"]
+    required = ["RELAY_AUTHOR", "RELAY_PEER"]
     if sync_effective == "rsync":
         required += ["RELAY_REMOTE_SSH", "RELAY_REMOTE_PATH"]
     for var in required:
@@ -876,6 +887,25 @@ def cmd_preflight(args) -> int:
             "detail": "set" if val else "not set",
         })
 
+    out["env"]["RELAY_SHARED_ROOT"] = bool(env.shared_root)
+    if env.shared_root:
+        detail = (
+            "set"
+            if env.shared_root_source == "env"
+            else f"default {env.shared_root}"
+        )
+        out["checks"].append({
+            "name": "env.RELAY_SHARED_ROOT",
+            "status": "pass",
+            "detail": detail,
+        })
+    else:
+        out["checks"].append({
+            "name": "env.RELAY_SHARED_ROOT",
+            "status": "fail",
+            "detail": "not set and no git project default is available",
+        })
+
     # Sync resolution check — surfaces effective sync mode plus fix-it hints.
     if sync_source == "env-invalid":
         out["checks"].append({
@@ -884,15 +914,15 @@ def cmd_preflight(args) -> int:
                       f"{sorted(SYNC_VALUES)}",
         })
     elif sync_effective is None:
-        # RELAY_SYNC unset and shape detection could not infer (shape B or
-        # no git toplevel). Fail with a hint.
+        # Defensive: currently only env-invalid returns None and is handled
+        # above. Keep a clear failure path if resolution grows new states.
         hint = (
             "set RELAY_SYNC=rsync (this side owns rsync transport) "
             "or RELAY_SYNC=none (this side does not sync)"
         )
         out["checks"].append({
             "name": "env.RELAY_SYNC", "status": "fail",
-            "detail": f"RELAY_SYNC not set; {hint}",
+            "detail": f"RELAY_SYNC could not be resolved; {hint}",
         })
     else:
         out["env"]["RELAY_SYNC"] = True
@@ -1012,7 +1042,10 @@ def cmd_preflight(args) -> int:
             cnt[c["status"]] += 1
         print(f"summary: {cnt['pass']} pass, {cnt['warn']} warn, {cnt['fail']} fail "
               f"(exit {out['exit_code']})")
-        if out["exit_code"] != 0 and not all(out["env"].get(v, False) for v in required):
+        missing_required = [v for v in required if not out["env"].get(v, False)]
+        if not env.shared_root:
+            missing_required.append("RELAY_SHARED_ROOT")
+        if out["exit_code"] != 0 and missing_required:
             _print_env_template()
     return out["exit_code"]
 
@@ -1093,11 +1126,10 @@ def cmd_init(args) -> int:
     project_root = git_toplevel()
     root = env.shared_root
     if root is None:
-        if project_root is None:
-            print("relay init: RELAY_SHARED_ROOT not set; either export it or run inside a git repo",
-                  file=sys.stderr)
-            return 2
-        root = project_root / ".shared"
+        print("relay init: RELAY_SHARED_ROOT not set; either export it or run inside a git repo",
+              file=sys.stderr)
+        return 2
+    if env.shared_root_source == "default":
         print(f"relay init: RELAY_SHARED_ROOT not set, defaulting to {root}", file=sys.stderr)
 
     created, existed = _ensure_shared_root(root)
@@ -1192,8 +1224,8 @@ def cmd_init(args) -> int:
                   "are not exported. Add them to your shell before `source .envrc` "
                   "or `relay sync` will refuse.", file=sys.stderr)
 
-    if project_root and not same_host and not explicit_flags and not env.sync_raw:
-        # Nag only when no env is loaded yet AND .envrc.<hostname> is missing.
+    if project_root and not same_host and not explicit_flags and not (env.author and env.peer):
+        # Nag only when identity env is not loaded yet AND .envrc.<hostname> is missing.
         hostname = _hostname_short()
         if not (project_root / f".envrc.{hostname}").exists():
             print(f"\nhint: .envrc.{hostname} not found.")
@@ -1233,7 +1265,10 @@ def _render_envrc_body(author: str, peer: str, sync: str) -> str:
         f"export RELAY_AUTHOR={author}",
         f"export RELAY_PEER={peer}",
         f"export RELAY_SYNC={sync}",
-        'export RELAY_SHARED_ROOT="$PWD/.shared"',
+        "# Shared ledger root: normally leave unset. `relay` defaults to the current",
+        "# git project's `.shared` (same as `$PWD/.shared` from the project root).",
+        "# Uncomment only when you intentionally need a non-project-local ledger.",
+        '# export RELAY_SHARED_ROOT="$PWD/.shared"',
         "",
     ]
     if sync == "rsync":
@@ -1259,7 +1294,8 @@ def _render_envrc_body(author: str, peer: str, sync: str) -> str:
 def cmd_bootstrap(args) -> int:
     env = load_env()
     if not env.shared_root:
-        print("relay bootstrap: RELAY_SHARED_ROOT not set", file=sys.stderr)
+        print("relay bootstrap: RELAY_SHARED_ROOT not set and no git project default is available",
+              file=sys.stderr)
         return 2
     if not SLUG_RE.match(args.topic):
         print(f"relay bootstrap: topic must match {SLUG_RE.pattern}", file=sys.stderr)
@@ -2337,11 +2373,11 @@ def cmd_sync(args) -> int:
         # Cover both "explicit none" and "could not resolve". Be specific about which.
         if sync_source == "env":
             reason = f"RELAY_SYNC={env.sync_raw!r}; this side does not own rsync transport"
-        elif sync_source == "shape-a-infer":
+        elif is_shape_a:
             reason = (f"$PROJECT_ROOT={project_root} is a fuse mount (shape A); "
                       "no sync needed (edits land on the remote directly)")
         else:
-            reason = ("RELAY_SYNC not set; "
+            reason = ("RELAY_SYNC defaults to 'none'; "
                       "set RELAY_SYNC=rsync on the side that owns the rsync transport")
         print(f"relay sync: {reason}", file=sys.stderr)
         return 2

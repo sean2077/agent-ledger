@@ -68,8 +68,9 @@ else:
     log "hint"
 ```
 
-Soft timeout 3s, matching the dispatcher default for `relay doctor` and
-`relay status` subprocess calls. Never blocks the session.
+Subprocess timeout 8s, matching the dispatcher default for `relay doctor`
+and `relay status` subprocess calls. Calls slower than 5s write a slow
+trail entry. Never blocks the session indefinitely.
 
 ### 4.2 `PreToolUse`
 

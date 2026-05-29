@@ -69,11 +69,11 @@ export RELAY
 Before any other action:
 
 ```bash
-"$RELAY" init        # idempotent: creates RELAY_SHARED_ROOT + _relay/.sentinel if missing
+"$RELAY" init        # idempotent: creates the project-local .shared + _relay/.sentinel if missing
 "$RELAY" preflight
 ```
 
-`init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. If `RELAY_SHARED_ROOT` is unset, `init` defaults to `<git_toplevel>/.shared`; outside a git repo it fails clearly.
+`init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. If `RELAY_SHARED_ROOT` is unset, relay commands default to `<git_toplevel>/.shared`; outside a git repo they fail clearly.
 
 For the first time on a machine, the user picks one of two setup paths: `relay init --same-host` (two terminals on one box) or `relay init --author <name> --peer <name> --sync <none|rsync>` (any other topology). The skill prelude runs the no-arg form; if init prints a setup hint, surface it to the user — that's the only path the prelude can't auto-resolve.
 
@@ -90,7 +90,7 @@ Interpret the preflight exit code as three levels:
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
-`fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which `init` handles), `project.consistency` mismatch, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken.
+`fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which defaults to the current git project's `.shared`), `project.consistency` mismatch, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken.
 
 ## Decide intent from user input
 
@@ -259,7 +259,7 @@ Pull works the same way:
 
 `--delete` mirrors deletions; **off by default**. Only enable when the user explicitly says "mirror" or "delete extras".
 
-If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole project mounted from the other side). No sync needed; edits land on the remote filesystem directly. `relay preflight` infers `RELAY_SYNC=none` automatically in shape A when `RELAY_SYNC` is unset.
+If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole project mounted from the other side). No sync needed; edits land on the remote filesystem directly. When `RELAY_SYNC` is unset, relay commands default to `none`.
 
 ---
 
@@ -292,7 +292,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay publish` rejects with "prompt_for_next still contains placeholder"**: you forgot to replace the `TODO: ...` line. Edit the draft and retry.
 - **`relay publish` rejects with "body is empty"**: scaffold body is the placeholder comment; replace it with real content.
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
-- **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` or unset). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
+- **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` explicitly or by default). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
 - **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts older than the threshold. Doctor never signals a live PID.
 
 ## Filing issues (feedback ledger)

@@ -128,6 +128,6 @@ If first SSH works but rsync hangs, suspect MTU / firewall / large initial trans
 ## When to NOT use `relay sync`
 
 - You only changed `.shared/` content. That's already on the mount — no sync needed.
-- You're on `RELAY_SYNC=none` (or unset, with shape A inferred). The CLI will refuse — this side does not own the rsync transport.
+- You're on `RELAY_SYNC=none` (explicitly or by default). The CLI will refuse — this side does not own the rsync transport.
 - The project is shape A. The CLI will refuse — there is only one project copy, nothing to rsync.
 - You haven't committed your work and don't want partial state on remote. Either commit first, or accept that rsync will mirror your working tree as-is.

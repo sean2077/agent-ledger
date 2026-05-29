@@ -96,10 +96,9 @@ def test_preflight_fails_when_no_env(monkeypatch, capsys):
     rc = relay.cmd_preflight(args)
     assert rc == 2
     out = capsys.readouterr().out
-    # RELAY_AUTHOR/PEER/SHARED_ROOT are always required; RELAY_SYNC is
-    # required when not inferable (no git repo here -> shape B fallback).
+    # RELAY_AUTHOR/PEER/SHARED_ROOT are required; RELAY_SYNC defaults to none.
     assert "env.RELAY_AUTHOR" in out
-    assert "env.RELAY_SYNC" in out
+    assert "sync=none (source: default)" in out
     assert "fail" in out
 
 
@@ -140,6 +139,29 @@ def test_preflight_sentinel_missing(monkeypatch, capsys, tmp_path):
     sentinel = next(c for c in data["checks"] if c["name"] == "mount.sentinel")
     assert sentinel["status"] == "fail"
     assert rc == 2
+
+
+def test_preflight_defaults_shared_root_inside_git(monkeypatch, capsys, tmp_path):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    _isolated_env(monkeypatch,
+        RELAY_SYNC="none", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+    )
+    args = type("A", (), {"json": True})()
+    rc = relay.cmd_preflight(args)
+    out = capsys.readouterr().out
+    import json
+    data = json.loads(out)
+    shared_check = next(c for c in data["checks"] if c["name"] == "env.RELAY_SHARED_ROOT")
+    assert shared_check["status"] == "pass"
+    assert str(shared) in shared_check["detail"]
+    assert data["env"]["RELAY_SHARED_ROOT"] is True
+    assert rc == 0
 
 
 def test_preflight_shape_a_does_not_require_remote_vars(monkeypatch, capsys, tmp_path):
@@ -281,8 +303,8 @@ def test_preflight_resolves_sync_from_explicit_env(monkeypatch, capsys, tmp_path
     assert rc == 0
 
 
-def test_preflight_shape_a_infers_sync_none(monkeypatch, capsys, tmp_path):
-    """D1: shape A (project root is a fuse mount) infers RELAY_SYNC=none."""
+def test_preflight_unset_sync_defaults_to_none_in_shape_a(monkeypatch, capsys, tmp_path):
+    """Unset RELAY_SYNC defaults to none, including shape A."""
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
@@ -296,12 +318,12 @@ def test_preflight_shape_a_infers_sync_none(monkeypatch, capsys, tmp_path):
     data = json.loads(capsys.readouterr().out)
     sync_check = next(c for c in data["checks"] if c["name"] == "env.RELAY_SYNC")
     assert sync_check["status"] == "pass"
-    assert "shape-a-infer" in sync_check["detail"]
+    assert "source: default" in sync_check["detail"]
     assert rc == 0
 
 
-def test_preflight_shape_b_no_sync_fails(monkeypatch, capsys, tmp_path):
-    """D1: shape B + RELAY_SYNC unset => fail (no silent inference)."""
+def test_preflight_unset_sync_defaults_to_none_in_shape_b(monkeypatch, capsys, tmp_path):
+    """Unset RELAY_SYNC defaults to none in normal two-copy shape B."""
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
@@ -313,16 +335,15 @@ def test_preflight_shape_b_no_sync_fails(monkeypatch, capsys, tmp_path):
     import json
     data = json.loads(capsys.readouterr().out)
     sync_check = next(c for c in data["checks"] if c["name"] == "env.RELAY_SYNC")
-    assert sync_check["status"] == "fail"
-    assert "RELAY_SYNC not set" in sync_check["detail"]
-    assert rc == 2
+    assert sync_check["status"] == "pass"
+    assert "source: default" in sync_check["detail"]
+    assert rc == 0
 
 
 def test_preflight_ignores_leftover_relay_role(monkeypatch, capsys, tmp_path):
     """RELAY_ROLE is fully retired: a leftover value is an inert unknown env
-    var, not a special migration check. With no RELAY_SYNC in shape B,
-    preflight falls through to the generic 'RELAY_SYNC not set' failure and
-    emits no env.RELAY_ROLE.* check of any kind."""
+    var, not a special migration check. With no RELAY_SYNC, preflight uses
+    the normal RELAY_SYNC=none default and emits no env.RELAY_ROLE.* check."""
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
@@ -335,11 +356,11 @@ def test_preflight_ignores_leftover_relay_role(monkeypatch, capsys, tmp_path):
     import json
     data = json.loads(capsys.readouterr().out)
     sync_check = next(c for c in data["checks"] if c["name"] == "env.RELAY_SYNC")
-    assert sync_check["status"] == "fail"
-    assert "RELAY_SYNC not set" in sync_check["detail"]
+    assert sync_check["status"] == "pass"
+    assert "source: default" in sync_check["detail"]
     # No RELAY_ROLE check survives anywhere.
     assert not any(c["name"].startswith("env.RELAY_ROLE") for c in data["checks"])
-    assert rc == 2
+    assert rc == 0
 
 
 def test_preflight_sync_rsync_with_shape_a_is_contradiction(monkeypatch, capsys, tmp_path):

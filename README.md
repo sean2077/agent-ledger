@@ -3,7 +3,7 @@
 `agent-relay` connects interactive Claude Code and Codex CLI sessions through
 an append-only shared file ledger so they can cross-review work without
 writing API glue. The protocol is markdown + sidecars, so other agents can
-participate too. Current: **v0.11.0** (pre-1.0).
+participate too. Current: **v0.12.0** (pre-1.0).
 
 See [`docs/why.md`](docs/why.md) for the longer take on what this is, what it
 isn't, and what running it through interactive Claude Code + Codex actually
@@ -72,8 +72,9 @@ explicitly. Mutually exclusive with `--same-host`.
 
 - `relay init` is idempotent. Re-running won't overwrite a customized
   `.envrc.<hostname>` or rewrite `.shared/_relay/.sentinel`. It also
-  creates `.shared/` (default `$git_toplevel/.shared`) the first time.
-- `RELAY_SYNC=rsync` is for the side that owns the rsync transport;
-  the other side uses `RELAY_SYNC=none`. Preflight infers `none` when
-  the project root is itself a fuse mount (shape A).
+  creates `.shared/` the first time. When `RELAY_SHARED_ROOT` is unset,
+  relay commands default to `$git_toplevel/.shared` (equivalent to
+  `$PWD/.shared` when run from the project root).
+- `RELAY_SYNC=rsync` is for the side that owns the rsync transport.
+  When `RELAY_SYNC` is unset, relay commands default to `none`.
 - Works with or without direnv.

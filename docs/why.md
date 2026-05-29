@@ -107,8 +107,8 @@ root is itself a fuse mount. The two shapes diverge only on
 - **Shape A — project root IS the mount.** One side has the project
   checkout; the other side mounts it via sshfs and operates in-place.
   Both sides write to the same filesystem; rsync is structurally
-  inapplicable because there is only one copy of the project. Preflight
-  infers `RELAY_SYNC=none` automatically when this is detected.
+  inapplicable because there is only one copy of the project. Relay
+  defaults to `RELAY_SYNC=none` when the variable is unset.
 - **Shape B — two project copies.** Each side has its own checkout;
   the side that owns the rsync transport sets `RELAY_SYNC=rsync` and
   runs `relay sync push` / `pull` to keep them in step. Requires
@@ -119,14 +119,14 @@ root is itself a fuse mount. The two shapes diverge only on
 | | Shape A (root is mount) | Shape B (two project copies) |
 |---|---|---|
 | Same-host | not meaningful — only one machine | not meaningful — only one machine |
-| Two-machine | both sides `SYNC=none`; preflight auto-infers it on the mounting side | one side `SYNC=rsync`, other side `SYNC=none` |
+| Two-machine | both sides `SYNC=none` by default | one side `SYNC=rsync`, other side defaults to `SYNC=none` |
 
 Same-host is its own bucket: shape doesn't apply because there's nothing
 to mount or sync. Shape A and shape B are exclusive to the two-machine
 case.
 
-In every shape-B case, an explicit `RELAY_SYNC` is required; preflight
-will not silently infer `none` outside shape A.
+Only the rsync owner needs an explicit `RELAY_SYNC=rsync`. All other
+sides default to `RELAY_SYNC=none`.
 
 ## Why a file ledger beats copy-paste
 

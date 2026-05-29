@@ -4,6 +4,16 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.12.0 — 2026-05-29
+
+- `RELAY_SHARED_ROOT` is now optional for normal per-project setups. When it
+  is unset, relay CLI commands default to the current git project's
+  `.shared`; envrc templates leave the old
+  `export RELAY_SHARED_ROOT="$PWD/.shared"` line commented as an explicit
+  override only.
+- `RELAY_SYNC` now defaults to `none` when unset. Only the rsync owner needs
+  to opt in with `RELAY_SYNC=rsync`.
+
 ## 0.11.0 — 2026-05-29
 
 Pre-1.0 cleanup: the `role` concept is fully retired. v0.6 split the old

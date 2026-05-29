@@ -48,8 +48,8 @@ def test_sync_refuses_when_sync_none(monkeypatch, tmp_path, capsys):
 
 def test_sync_ignores_leftover_relay_role(monkeypatch, tmp_path, capsys):
     """RELAY_ROLE is retired: a leftover value no longer drives a special
-    migration refusal. With no RELAY_SYNC, `relay sync` falls through to the
-    generic 'RELAY_SYNC not set' refusal (and never mentions RELAY_ROLE)."""
+    migration refusal. With no RELAY_SYNC, `relay sync` uses the default
+    RELAY_SYNC=none refusal (and never mentions RELAY_ROLE)."""
     repo = tmp_path / "myproj"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     monkeypatch.chdir(repo)
@@ -64,7 +64,7 @@ def test_sync_ignores_leftover_relay_role(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_sync(_args())
     assert rc == 2
     err = capsys.readouterr().err
-    assert "RELAY_SYNC not set" in err
+    assert "RELAY_SYNC defaults to 'none'" in err
     assert "RELAY_ROLE" not in err
 
 

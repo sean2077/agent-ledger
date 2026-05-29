@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 
 
 def now_iso() -> str:
@@ -136,7 +136,7 @@ def find_relay() -> Optional[Path]:
     return None
 
 
-def call_relay_json(relay: Path, *args: str, timeout: int = 3) -> Optional[dict]:
+def call_relay_json(relay: Path, *args: str, timeout: int = 8) -> Optional[dict]:
     """Run `relay <args> --json` and return parsed dict, or None on failure."""
     cmd = [str(relay), *args]
     if "--json" not in args:
