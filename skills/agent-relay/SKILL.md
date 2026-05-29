@@ -306,7 +306,7 @@ This tool is early-stage. **When you hit a rough edge in the relay tooling itsel
 "$RELAY" issue add --title "<one-line summary>" --severity <minor|major> --area <cli|hooks|docs|protocol|tests|build|other> --body "<what happened + what you expected>"
 ```
 
-This appends one file to a machine-global store (`~/.agent-ledger/relay-issues/`, override `RELAY_ISSUES_DIR`) that persists across all sessions and projects, so a later dev cycle can triage it. It is **out of band** from the session ledger — it does not touch `.shared/`, does not need an active session, and never interrupts the relay loop. Keep it cheap: a quick `issue add` is better than losing the signal.
+This appends one file to a user-local machine store (`~/.agent-ledger/relay-issues/`, override `RELAY_ISSUES_DIR`) that persists across all sessions and projects on this host, so a later dev cycle can triage it. It is **out of band** from the session ledger — it does not touch `.shared/`, does not need an active session, is never moved by `relay sync`, and never interrupts the relay loop. Keep it cheap: a quick `issue add` is better than losing the signal.
 
 - Record problems with the **tool**, not the task you're collaborating on (task disagreements go in relay artifacts).
 - Don't file duplicates of something already actionable in the current relay round — that belongs in your `prompt_for_next`.

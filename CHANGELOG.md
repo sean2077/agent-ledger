@@ -12,22 +12,29 @@ The issue ledger captures them durably for later triage.
 
 ### Added
 
-- `relay issue` — a machine-global feedback ledger, separate from the
-  per-session `.shared/` ledger:
+- `relay issue` — a user-local machine feedback ledger, separate from
+  the per-session `.shared/` ledger:
   - `relay issue add --title T [--severity minor|major]
     [--area cli|hooks|docs|protocol|tests|build|other]
     [--body TEXT | --body-file PATH|-]` records one issue file.
   - `relay issue list [--status open|resolved|all] [--area A] [--json]`.
-  - `relay issue show <id|prefix>` and
+  - `relay issue show <id|prefix> [--json]` and
     `relay issue resolve <id|prefix> [--note "fixed in <sha>"]`.
   - Stored at `~/.agent-ledger/relay-issues/` (override
     `RELAY_ISSUES_DIR`), one file per issue with frontmatter
     (`id`, `created`, `reporter`, `project`, `session`, `severity`,
     `area`, `title`, `status`, `resolved_at`, `resolution`). The store
     is intentionally outside any repo and outside `.shared/` so it
-    persists across every project/session on the machine. Issues are a
-    mutable tracker (resolve rewrites in place), not append-only
-    artifacts.
+    persists across every project/session for the user on this machine;
+    `relay sync` never moves it. Issues are a mutable tracker (resolve
+    rewrites in place), not append-only artifacts.
+  - Safety: `show`/`resolve` validate the id/prefix against
+    `[0-9A-Za-z-]` before composing any path, so a reference cannot
+    escape the store via `..`, absolute paths, or glob metacharacters;
+    `add` reserves files with `O_CREAT|O_EXCL`; `list` surfaces
+    unreadable files (stderr warning + `unreadable` array in `--json`,
+    exit 1) instead of silently dropping them; ambiguous prefixes are
+    reported distinctly from "not found".
 - SKILL.md "Filing issues" section instructing agents to record
   tool-level problems via `relay issue add` before moving on.
 - file-protocol.md §14 documenting the issue ledger.
@@ -36,6 +43,20 @@ The issue ledger captures them durably for later triage.
 
 - Version bumped to 0.10.0 across `bin/relay`, the hook dispatcher,
   README, and the file-protocol header.
+
+### Fixed (codex v0.10 review, pre-tag)
+
+- **BLOCKER** `issue show`/`resolve` accepted raw path-like ids and
+  could read/rewrite files outside `RELAY_ISSUES_DIR` (e.g.
+  `relay issue resolve ../outside`). Now validated against a strict id
+  alphabet with a defense-in-depth parent-dir check.
+- **MAJOR** malformed issue files silently vanished from `issue list`.
+  Now surfaced (stderr warning + JSON `unreadable` + exit 1).
+- **MINOR** ambiguous prefixes reported as "not found". Now distinct,
+  listing the candidate ids.
+- Design-call follow-ups: `add` uses `O_CREAT|O_EXCL` reservation;
+  `issue show --json` added; docs reworded "machine-global" →
+  "user-local machine" and note that `relay sync` never moves issues.
 
 ### Notes
 

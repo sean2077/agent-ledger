@@ -1952,16 +1952,24 @@ def cmd_draft_set(args) -> int:
 # ---------------------------------------------------------------------------
 #
 # A place for agents to record problems they hit *while using the relay tool
-# itself*, so a developer can triage them in a later dev cycle. Deliberately
-# NOT under .shared/ (per-session, gitignored, ephemeral) and NOT under the
-# repo (issues are about the tool, accumulated across every project/session
-# on this machine). Default ~/.agent-ledger/relay-issues/, override via
-# RELAY_ISSUES_DIR. Issues are a mutable tracker (resolve edits them), not
-# append-only ledger artifacts.
+# itself*, so a developer can triage them in a later dev cycle. The store is
+# user-local machine storage: deliberately NOT under .shared/ (per-session,
+# gitignored, ephemeral) and NOT under the repo (issues are about the tool,
+# accumulated across every project/session for this user on this machine).
+# `relay sync` never moves issues — they stay on the host that filed them.
+# Default ~/.agent-ledger/relay-issues/, override via RELAY_ISSUES_DIR.
+# Issues are a mutable tracker (resolve edits them), not append-only
+# ledger artifacts.
 
 ISSUE_SEVERITIES = {"minor", "major"}
 ISSUE_AREAS = {"cli", "hooks", "docs", "protocol", "tests", "build", "other"}
 ISSUE_STATUSES = {"open", "resolved"}
+# An issue id is `YYYYMMDDThhmmss-<8hex>`; a triage prefix is a leading slice
+# of that. The alphabet is digits + letters + hyphen ONLY. This regex is the
+# security gate for `show`/`resolve` (codex v0.10 review finding 1): it rejects
+# `/`, `\`, `.` (so `..` and absolute/relative paths cannot form) and every
+# glob metacharacter, BEFORE the value is ever composed into a path.
+_ISSUE_REF_RE = re.compile(r"^[0-9A-Za-z-]+$")
 
 
 def issues_dir() -> Path:
@@ -1994,16 +2002,66 @@ def _read_issue(path: Path) -> Optional[tuple[dict, str]]:
     return fm, body
 
 
-def _find_issue(d: Path, issue_id: str) -> Optional[Path]:
-    """Resolve by exact id or unique prefix (ids are long timestamps;
-    a developer triaging from `issue list` shouldn't have to paste the
-    whole thing)."""
-    exact = d / f"{issue_id}.md"
-    if exact.exists():
-        return exact
-    matches = sorted(d.glob(f"{issue_id}*.md"))
+def _resolve_issue(d: Path, ref: str) -> tuple[str, object]:
+    """Resolve an issue reference (full id or leading prefix) to a file
+    that lives DIRECTLY inside `d`.
+
+    Returns one of:
+      ("ok", Path)            unique match
+      ("none", None)          no match
+      ("ambiguous", [stems])  >1 prefix match — caller should disambiguate
+      ("invalid", ref)        ref is not a safe id/prefix token
+
+    Security (codex v0.10 finding 1): `ref` is validated against
+    `_ISSUE_REF_RE` before any path composition, so `..`, `/`, absolute
+    paths, and glob metacharacters can never reach the filesystem. As
+    defense in depth we also confirm each candidate's resolved parent is
+    exactly `d`, so even a symlink inside the store can't redirect us out.
+    """
+    if not ref or not _ISSUE_REF_RE.match(ref):
+        return ("invalid", ref)
+    if not d.is_dir():
+        return ("none", None)
+    d_resolved = d.resolve()
+    matches: list[Path] = []
+    for p in sorted(d.glob("*.md")):
+        stem = p.stem
+        if stem != ref and not stem.startswith(ref):
+            continue
+        try:
+            if p.resolve().parent != d_resolved:
+                continue  # symlink or odd entry pointing outside the store
+        except OSError:
+            continue
+        matches.append(p)
+    exact = [p for p in matches if p.stem == ref]
+    if exact:
+        return ("ok", exact[0])
     if len(matches) == 1:
-        return matches[0]
+        return ("ok", matches[0])
+    if len(matches) > 1:
+        return ("ambiguous", sorted(p.stem for p in matches))
+    return ("none", None)
+
+
+def _resolve_issue_or_report(cmd: str, d: Path, ref: str) -> Optional[Path]:
+    """Shared show/resolve front-end: resolve `ref`, print the right error
+    to stderr for the non-ok cases, and return the Path only on success."""
+    status, value = _resolve_issue(d, ref)
+    if status == "ok":
+        return value  # type: ignore[return-value]
+    if status == "invalid":
+        print(f"relay issue {cmd}: invalid id {ref!r} — ids are "
+              f"[0-9A-Za-z-] only (no path separators, '..', or globs).",
+              file=sys.stderr)
+    elif status == "ambiguous":
+        cands = ", ".join(value)  # type: ignore[arg-type]
+        print(f"relay issue {cmd}: ambiguous prefix {ref!r} matches "
+              f"{len(value)} issues: {cands}. Use a longer prefix or the full id.",
+              file=sys.stderr)
+    else:  # none
+        print(f"relay issue {cmd}: no issue matching {ref!r} in {d}",
+              file=sys.stderr)
     return None
 
 
@@ -2049,34 +2107,52 @@ def cmd_issue_add(args) -> int:
         session_id = None
 
     d = _ensure_issues_dir()
-    issue_id = _issue_id()
-    fm = {
-        "id": issue_id,
-        "created": now_iso(),
-        "reporter": env.author or "unknown",
-        "project": derive_project(env) or "unknown",
-        "session": session_id,
-        "severity": severity,
-        "area": area,
-        "title": title,
-        "status": "open",
-        "resolved_at": None,
-        "resolution": None,
-    }
     body_text = body.strip() or title
-    path = d / f"{issue_id}.md"
-    atomic_write_text(path, dump_frontmatter(fm, body_text + "\n"), mode=0o600)
-    print(path)
-    return 0
+    created = now_iso()
+    reporter = env.author or "unknown"
+    project = derive_project(env) or "unknown"
+    # Reserve the file exclusively (codex v0.10 design call): id collision is
+    # astronomically unlikely (timestamp + uuid8), but the safe primitive
+    # already exists, so use it and regenerate the id on the off chance.
+    for _ in range(5):
+        issue_id = _issue_id()
+        fm = {
+            "id": issue_id, "created": created, "reporter": reporter,
+            "project": project, "session": session_id,
+            "severity": severity, "area": area, "title": title,
+            "status": "open", "resolved_at": None, "resolution": None,
+        }
+        path = d / f"{issue_id}.md"
+        try:
+            atomic_reserve_text(path, dump_frontmatter(fm, body_text + "\n"),
+                                mode=0o600)
+        except FileExistsError:
+            continue
+        print(path)
+        return 0
+    print("relay issue add: could not allocate a unique issue id after 5 "
+          "attempts — retry in a moment.", file=sys.stderr)
+    return 2
 
 
-def _iter_issues(d: Path):
+def _scan_issues(d: Path) -> tuple[list[dict], list[str]]:
+    """Return (parsed frontmatters, names of unreadable/unparseable files).
+
+    A feedback ledger must never silently drop entries (codex v0.10
+    finding 2): a corrupt or hand-edited file is exactly the kind of thing
+    triage needs to SEE, not have hidden.
+    """
+    rows: list[dict] = []
+    bad: list[str] = []
     if not d.is_dir():
-        return
+        return rows, bad
     for p in sorted(d.glob("*.md")):
         parsed = _read_issue(p)
-        if parsed is not None:
-            yield p, parsed[0]
+        if parsed is None:
+            bad.append(p.name)
+        else:
+            rows.append(parsed[0])
+    return rows, bad
 
 
 def cmd_issue_list(args) -> int:
@@ -2088,45 +2164,59 @@ def cmd_issue_list(args) -> int:
               file=sys.stderr)
         return 2
     area = getattr(args, "area", None)
+    all_fm, unreadable = _scan_issues(d)
     rows = []
-    for _p, fm in _iter_issues(d):
+    for fm in all_fm:
         if status != "all" and fm.get("status") != status:
             continue
         if area and fm.get("area") != area:
             continue
         rows.append(fm)
     if getattr(args, "json", False):
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-        return 0
-    if not rows:
+        # Object (not bare array) so unreadable files are always visible to
+        # machine consumers, not silently dropped.
+        print(json.dumps({"issues": rows, "unreadable": unreadable},
+                         indent=2, ensure_ascii=False))
+        return 1 if unreadable else 0
+    if rows:
+        print(f"{status} issues in {d}:")
+        for fm in rows:
+            print(f"  [{fm.get('severity','?'):5}] {fm.get('area','?'):8} "
+                  f"{fm.get('id')}  {fm.get('title','')}")
+            if fm.get("status") == "resolved" and fm.get("resolution"):
+                print(f"          resolved: {fm.get('resolution')}")
+    else:
         print(f"no {status} issues in {d}")
-        return 0
-    print(f"{status} issues in {d}:")
-    for fm in rows:
-        print(f"  [{fm.get('severity','?'):5}] {fm.get('area','?'):8} "
-              f"{fm.get('id')}  {fm.get('title','')}")
-        if fm.get("status") == "resolved" and fm.get("resolution"):
-            print(f"          resolved: {fm.get('resolution')}")
+    if unreadable:
+        print(f"relay issue list: WARNING {len(unreadable)} unreadable issue "
+              f"file(s) skipped (inspect/fix manually): {', '.join(unreadable)}",
+              file=sys.stderr)
+        return 1
     return 0
 
 
 def cmd_issue_show(args) -> int:
     d = issues_dir()
-    path = _find_issue(d, args.id)
-    if not path:
-        print(f"relay issue show: no issue matching {args.id!r} in {d}",
-              file=sys.stderr)
+    path = _resolve_issue_or_report("show", d, args.id)
+    if path is None:
         return 2
+    if getattr(args, "json", False):
+        parsed = _read_issue(path)
+        if parsed is None:
+            print(f"relay issue show: cannot parse {path}", file=sys.stderr)
+            return 2
+        fm, body = parsed
+        print(json.dumps({"path": str(path), "frontmatter": fm, "body": body},
+                         indent=2, ensure_ascii=False))
+        return 0
     print(path.read_text(encoding="utf-8"))
     return 0
 
 
 def cmd_issue_resolve(args) -> int:
     d = issues_dir()
-    path = _find_issue(d, args.id)
-    if not path:
-        print(f"relay issue resolve: no issue matching {args.id!r} in {d}",
-              file=sys.stderr)
+    path = _resolve_issue_or_report("resolve", d, args.id)
+    if path is None:
         return 2
     parsed = _read_issue(path)
     if parsed is None:
@@ -3781,6 +3871,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pish = is_sub.add_parser("show", help="Print one issue by id (or unique prefix).")
     pish.add_argument("id")
+    pish.add_argument("--json", action="store_true",
+                      help="Emit {path, frontmatter, body} as JSON.")
     pish.set_defaults(func=cmd_issue_show)
 
     pir = is_sub.add_parser("resolve", help="Mark an issue resolved.")

@@ -334,15 +334,25 @@ Parallel active sessions are exceptional. `relay bootstrap --force` may create o
 ## 14. Issue ledger (out-of-band feedback, v0.10)
 
 Separate from the session ledger above. The issue ledger is a
-**machine-global** store where agents record problems they hit *while
-using the relay tool itself*, so a developer can triage them later.
+**user-local machine** store where agents record problems they hit
+*while using the relay tool itself*, so a developer can triage them
+later.
 
 - **Location**: `~/.agent-ledger/relay-issues/`, overridable via
   `RELAY_ISSUES_DIR`. Deliberately NOT under `.shared/` (per-session,
   gitignored, ephemeral) and NOT under any repo — issues accrue across
-  every project and session on the machine.
+  every project and session for this user on this machine. **`relay
+  sync` never moves issues**: they stay on the host that filed them, so
+  each developer triages their own machine's ledger.
 - **One file per issue**: `<id>.md` where `id` is
   `YYYYMMDDThhmmss-<8hex>` (sortable, collision-resistant).
+- **Safety**: `show`/`resolve` accept only `[0-9A-Za-z-]` id tokens (or
+  a leading prefix), validated before any path is composed, so a
+  reference can never escape the store via `..`, absolute paths, or
+  glob metacharacters. An ambiguous prefix is reported distinctly from
+  "not found". Unreadable/corrupt `*.md` files are surfaced by `list`
+  (stderr warning + `unreadable` array in `--json`, exit 1), never
+  silently dropped.
 - **Frontmatter**: `id`, `created`, `reporter` (`$RELAY_AUTHOR` or
   `unknown`), `project` (sanitized, best-effort), `session` (active
   session slug if resolvable, else null), `severity` (`minor`/`major`),
@@ -354,5 +364,5 @@ using the relay tool itself*, so a developer can triage them later.
 
 Commands: `relay issue add --title T [--severity S] [--area A]
 [--body TEXT | --body-file PATH|-]`, `relay issue list [--status
-open|resolved|all] [--area A] [--json]`, `relay issue show <id|prefix>`,
-`relay issue resolve <id|prefix> [--note "fixed in <sha>"]`.
+open|resolved|all] [--area A] [--json]`, `relay issue show <id|prefix>
+[--json]`, `relay issue resolve <id|prefix> [--note "fixed in <sha>"]`.

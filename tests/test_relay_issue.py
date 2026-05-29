@@ -155,8 +155,9 @@ def test_issue_list_all_and_json(monkeypatch, tmp_path, capsys):
     capsys.readouterr()
     rc = relay.cmd_issue_list(_list(status="all", json=True))
     assert rc == 0
-    rows = json.loads(capsys.readouterr().out)
-    assert {r["id"] for r in rows} == set(ids)
+    data = json.loads(capsys.readouterr().out)
+    assert {r["id"] for r in data["issues"]} == set(ids)
+    assert data["unreadable"] == []
 
 
 def test_issue_list_empty(monkeypatch, tmp_path, capsys):
@@ -217,6 +218,127 @@ def test_issue_list_area_filter(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "docs one" in out
     assert "cli one" not in out
+
+
+def _show(id, json=False):
+    return type("A", (), {"id": id, "json": json})()
+
+
+# ---------------------------------------------------------------------------
+# codex v0.10 review — finding 1 (BLOCKER): path traversal
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("evil", [
+    "../outside", "../../etc/passwd", "/etc/passwd", "..",
+    "foo/bar", "foo*", "foo?", "[abc]", ".hidden",
+])
+def test_issue_show_rejects_unsafe_ref(monkeypatch, tmp_path, capsys, evil):
+    """Finding 1: show must reject path-like / glob ids before touching FS."""
+    d = tmp_path / "issues"
+    d.mkdir()
+    outside = tmp_path / "outside.md"
+    secret = "---\nid: x\nstatus: open\n---\nsecret\n"
+    outside.write_text(secret)
+    _isolated_env(monkeypatch, d)
+    rc = relay.cmd_issue_show(_show(evil))
+    assert rc == 2
+    out = capsys.readouterr()
+    assert "invalid id" in out.err or "no issue matching" in out.err
+    assert "secret" not in out.out          # never disclosed
+    assert outside.read_text() == secret    # untouched
+
+
+@pytest.mark.parametrize("evil", ["../outside", "/etc/passwd", "..", "foo*"])
+def test_issue_resolve_rejects_unsafe_ref_and_does_not_mutate(monkeypatch, tmp_path, capsys, evil):
+    """Finding 1: resolve must not rewrite files outside the issues dir."""
+    d = tmp_path / "issues"
+    d.mkdir()
+    outside = tmp_path / "outside.md"
+    original = "---\nid: x\nstatus: open\nresolved_at: null\n---\nbody\n"
+    outside.write_text(original)
+    _isolated_env(monkeypatch, d)
+    rc = relay.cmd_issue_resolve(type("A", (), {"id": evil, "note": "pwned"})())
+    assert rc == 2
+    assert outside.read_text() == original  # not mutated
+
+
+def test_resolve_issue_helper_blocks_symlink_escape(monkeypatch, tmp_path):
+    """Defense-in-depth: a *.md symlink inside the store pointing outside
+    must not resolve as an in-store issue."""
+    d = tmp_path / "issues"
+    d.mkdir()
+    outside = tmp_path / "target.md"
+    outside.write_text("---\nid: y\n---\nx\n")
+    link = d / "20260529T000000-deadbeef.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    status, _ = relay._resolve_issue(d, "20260529T000000-deadbeef")
+    assert status == "none"  # target parent != d → excluded
+
+
+# ---------------------------------------------------------------------------
+# codex v0.10 review — finding 2 (MAJOR): malformed files stay visible
+# ---------------------------------------------------------------------------
+
+def test_issue_list_warns_on_malformed_file(monkeypatch, tmp_path, capsys):
+    d = tmp_path / "issues"
+    d.mkdir()
+    (d / "bad.md").write_text("not frontmatter at all\n")
+    _isolated_env(monkeypatch, d)
+    rc = relay.cmd_issue_list(_list(status="all"))
+    assert rc == 1  # non-zero signals attention needed
+    err = capsys.readouterr().err
+    assert "unreadable" in err and "bad.md" in err
+
+
+def test_issue_list_json_surfaces_unreadable(monkeypatch, tmp_path, capsys):
+    d = tmp_path / "issues"
+    _isolated_env(monkeypatch, d, RELAY_AUTHOR="claude")
+    relay.cmd_issue_add(_add(title="good one"))
+    capsys.readouterr()
+    (d / "bad.md").write_text("garbage\n")
+    rc = relay.cmd_issue_list(_list(status="all", json=True))
+    assert rc == 1
+    data = json.loads(capsys.readouterr().out)
+    assert len(data["issues"]) == 1
+    assert "bad.md" in data["unreadable"]
+
+
+# ---------------------------------------------------------------------------
+# codex v0.10 review — finding 3 (MINOR): ambiguous prefix != not-found
+# ---------------------------------------------------------------------------
+
+def test_ambiguous_prefix_is_distinct_from_missing(monkeypatch, tmp_path, capsys):
+    d = tmp_path / "issues"
+    d.mkdir()
+    (d / "20260529T120000-aaaaaaaa.md").write_text("---\nid: a\nstatus: open\n---\nx\n")
+    (d / "20260529T120000-bbbbbbbb.md").write_text("---\nid: b\nstatus: open\n---\ny\n")
+    _isolated_env(monkeypatch, d)
+    rc = relay.cmd_issue_show(_show("20260529T120000"))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "ambiguous prefix" in err
+    assert "20260529T120000-aaaaaaaa" in err and "20260529T120000-bbbbbbbb" in err
+
+
+# ---------------------------------------------------------------------------
+# codex v0.10 design call: show --json
+# ---------------------------------------------------------------------------
+
+def test_issue_show_json(monkeypatch, tmp_path, capsys):
+    d = tmp_path / "issues"
+    _isolated_env(monkeypatch, d, RELAY_AUTHOR="claude")
+    relay.cmd_issue_add(_add(title="json me", area="cli", body="detail here"))
+    issue_id = Path(capsys.readouterr().out.strip()).stem
+    rc = relay.cmd_issue_show(_show(issue_id, json=True))
+    assert rc == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["frontmatter"]["id"] == issue_id
+    assert obj["frontmatter"]["area"] == "cli"
+    assert "detail here" in obj["body"]
+    assert obj["path"].endswith(f"{issue_id}.md")
 
 
 # ---------------------------------------------------------------------------
