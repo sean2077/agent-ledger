@@ -179,7 +179,7 @@ def test_wait_returns_2_when_no_session(monkeypatch, tmp_path, capsys):
     rc = relay.cmd_wait(_wait_args(timeout=1, poll=1))
     assert rc == 2
     err = capsys.readouterr().err
-    assert "no active session" in err.lower() or "active session" in err.lower()
+    assert "no active pair" in err.lower()
 
 
 def test_wait_returns_0_when_peer_draft_exists_at_entry(monkeypatch, tmp_path, capsys):

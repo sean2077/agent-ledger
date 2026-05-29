@@ -208,7 +208,7 @@ def test_cross_session_same_author_does_not_share_renewal(monkeypatch, tmp_path,
             "draft": str(draft_a), "owner_kind": "renewal-file",
             "owner_pid": None, "owner_pidfile": None, "owner_renewal_file": None,
             "interval": 1, "force": False, "project": None,
-            "session_id": session_a.name,
+            "pair_id": session_a.name,
         })())
         assert rc_a == 0
         capsys.readouterr()
@@ -216,7 +216,7 @@ def test_cross_session_same_author_does_not_share_renewal(monkeypatch, tmp_path,
             "draft": str(draft_b), "owner_kind": "renewal-file",
             "owner_pid": None, "owner_pidfile": None, "owner_renewal_file": None,
             "interval": 1, "force": False, "project": None,
-            "session_id": session_b.name,
+            "pair_id": session_b.name,
         })())
         # Heartbeat-running-for-author rule blocks a second start for same author;
         # accept exit 3 here as the protected case. The cross-session renewal
@@ -240,7 +240,7 @@ def test_cross_session_same_author_does_not_share_renewal(monkeypatch, tmp_path,
         if renewal_b.exists():
             os.utime(renewal_b, (old_mtime, old_mtime))
         relay.cmd_heartbeat_tick(type("A", (), {
-            "project": None, "session_id": session_b.name,
+            "project": None, "pair_id": session_b.name,
         })())
         # session A's renewal must remain backdated
         assert renewal_a.stat().st_mtime == pytest.approx(old_mtime, abs=1.0), \
@@ -248,18 +248,18 @@ def test_cross_session_same_author_does_not_share_renewal(monkeypatch, tmp_path,
     finally:
         relay.cmd_heartbeat_stop(type("A", (), {
             "draft": str(draft_a), "force": True,
-            "project": None, "session_id": session_a.name,
+            "project": None, "pair_id": session_a.name,
         })())
         relay.cmd_heartbeat_stop(type("A", (), {
             "draft": str(draft_b), "force": True,
-            "project": None, "session_id": session_b.name,
+            "project": None, "pair_id": session_b.name,
         })())
 
 
 def _claim_draft_in(session, kind):
     rc = relay.cmd_claim(type("A", (), {
         "kind": kind, "in_reply_to": None, "project": None,
-        "session_id": session.name,
+        "pair_id": session.name,
     })())
     assert rc == 0
     drafts = sorted((session / ".draft").glob(f"*-{kind}.md"))
@@ -326,7 +326,7 @@ def test_cross_session_renewal_drives_wait_exit_11(monkeypatch, tmp_path, capsys
     (renewal_b_dir / "stub.renewal").touch()
     files_a_before = set(p.name for p in renewal_a_dir.glob("*")) if renewal_a_dir.exists() else set()
     relay.cmd_heartbeat_tick(type("A", (), {
-        "project": None, "session_id": session_b.name,
+        "project": None, "pair_id": session_b.name,
     })())
     files_a_after = set(p.name for p in renewal_a_dir.glob("*")) if renewal_a_dir.exists() else set()
     assert files_a_before == files_a_after, \

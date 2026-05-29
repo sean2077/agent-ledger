@@ -248,13 +248,15 @@ def test_status_resolves_flat_layout(monkeypatch, tmp_path, capsys):
     assert data["session"]["session_id"].endswith("-flat-status")
 
 
-def test_bootstrap_creates_active_session_marker(monkeypatch, tmp_path):
-    """R3.a: bootstrap writes .shared/.active-session containing the session slug."""
+def test_bootstrap_binds_creator(monkeypatch, tmp_path):
+    """v0.13: bootstrap binds the creating instance to the new pair (replacing
+    the old .active-session marker)."""
     shared = _setup_shared(monkeypatch, tmp_path)
     assert relay.cmd_bootstrap(type("A", (), {"topic": "marker", "title": None})()) == 0
-    marker = (shared / ".active-session").read_text().strip()
-    assert marker.endswith("-marker")
-    assert (shared / marker / "session.json").is_file()
+    bindings = relay.list_bindings(shared)
+    assert len(bindings) == 1
+    assert bindings[0]["pair_slug"].endswith("-marker")
+    assert (shared / bindings[0]["pair_slug"] / "session.json").is_file()
 
 
 def test_bootstrap_refuses_when_active_session_exists(monkeypatch, tmp_path, capsys):
@@ -275,14 +277,13 @@ def test_bootstrap_force_allows_parallel_active_session(monkeypatch, tmp_path):
     assert sorted(p.name[-3:] for p in sessions) == ["one", "two"]
 
 
-def test_status_with_session_id_resolves_among_multiple_active(monkeypatch, tmp_path, capsys):
-    """M3 (b): relay status --session-id picks the right session under multiple-active."""
+def test_status_with_pair_id_resolves_among_multiple_active(monkeypatch, tmp_path, capsys):
+    """relay status --pair-id picks the right pair when several are active."""
     shared = _setup_shared(monkeypatch, tmp_path)
-    first = _write_session(shared, "20990101-first")
+    _write_session(shared, "20990101-first")
     second = _write_session(shared, "20990101-second")
-    (shared / ".active-session").write_text(first.name + "\n")
     rc = relay.cmd_status(type("A", (), {
-        "project": None, "session_id": second.name, "last": 0, "json": True,
+        "project": None, "pair_id": second.name, "last": 0, "json": True,
     })())
     data = json.loads(capsys.readouterr().out)
     assert rc == 0
@@ -292,49 +293,28 @@ def test_status_with_session_id_resolves_among_multiple_active(monkeypatch, tmp_
 
 def test_resolve_active_session_multiple_raises(monkeypatch, tmp_path):
     shared = _setup_shared(monkeypatch, tmp_path)
-    relay.cmd_bootstrap(type("A", (), {"topic": "a", "title": None})())
-    # create a second active session manually (we cannot bootstrap twice on same day same topic)
-    sess2 = shared / "20990101-other"
-    sess2.mkdir(parents=True)
-    (sess2 / "session.json").write_text(json.dumps({
-        "schema_version": 3, "project": "myproj", "session_id": "20990101-other",
-        "title": "x", "state": "active",
-        "created_at": "2099-01-01T00:00:00+00:00", "closed_at": None,
-        "close_reason": None, "participants": [],
-    }))
-    # bootstrap wrote .active-session → session 'a'. Clear it so we exercise
-    # the genuine no-disambiguator ambiguity (finding 5: a valid marker now
-    # disambiguates; see the next test for that path).
-    relay.clear_active_marker(shared)
+    _write_session(shared, "20990101-a")
+    _write_session(shared, "20990101-other")
     env = relay.load_env()
-    with pytest.raises(SystemExit, match="multiple active"):
+    # an unbound instance facing >1 active pairs is ambiguous
+    relay.delete_binding(shared, env.author, env.agent_session_id)
+    with pytest.raises(SystemExit, match="multiple active pairs"):
         relay.resolve_active_session(env)
 
 
-def test_resolve_active_session_marker_disambiguates_parallel(monkeypatch, tmp_path):
-    """Finding 5 (codex seq 2): with N>1 active sessions, a `.active-session`
-    marker naming one of them resolves to that session instead of raising —
-    so preflight-pass and command-success agree in parallel mode."""
+def test_resolve_uses_binding_to_disambiguate_parallel(monkeypatch, tmp_path):
+    """v0.13: with N>1 active pairs, THIS instance's binding resolves to its
+    pair instead of raising — per-instance bindings replace the global marker."""
     shared = _setup_shared(monkeypatch, tmp_path)
-    relay.cmd_bootstrap(type("A", (), {"topic": "a", "title": None})())
-    first = relay.read_active_marker(shared)
-    assert first is not None
-    sess2 = shared / "20990101-other"
-    sess2.mkdir(parents=True)
-    (sess2 / "session.json").write_text(json.dumps({
-        "schema_version": 3, "project": "myproj", "session_id": "20990101-other",
-        "title": "x", "state": "active",
-        "created_at": "2099-01-01T00:00:00+00:00", "closed_at": None,
-        "close_reason": None, "participants": [],
-    }))
-    # marker still names the bootstrap session → resolve returns it.
-    assert relay.resolve_active_session(relay.load_env()).name == first
-
-    # Point the marker at the OTHER active session → resolve follows it.
-    relay.write_active_marker(shared, "20990101-other")
-    assert relay.resolve_active_session(relay.load_env()).name == "20990101-other"
-
-    # Marker naming a non-active session → still raises, naming candidates.
-    relay.write_active_marker(shared, "20990101-nonexistent")
-    with pytest.raises(SystemExit, match="multiple active"):
-        relay.resolve_active_session(relay.load_env())
+    a = _write_session(shared, "20990101-a")
+    other = _write_session(shared, "20990101-other")
+    env = relay.load_env()
+    relay.delete_binding(shared, env.author, env.agent_session_id)
+    with pytest.raises(SystemExit, match="multiple active pairs"):
+        relay.resolve_active_session(env)
+    # bind to 'a' -> resolve returns 'a'
+    assert relay.join_pair(relay.load_env(), shared, a.name) == 0
+    assert relay.resolve_active_session(relay.load_env()).name == a.name
+    # rebind to the other -> resolve follows the binding
+    assert relay.join_pair(relay.load_env(), shared, other.name) == 0
+    assert relay.resolve_active_session(relay.load_env()).name == other.name

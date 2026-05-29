@@ -14,6 +14,11 @@ def _isolated_env(monkeypatch, issues_dir: Path, **kwargs):
         if k.startswith("RELAY_"):
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("RELAY_ISSUES_DIR", str(issues_dir))
+    # Pin an isolated shared root so cmd_issue_add's best-effort active-session
+    # context never leaks the real repo .shared (where an unrelated relay
+    # session may legitimately be active). Issues are out-of-band from the
+    # session ledger, so a missing/empty shared root is the correct baseline.
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(issues_dir.parent / "shared-iso"))
     for k, v in kwargs.items():
         monkeypatch.setenv(k, v)
 

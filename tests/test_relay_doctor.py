@@ -246,3 +246,34 @@ def test_parse_duration_invalid_returns_none():
     assert relay._parse_duration("10") is None  # no unit
     assert relay._parse_duration("10x") is None  # unknown unit
     assert relay._parse_duration("-1h") is None
+
+
+def test_doctor_reports_and_fixes_stale_binding(monkeypatch, tmp_path, capsys):
+    """v0.13: a stale binding is a finding; --fix removes the file only (never
+    signals a PID — bindings carry none)."""
+    _, shared = _bootstrap(monkeypatch, tmp_path)
+    env = relay.load_env()
+    b = relay.read_binding(shared, env.author, env.agent_session_id)
+    b["last_seen"] = "2020-01-01T00:00:00+08:00"  # backdate -> stale
+    relay.write_binding(shared, b)
+    capsys.readouterr()
+    # report-only: finding present, file kept
+    rc = relay.cmd_doctor(_doctor_args(json=True))
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert env.instance_id in report["stale_bindings"]
+    assert relay.read_binding(shared, env.author, env.agent_session_id) is not None
+    # --fix: binding file removed
+    relay.cmd_doctor(_doctor_args(fix=True, json=True))
+    capsys.readouterr()
+    assert relay.read_binding(shared, env.author, env.agent_session_id) is None
+
+
+def test_doctor_surfaces_legacy_active_session_marker(monkeypatch, tmp_path, capsys):
+    """A pre-v0.13 .active-session marker is surfaced as informational."""
+    _, shared = _bootstrap(monkeypatch, tmp_path)
+    (shared / ".active-session").write_text("20260529-t\n")
+    capsys.readouterr()
+    relay.cmd_doctor(_doctor_args(json=True))
+    report = json.loads(capsys.readouterr().out)
+    assert report["legacy_active_session"] is not None

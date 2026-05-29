@@ -472,12 +472,11 @@ def test_preflight_project_consistency_still_fails_on_real_mismatch(
     assert "beta" in pc["detail"]
 
 
-def test_preflight_warns_on_parallel_active_sessions_without_marker(
+def test_preflight_warns_when_unbound_with_multiple_active(
     monkeypatch, capsys, tmp_path,
 ):
-    """Finding 5: `bootstrap --force` is documented for parallel mode.
-    Two actives + no marker should warn (not fail) so downstream commands
-    can disambiguate with --session-id."""
+    """An unbound instance facing >1 active pairs should warn (not fail) so the
+    skill can resolve via `relay pair ensure` / `relay pair join`."""
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     monkeypatch.chdir(repo)
@@ -502,20 +501,20 @@ def test_preflight_warns_on_parallel_active_sessions_without_marker(
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    marker = next(c for c in data["checks"] if c["name"] == "session.active_marker")
-    assert marker["status"] == "warn"
-    assert "20260529-a" in marker["detail"]
-    assert "20260529-b" in marker["detail"]
-    assert "--session-id" in marker["detail"]
-    # warn → exit 1, not 2; bootstrap --force flow can proceed
+    chk = next(c for c in data["checks"] if c["name"] == "session.binding")
+    assert chk["status"] == "warn"
+    assert "20260529-a" in chk["detail"]
+    assert "20260529-b" in chk["detail"]
+    assert "pair" in chk["detail"]
+    # warn -> exit 1, not 2; the skill resolves via pair ensure/join
     assert rc == 1
 
 
-def test_preflight_passes_when_marker_matches_one_of_many_actives(
+def test_preflight_passes_when_bound_among_many_actives(
     monkeypatch, capsys, tmp_path,
 ):
-    """Finding 5: marker pointing to one of N active sessions is the
-    legitimate parallel-mode state — must pass, not fail."""
+    """An instance bound to one of N active pairs is the legitimate parallel
+    state — preflight must pass."""
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     monkeypatch.chdir(repo)
@@ -530,24 +529,24 @@ def test_preflight_passes_when_marker_matches_one_of_many_actives(
             f'{{"schema_version": 3, "project": "repo", "session_id": "{sid}", '
             f'"state": "active"}}'
         )
-    (shared / ".active-session").write_text("20260529-a\n")
     _isolated_env(monkeypatch,
         RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
+    assert relay.join_pair(relay.load_env(), shared, "20260529-a") == 0
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    marker = next(c for c in data["checks"] if c["name"] == "session.active_marker")
-    assert marker["status"] == "pass"
-    assert "20260529-a" in marker["detail"]
-    assert "20260529-b" in marker["detail"]
+    chk = next(c for c in data["checks"] if c["name"] == "session.binding")
+    assert chk["status"] == "pass"
+    assert "20260529-a" in chk["detail"]
     assert rc == 0
 
 
-def test_preflight_fails_when_marker_mismatches_active_session(monkeypatch, capsys, tmp_path):
-    """R3.a: .shared/.active-session disagreeing with session_is_active is a fail (corruption)."""
+def test_preflight_warns_when_binding_points_at_inactive_pair(monkeypatch, capsys, tmp_path):
+    """A binding pointing at a missing/inactive pair is recoverable (self-healed
+    by `pair ensure`), so it warns — not the old marker-mismatch hard fail."""
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     monkeypatch.chdir(repo)
@@ -561,16 +560,22 @@ def test_preflight_fails_when_marker_mismatches_active_session(monkeypatch, caps
         '{"schema_version": 3, "project": "repo", "session_id": "20260527-real", '
         '"state": "active"}'
     )
-    (shared / ".active-session").write_text("20260527-wrong\n")
     _isolated_env(monkeypatch,
         RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
+    env = relay.load_env()
+    relay.write_binding(shared, {
+        "schema_version": 1, "instance_id": env.instance_id,
+        "author": env.author, "agent_session_id": env.agent_session_id,
+        "pair_slug": "20260527-gone", "bound_at": relay.now_iso(),
+        "last_seen": relay.now_iso(),
+    })
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    marker = next(c for c in data["checks"] if c["name"] == "session.active_marker")
-    assert marker["status"] == "fail"
-    assert "20260527-wrong" in marker["detail"]
-    assert rc == 2
+    chk = next(c for c in data["checks"] if c["name"] == "session.binding")
+    assert chk["status"] == "warn"
+    assert "20260527-gone" in chk["detail"]
+    assert rc == 1

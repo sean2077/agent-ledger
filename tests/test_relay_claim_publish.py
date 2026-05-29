@@ -724,7 +724,7 @@ def test_publish_refuses_non_draft_path(monkeypatch, tmp_path, capsys):
 
 def _claim_filled(session: Path, capsys, *, kind: str = "note") -> Path:
     rc = relay.cmd_claim(type("A", (), {
-        "kind": kind, "in_reply_to": None, "project": None, "session_id": session.name,
+        "kind": kind, "in_reply_to": None, "project": None, "pair_id": session.name,
     })())
     assert rc == 0
     draft = Path(capsys.readouterr().out.strip())
@@ -732,8 +732,8 @@ def _claim_filled(session: Path, capsys, *, kind: str = "note") -> Path:
     return draft
 
 
-def test_claim_with_session_id_resolves_among_multiple_active(monkeypatch, tmp_path, capsys):
-    """M3 (b): relay claim --session-id picks the right session under multiple-active."""
+def test_claim_with_pair_id_resolves_among_multiple_active(monkeypatch, tmp_path, capsys):
+    """relay claim --pair-id picks the right pair when several are active."""
     first = _bootstrap(monkeypatch, tmp_path, topic="first")
     capsys.readouterr()
     assert relay.cmd_bootstrap(type("A", (), {"topic": "second", "title": None, "force": True})()) == 0
@@ -743,7 +743,7 @@ def test_claim_with_session_id_resolves_among_multiple_active(monkeypatch, tmp_p
         if p.is_dir() and p.name.endswith("-second")
     )
     rc = relay.cmd_claim(type("A", (), {
-        "kind": "plan", "in_reply_to": None, "project": None, "session_id": first.name,
+        "kind": "plan", "in_reply_to": None, "project": None, "pair_id": first.name,
     })())
     draft = Path(capsys.readouterr().out.strip())
     assert rc == 0

@@ -36,11 +36,38 @@ def test_hook_version_matches_relay_version():
     assert f'VERSION = "{relay.__version__}"' in hook
 
 
-def test_skill_mentions_multiple_active_session_stop_rule():
-    """m5: SKILL.md documents the recovery path for multiple active sessions."""
+def test_skill_mentions_multiple_active_pair_recovery():
+    """SKILL.md documents the recovery path for multiple active pairs."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
-    assert "multiple active sessions" in text
-    assert "relay sessions list" in text
+    assert "multiple active pairs" in text
+    assert "relay pairs list" in text
+
+
+def test_skill_documents_pair_commands():
+    """v0.13: SKILL.md teaches the instance/pair binding commands."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    # SKILL uses "$RELAY" in code blocks and bare `relay` in prose, so match the
+    # command names without pinning the executable prefix.
+    assert "pair ensure" in text
+    assert "pair join" in text
+    assert "relay whoami" in text
+
+
+def test_relay_source_retires_active_session_marker():
+    """v0.13: the global .active-session marker writers are fully removed; the
+    binding-aware resolver and join_pair replace them."""
+    src = (ROOT / "skills/agent-relay/bin/relay").read_text(encoding="utf-8")
+    assert "write_active_marker" not in src
+    assert "def resolve_active_session" in src
+    assert "def join_pair" in src
+
+
+def test_file_protocol_documents_binding_registry():
+    """v0.13: file-protocol describes the per-instance binding registry."""
+    text = (ROOT / "skills/agent-relay/references/file-protocol.md").read_text(encoding="utf-8")
+    assert "bindings/" in text
+    assert "binding-key" in text
+    assert "instance" in text
 
 
 def test_force_reason_frontmatter_field_is_documented():
@@ -354,14 +381,14 @@ def test_envrc_renderer_explains_unconditional_unset():
 
 def test_v07_wait_hint_paths_include_doctor_or_sessions():
     """relay wait resolver-fail and claim resolver-fail hints must mention
-    `relay sessions list` (the discovery command) and `relay bootstrap`."""
+    `relay pairs list` (the discovery command) and `relay bootstrap`."""
     src = (ROOT / "skills/agent-relay/bin/relay").read_text(encoding="utf-8")
     # Both wait and claim wrap resolve_active_session with a hint block.
     for verb in ("relay wait:", "relay claim:"):
         idx = src.find(verb)
-        # Find the resolver-fail hint block by searching for "no active session" near verb.
-        nas_idx = src.find("no active session", idx)
-        assert nas_idx > 0, f"{verb} missing resolver-fail handler for no-active-session"
+        # Find the resolver-fail hint block by searching for "no active pair" near verb.
+        nas_idx = src.find("no active pair", idx)
+        assert nas_idx > 0, f"{verb} missing resolver-fail handler for no-active-pair"
         window = src[nas_idx:nas_idx + 400]
-        assert "relay sessions list" in window
+        assert "relay pairs list" in window
         assert "relay bootstrap" in window

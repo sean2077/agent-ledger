@@ -90,7 +90,27 @@ Interpret the preflight exit code as three levels:
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
-`fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which defaults to the current git project's `.shared`), `project.consistency` mismatch, active-marker mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken.
+`fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which defaults to the current git project's `.shared`), `project.consistency` mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken. (Binding health is reported under `session.binding`; a stale or missing binding is a **warn**, never a fail — resolve it with `relay pair ensure` below.)
+
+## Resolve your pair (bind once; then it's automatic)
+
+A project can run several **pairs** (collaboration sessions) at once. Each agent instance binds to exactly one pair; after that every `relay` command resolves to it automatically — no `--pair-id` needed. Run this once per turn, right after preflight:
+
+```bash
+"$RELAY" pair ensure --json
+```
+
+Interpret the `action` field (the CLI does the mechanical decision; you only handle the interactive cases):
+
+| action | meaning | what to do |
+|---|---|---|
+| `use` | already bound to an active pair | proceed — this is the steady state |
+| `joined` | exactly one compatible pair existed; you were auto-bound to it | tell the user "joined pair `<slug>`", then proceed |
+| `choose` | several joinable pairs (see `candidates`) | **ask the user** which to join, then `"$RELAY" pair join <slug>` |
+| `bootstrap` | no active pair exists | ask the user for a topic, then run the **bootstrap** intent |
+| `full` | pair(s) exist but none joinable (full, or already hold a same-author instance) | tell the user; offer to `bootstrap` a new pair or wait |
+
+`relay whoami` shows your instance id (`<author>:<short-session-id>`) and current binding. Same-agent pairs (claude+claude) are not supported — `ensure` excludes them. Only `choose` / `bootstrap` / `full` interrupt the user; `use` / `joined` proceed silently.
 
 ## Decide intent from user input
 
@@ -101,7 +121,7 @@ Read `{{ARGUMENTS}}` and the most recent user message. Pick exactly one intent. 
 | Intent | User phrasing examples |
 |---|---|
 | `handoff` (default) | "continue the relay", "respond to claude", "review the plan", "fix what they asked", anything implying "do the next round", **OR no arguments at all** |
-| `bootstrap` | "start a relay session about X", "set up relay for this project", or when `relay status` shows no active session AND user wants to start one |
+| `bootstrap` | "start a relay session about X", "set up relay for this project", or when `relay pair ensure` reports `bootstrap` AND user wants to start one |
 | `status` | "what's the relay state", "show me the session", "who needs to act next" — only when the user is explicitly read-only |
 | `sync` | "push to remote", "pull from remote", "sync the code" |
 | `close` | "close the session", "we're done", "wrap up the relay" |
@@ -114,8 +134,8 @@ If user input is ambiguous between handoff and something else → prefer handoff
 
 This is the core 95% case. Take one full turn in the relay.
 
-1. **Read state**: `"$RELAY" status --json` (or text). Note the active session path, latest published file, and `next-seq`.
-   - If it errors with `multiple active sessions`, stop normal handoff, run `"$RELAY" sessions list`, report the candidates, and do not claim/close until a specific `--session-id` is chosen or the state is repaired.
+1. **Read state**: `"$RELAY" status --json` (or text). Note the active pair path, latest published file, and `next-seq`.
+   - If it errors with `multiple active pairs`, you are not bound yet — run `"$RELAY" pair ensure` (see "Resolve your pair" above) to bind or pick a pair, then retry. Do not claim/close until bound or a specific `--pair-id` is chosen.
 
 2. **Turn check — what's next**. Of the latest published artifact:
    - If there are no published artifacts yet, this session is freshly bootstrapped. Suggest bootstrap intent or ask the user what to write first; **do not silently claim**.
@@ -212,11 +232,11 @@ Run this when starting a new project-session, **not** when continuing an existin
 
 `<slug>`: lowercase ASCII + digits + `-`, ≤ 48 chars. Examples: `auth-refactor`, `prod-incident-2026-05`. The CLI prefixes with today's date to form session ID `YYYYMMDD-<slug>`.
 
-Sessions are v0.3 flat directories at `.shared/<session-id>/`. The project slug is metadata in `session.json`, not a parent directory.
+Pairs are flat directories at `.shared/<pair-slug>/` (slug `YYYYMMDD-<topic>`). The project slug is metadata in `session.json`, not a parent directory.
 
 After bootstrap, immediately do `handoff` to write the first artifact (typically `kind: plan` or `kind: question`).
 
-If `relay status` already shows an active session, **do not bootstrap silently** — continue the existing session or close it before starting a new one. `relay bootstrap --force` is only for intentionally creating parallel active sessions; follow with `relay sessions list` and explicit `--session-id` for later operations.
+`relay bootstrap` creates a new pair and binds you to it. If you're already bound to an active pair, **do not bootstrap silently** — continue it or close it first. To intentionally run a second pair in parallel, use `relay bootstrap --force` (it binds you to the new pair; your old binding moves). `relay pairs list` shows all pairs.
 
 ---
 
@@ -226,8 +246,10 @@ If `relay status` already shows an active session, **do not bootstrap silently**
 "$RELAY" status            # human-readable
 "$RELAY" status --json     # machine-readable (you can parse)
 "$RELAY" status --last 5   # only most recent 5 artifacts
-"$RELAY" status --session-id 20260527-topic
-"$RELAY" sessions list     # recovery/discovery; works with zero or multiple active sessions
+"$RELAY" status --pair-id 20260527-topic
+"$RELAY" pairs list        # recovery/discovery; all pairs + bound instances + open slots
+"$RELAY" whoami            # your instance id + current pair binding
+"$RELAY" pair ensure       # smart-resolve / auto-bind (see "Resolve your pair")
 ```
 
 Report to user:
@@ -288,7 +310,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 
 - **`relay preflight` fails `mount.sentinel` after `init` ran clean**: the sshfs mount is broken or `RELAY_SHARED_ROOT` points somewhere `init` can't write. Tell user; do not write further.
 - **`relay preflight` fails `project.consistency`**: `$RELAY_PROJECT` env var doesn't match the git toplevel. Tell user the two values; ask which is correct.
-- **`relay status` reports `multiple active sessions`**: use `relay sessions list`, then rerun the intended command with `--session-id <session-id>` or repair the state before claiming.
+- **`relay status` reports `multiple active pairs`**: you aren't bound — run `relay pair ensure` (auto-binds the sole compatible pair, or lists candidates to choose), or pass `--pair-id <slug>`.
 - **`relay publish` rejects with "prompt_for_next still contains placeholder"**: you forgot to replace the `TODO: ...` line. Edit the draft and retry.
 - **`relay publish` rejects with "body is empty"**: scaffold body is the placeholder comment; replace it with real content.
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
@@ -303,7 +325,7 @@ This tool is early-stage. **When you hit a rough edge in the relay tooling itsel
 "$RELAY" issue add --title "<one-line summary>" --severity <minor|major> --area <cli|hooks|docs|protocol|tests|build|other> --body "<what happened + what you expected>"
 ```
 
-This appends one file to a user-local machine store (`~/.agent-ledger/relay-issues/`, override `RELAY_ISSUES_DIR`) that persists across all sessions and projects on this host, so a later dev cycle can triage it. It is **out of band** from the session ledger — it does not touch `.shared/`, does not need an active session, is never moved by `relay sync`, and never interrupts the relay loop. Keep it cheap: a quick `issue add` is better than losing the signal.
+This appends one file to a user-local machine store (`~/.agent-ledger/relay-issues/`, override `RELAY_ISSUES_DIR`) that persists across all sessions and projects on this host, so a later dev cycle can triage it. It is **out of band** from the session ledger — it does not touch `.shared/`, does not need an active pair, is never moved by `relay sync`, and never interrupts the relay loop. Keep it cheap: a quick `issue add` is better than losing the signal.
 
 - Record problems with the **tool**, not the task you're collaborating on (task disagreements go in relay artifacts).
 - Don't file duplicates of something already actionable in the current relay round — that belongs in your `prompt_for_next`.

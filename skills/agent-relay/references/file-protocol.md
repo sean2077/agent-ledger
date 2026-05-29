@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.12.0; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.13.0; session schema v3.
 
 ## 1. Directory layout
 
@@ -8,9 +8,10 @@
 .shared/
   _relay/
     .sentinel                          # bootstrap creates on the mount; presence proves mount alive
-  .active-session                      # active session slug; see §13
-  <session-slug>/                      # YYYYMMDD-<topic>
-    session.json                       # minimal session metadata, see §3
+    bindings/                          # per-instance pair bindings (v0.13); see §13
+      claude-<digest>.json             # one file per instance -> its current pair
+  <pair-slug>/                         # YYYYMMDD-<topic>  (a "pair" = up to 2 instances)
+    session.json                       # minimal pair metadata, see §3
     CLOSED                             # written by `relay close`; contains close meta
     README.md                          # written by bootstrap; human description
     .draft/                            # hidden; `relay claim` writes here
@@ -306,30 +307,28 @@ Line endings: LF only.
 
 POSIX file modes: `relay` creates files with `0600` and dirs with `0700` to align with the `RELAY_SHARED_ROOT` permission policy. `preflight` warns if `.shared/` is not `0700`.
 
-## 13. Active marker and multi-session recovery
+## 13. Instance bindings and multi-pair recovery (v0.13)
 
-`relay bootstrap` writes `.shared/.active-session` with the session slug. The marker is the disambiguator for which active session is "current":
+A **pair** is the collaboration unit (`.shared/<pair-slug>/`) holding at most **two instances**. An **instance** is one running agent session, identified by `<author>:<agent-session-id>` where the agent session id comes from `CLAUDE_CODE_SESSION_ID` (Claude Code), `CODEX_THREAD_ID` (Codex), or a per-terminal fallback. The agent session id is used ONLY by the binding layer — published artifacts still carry the bare `author`, so the artifact protocol is unchanged.
+
+Each instance records which pair it is in as one file under `.shared/_relay/bindings/<binding-key>.json`, where `binding-key = <author>-<sha256(full agent-session-id)[:24]>` (the FULL id is hashed, never a truncated prefix — time-prefixed ids would otherwise collide). This per-instance binding replaces the single global `.active-session` marker, so two same-host instances each track their own current pair. Fields: `schema_version` (1), `instance_id` (short display form), `author`, `agent_session_id` (full), `pair_slug`, `bound_at`, `last_seen` (ISO 8601, refreshed best-effort + throttled).
+
+`resolve_active_session()` resolution order:
 
 ```
-With 0 active sessions  → no marker; resolution fails with "no active session".
-With 1 active session   → marker optional; resolution returns that session.
-With N>1 active sessions → marker REQUIRED to disambiguate; it must name one of
-                           the active sessions, and resolution returns it.
+explicit --pair-id > this instance's binding (if it still names an active pair)
+  > the sole active pair > else refuse, listing candidates ("multiple active pairs").
 ```
 
-`preflight` classifies the marker state (v0.9):
+A binding whose pair is gone/inactive is dropped (self-healed) on resolve. `relay bootstrap` binds its creator; `relay close` and terminal `relay publish --status ...` drop the closing instance's binding. `relay pair join <slug>` / `relay pair leave` bind/unbind explicitly; `relay pair ensure` is the smart resolver (use binding → auto-join the sole compatible pair → else report `choose` / `bootstrap` / `full`).
 
-- no marker + 0 active → pass
-- no marker + 1 active → pass (marker not needed)
-- no marker + N>1 active → **warn** (parallel mode; pass `--session-id` or set a marker)
-- marker naming an active session (whether 1 or one-of-N) → pass
-- marker naming a missing / no-longer-active session → **fail** (corruption)
+**Capacity & recovery.** A pair holds 2 instance slots, derived from binding files (no lock → no deadlock). A full pair with a *stale* slot (`last_seen` older than `RELAY_RENEWAL_STALE_THRESHOLD`, default 3600s) is reclaimable. Racing joiners may transiently exceed 2 bindings; this breaks no invariant (artifacts never use `instance_id`) and self-corrects. `relay doctor [--fix]` reports/removes stale bindings — files only, never signaling a PID.
 
-`resolve_active_session()` honors the marker to disambiguate when N>1 active sessions exist, so a preflight that passes implies default commands resolve to the same session (they no longer fail with "multiple active sessions" when a valid marker is present). If the marker names none of the active sessions, resolution still fails and names the candidates.
+**Same-agent limitation.** Because artifacts route by `author` (the `peer` field), two instances of the SAME agent (claude+claude) cannot be addressed within one pair. `join` / `ensure` therefore refuse a pair that already holds a live same-author instance. Real same-agent pairing would require an artifact-routing change (e.g. a `peer_instance` field) and is out of scope.
 
-`relay close` and terminal `relay publish --status ...` clear the marker when they make the marked session inactive.
+`preflight` reports binding health under the check name `session.binding`: bound→active pair = pass; no binding = pass (or **warn** if >1 active pair forces a choice); binding→inactive pair = **warn** (recoverable). A pre-v0.13 `.active-session` file left on disk is inert; `relay doctor` surfaces it as informational.
 
-Parallel active sessions are exceptional. `relay bootstrap --force` may create one. `relay sessions list` lists all flat sessions and their category (`active`, `terminal`, `closed`, or `inactive`) without trying to resolve a single active session.
+`relay pairs list` lists every pair with its category (`active`/`terminal`/`closed`/`inactive`), bound instances, and open slots.
 
 ## 14. Issue ledger (out-of-band feedback, v0.10)
 

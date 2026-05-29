@@ -86,14 +86,16 @@ def test_close_refuses_when_already_closed(monkeypatch, tmp_path, capsys):
 # -----------------------------------------------------------------------------
 
 
-def test_close_clears_active_session_marker(monkeypatch, tmp_path, capsys):
-    """R3.a: cmd_close clears .shared/.active-session iff it points at the session being closed."""
+def test_close_deletes_binding(monkeypatch, tmp_path, capsys):
+    """v0.13: cmd_close drops the closing instance's binding (replaces the old
+    .active-session marker clear)."""
     session = _bootstrap(monkeypatch, tmp_path)
     shared = session.parent
-    assert (shared / ".active-session").read_text().strip() == session.name
+    env = relay.load_env()
+    assert relay.read_binding(shared, env.author, env.agent_session_id) is not None
     rc = relay.cmd_close(type("A", (), {"reason": "done", "outcome": None, "project": None})())
     assert rc == 0
-    assert not (shared / ".active-session").exists()
+    assert relay.read_binding(shared, env.author, env.agent_session_id) is None
 
 
 def test_close_preserves_multiple_active_error_when_closed_sentinel_exists(monkeypatch, tmp_path, capsys):
@@ -118,13 +120,13 @@ def test_close_preserves_multiple_active_error_when_closed_sentinel_exists(monke
         "close_reason": "preexisting", "participants": [],
     }))
     (closed / "CLOSED").write_text('reason = "preexisting"\n')
-    # _bootstrap wrote .active-session → 'first'. Finding 5 made a valid marker
-    # disambiguate, which would let close resolve+close 'first' instead of
-    # surfacing the ambiguity. Clear it so the genuine multiple-active error
-    # path (no disambiguator) is what's under test.
-    relay.clear_active_marker(shared)
+    # _bootstrap bound this instance to 'first', which would let close resolve
+    # via the binding instead of surfacing the ambiguity. Drop the binding so
+    # the genuine multiple-active error path (no disambiguator) is under test.
+    env = relay.load_env()
+    relay.delete_binding(shared, env.author, env.agent_session_id)
     rc = relay.cmd_close(type("A", (), {"reason": "done", "outcome": None, "project": None})())
     err = capsys.readouterr().err
     assert rc == 2
-    assert "multiple active sessions" in err
+    assert "multiple active pairs" in err
     assert "already closed" not in err

@@ -6,10 +6,12 @@ Single-file executable, Python 3.10+, stdlib only. See companion spec:
 
 Commands:
   init         idempotently create shared root + sentinel; render .envrc
-  preflight    env + mount + project + FS probes + POSIX mode
-  bootstrap    create new session directory under .shared/
-  status       list session artifacts + readiness + session-active rule
-  sessions     subcommands: list (recovery/discovery across all sessions)
+  preflight    env + mount + project + FS probes + POSIX mode + binding health
+  whoami       print this instance's identity (author + agent session id) + binding
+  bootstrap    create a new pair directory under .shared/ (binds the creator)
+  status       list the bound pair's artifacts + readiness + active rule
+  pairs        subcommands: list (all pairs + bound instances / open slots)
+  pair         subcommands: join, leave, ensure (bind this instance to a pair)
   next-seq     print next available NNN (advisory)
   claim        scaffold a new draft under .draft/
   publish      validate draft, atomically promote to published + sha256 + ready
@@ -48,7 +50,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -337,6 +339,14 @@ class Env:
     # `sync_raw` is the literal value from RELAY_SYNC (or None if unset).
     # Resolution lives in `_resolve_sync`; unset defaults to `none`.
     sync_raw: Optional[str] = None
+    # Per-instance identity (v0.13). The agent's OWN session id, used only by
+    # the binding registry to tell parallel pairs apart — NOT by the artifact
+    # protocol (filenames / frontmatter still use `author`). Populated by
+    # load_env() via resolve_instance_id(); see short_instance_id() for the
+    # display form and binding_key() for the collision-safe key.
+    agent_session_id: Optional[str] = None
+    agent_session_id_source: str = "none"
+    instance_id: Optional[str] = None
 
 
 SYNC_VALUES = {"none", "rsync"}
@@ -350,7 +360,7 @@ def load_env() -> Env:
     else:
         shared_path = default_shared_root()
         shared_root_source = "default" if shared_path else "unset"
-    return Env(
+    env = Env(
         author=os.environ.get("RELAY_AUTHOR") or None,
         peer=os.environ.get("RELAY_PEER") or None,
         shared_root=shared_path,
@@ -360,6 +370,263 @@ def load_env() -> Env:
         remote_path=os.environ.get("RELAY_REMOTE_PATH") or None,
         sync_raw=os.environ.get("RELAY_SYNC") or None,
     )
+    asid, asrc = resolve_instance_id(env.author)
+    env.agent_session_id = asid
+    env.agent_session_id_source = asrc
+    env.instance_id = short_instance_id(env.author, asid)
+    return env
+
+
+def _short_hash(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+def _instance_fallback_dir() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return Path(base) / "relay" / f"u{os.getuid()}"
+
+
+def _terminal_signal() -> tuple[str, str]:
+    """Best-effort per-terminal discriminator for the degraded fallback id.
+
+    Returns (signal, source). A source of 'degraded' means nothing
+    distinguishes two same-author windows on this host — callers MUST NOT
+    auto-join parallel same-author instances in that case (they'd collide on
+    the same fallback id).
+    """
+    atuin = os.environ.get("ATUIN_SESSION")
+    if atuin:
+        return _short_hash(atuin), "atuin"
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            return _short_hash(os.ttyname(stream.fileno())), "tty"
+        except (OSError, ValueError, AttributeError):
+            continue
+    return "shared", "degraded"
+
+
+def resolve_instance_id(author: Optional[str]) -> tuple[Optional[str], str]:
+    """Resolve this instance's agent session id. Never raises.
+
+    Precedence: RELAY_AGENT_SESSION_ID (hook-injected) > CLAUDE_CODE_SESSION_ID
+    (Claude Code) > CODEX_THREAD_ID (Codex) > a persisted per-terminal minted
+    fallback, so multi-instance never hard-fails. The fallback is keyed by a
+    terminal signal (atuin/tty); when no signal distinguishes two same-author
+    windows the source is 'fallback-degraded' and auto-join must stay
+    conservative.
+
+    Returns (agent_session_id, source). The id is the FULL value — a binding
+    key MUST hash the full id (see binding_key), never a truncated prefix, or
+    same-author windows with time-prefixed ids (e.g. Codex CODEX_THREAD_ID)
+    would collide.
+    """
+    if not author:
+        return None, "none"
+    override = os.environ.get("RELAY_AGENT_SESSION_ID")
+    if override:
+        return override, "env-override"
+    claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if claude:
+        return claude, "platform-claude"
+    codex = os.environ.get("CODEX_THREAD_ID")
+    if codex:
+        return codex, "platform-codex"
+    sig, sig_source = _terminal_signal()
+    fdir = _instance_fallback_dir()
+    fpath = fdir / f"instance-{author}-{sig}.id"
+    try:
+        existing = fpath.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing, f"fallback-{sig_source}"
+    except (OSError, ValueError):
+        pass
+    minted = uuid.uuid4().hex
+    try:
+        fdir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(fpath, minted + "\n", mode=0o600)
+    except OSError:
+        pass  # even unpersisted, return the minted id so this run has identity
+    return minted, f"fallback-{sig_source}"
+
+
+def short_instance_id(author: Optional[str],
+                      agent_session_id: Optional[str]) -> Optional[str]:
+    """Human-facing short id (display / logs only). NEVER a filename or
+    uniqueness key — see binding_key() for the collision-safe key."""
+    if not author:
+        return None
+    if not agent_session_id:
+        return author
+    return f"{author}:{agent_session_id[:8]}"
+
+
+# ---------------------------------------------------------------------------
+# Instance binding registry (v0.13)
+#
+# Maps an instance (author + its OWN agent session id) to the pair it is
+# working in. Replaces the single global `.active-session` marker so two
+# same-host instances can each track their own current pair. One file per
+# instance under `.shared/_relay/bindings/` — atomic per-file writes, no
+# global write contention, no lock (hence no deadlock).
+# ---------------------------------------------------------------------------
+
+_BINDING_UPDATE_MIN_INTERVAL = 60  # seconds; throttle last_seen writes (sshfs)
+
+
+def binding_key(author: str, agent_session_id: str) -> str:
+    """Collision-safe binding filename stem. Hashes the FULL agent session id
+    (never a truncated prefix — time-prefixed ids like Codex CODEX_THREAD_ID
+    would collide on a short prefix) and is filename-safe (hex + author slug),
+    so no fragile char sanitizing is needed."""
+    digest = hashlib.sha256(agent_session_id.encode("utf-8")).hexdigest()[:24]
+    return f"{author}-{digest}"
+
+
+def bindings_dir(root: Path) -> Path:
+    return root / "_relay" / "bindings"
+
+
+def binding_path(root: Path, author: str, agent_session_id: str) -> Path:
+    return bindings_dir(root) / f"{binding_key(author, agent_session_id)}.json"
+
+
+def read_binding(root: Path, author: str, agent_session_id: str) -> Optional[dict]:
+    try:
+        return json.loads(
+            binding_path(root, author, agent_session_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def write_binding(root: Path, binding: dict) -> None:
+    p = binding_path(root, binding["author"], binding["agent_session_id"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(p, binding, mode=0o600)
+
+
+def delete_binding(root: Path, author: str, agent_session_id: str) -> None:
+    """Remove this instance's binding file. Files ONLY — never signals a PID
+    (bindings carry no PID; mirrors `_heartbeat_purge_files_only`)."""
+    try:
+        binding_path(root, author, agent_session_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def list_bindings(root: Path) -> list[dict]:
+    d = bindings_dir(root)
+    if not d.is_dir():
+        return []
+    out: list[dict] = []
+    for p in sorted(d.glob("*.json")):
+        try:
+            out.append(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def binding_for_pair(root: Path, pair_slug: str) -> list[dict]:
+    return [b for b in list_bindings(root) if b.get("pair_slug") == pair_slug]
+
+
+def _binding_is_stale(binding: dict, *, threshold: Optional[int] = None) -> bool:
+    if threshold is None:
+        threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 3600), 60)
+    last_seen = binding.get("last_seen")
+    if not last_seen:
+        return True
+    try:
+        age = (datetime.now().astimezone()
+               - datetime.fromisoformat(last_seen)).total_seconds()
+    except (ValueError, TypeError):
+        return True
+    return age > threshold
+
+
+def _write_binding_record(root: Path, env: "Env", pair_slug: str) -> None:
+    now = now_iso()
+    prior = read_binding(root, env.author, env.agent_session_id)
+    write_binding(root, {
+        "schema_version": 1,
+        "instance_id": env.instance_id,
+        "author": env.author,
+        "agent_session_id": env.agent_session_id,
+        "pair_slug": pair_slug,
+        "bound_at": (prior or {}).get("bound_at") or now,
+        "last_seen": now,
+    })
+
+
+def join_pair(env: "Env", root: Path, pair_slug: str) -> int:
+    """Bind this instance to `pair_slug`. Returns 0 (bound / already bound) or
+    2 (refused: unknown/inactive pair, same-author conflict, or full).
+
+    Capacity (2 slots) is an advisory soft check on the read path — there is no
+    lock, so no deadlock: racing joiners each write their own file and the
+    worst case is transient over-capacity, self-corrected on the next check.
+    A full pair with a stale slot is reclaimable (delete_binding removes only
+    the file). Same-author conflict is hard-refused because artifact routing is
+    by agent name (`peer`), so claude+claude in one pair can't be addressed.
+    """
+    if not env.author or not env.agent_session_id:
+        print("relay: cannot bind without RELAY_AUTHOR and a resolvable agent "
+              "session id", file=sys.stderr)
+        return 2
+    session = root / pair_slug
+    if not (session / "session.json").exists():
+        print(f"relay: no pair {pair_slug!r} under {root}", file=sys.stderr)
+        return 2
+    if not session_is_active(session):
+        print(f"relay: pair {pair_slug!r} is not active", file=sys.stderr)
+        return 2
+    existing = binding_for_pair(root, pair_slug)
+    if any(b.get("author") == env.author
+           and b.get("agent_session_id") == env.agent_session_id
+           for b in existing):
+        _write_binding_record(root, env, pair_slug)  # idempotent refresh
+        return 0
+    if any(b.get("author") == env.author and not _binding_is_stale(b)
+           for b in existing):
+        print(f"relay: pair {pair_slug!r} already has a live {env.author!r} "
+              f"instance; same-author pairs can't be routed (peer is by agent "
+              f"name). Join a different pair or use a distinct RELAY_AUTHOR.",
+              file=sys.stderr)
+        return 2
+    if len(existing) >= 2:
+        stale = [b for b in existing if _binding_is_stale(b)]
+        if not stale:
+            print(f"relay: pair {pair_slug!r} is full (2 live instances bound)",
+                  file=sys.stderr)
+            return 2
+        for b in stale:
+            delete_binding(root, b.get("author", ""), b.get("agent_session_id", ""))
+    _write_binding_record(root, env, pair_slug)
+    return 0
+
+
+def _maybe_update_binding_last_seen(env: "Env", root: Path) -> None:
+    """Best-effort, throttled refresh of this instance's binding liveness.
+    No-op if unbound or identity unresolved. Never raises."""
+    if not env.author or not env.agent_session_id:
+        return
+    try:
+        b = read_binding(root, env.author, env.agent_session_id)
+        if not b:
+            return
+        last = b.get("last_seen")
+        if last:
+            try:
+                age = (datetime.now().astimezone()
+                       - datetime.fromisoformat(last)).total_seconds()
+                if age < _BINDING_UPDATE_MIN_INTERVAL:
+                    return
+            except (ValueError, TypeError):
+                pass
+        b["last_seen"] = now_iso()
+        write_binding(root, b)
+    except OSError:
+        pass
 
 
 def _resolve_sync(env: Env, *, is_shape_a: bool) -> tuple[Optional[str], str]:
@@ -551,35 +818,6 @@ def session_root(env: Env) -> Path:
     return env.shared_root
 
 
-def active_marker_path(root: Path) -> Path:
-    return root / ".active-session"
-
-
-def read_active_marker(root: Path) -> str | None:
-    marker = active_marker_path(root)
-    try:
-        value = marker.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    return value or None
-
-
-def write_active_marker(root: Path, session_slug: str) -> None:
-    atomic_write_text(active_marker_path(root), f"{session_slug}\n", mode=0o600)
-
-
-def clear_active_marker(root: Path, session_slug: str | None = None) -> None:
-    marker = active_marker_path(root)
-    current = read_active_marker(root)
-    if session_slug is not None and current != session_slug:
-        return
-    try:
-        marker.unlink()
-        _fsync_dir(root)
-    except FileNotFoundError:
-        pass
-
-
 def iter_session_dirs(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
@@ -614,35 +852,43 @@ def resolve_session(env: Env, session_id: str | None = None, *,
 
 
 def resolve_active_session(env: Env, project: str | None = None,
-                           session_id: str | None = None) -> Path:
+                           pair_id: str | None = None) -> Path:
+    """Resolve which pair a command operates on.
+
+    Order (v0.13): explicit --pair-id > this instance's binding (if it still
+    names an active pair) > the sole active pair > else refuse and list
+    candidates. Per-instance bindings replace the old single global
+    `.active-session` marker, so parallel pairs on one host each resolve to
+    their own pair. A stale binding (its pair gone/inactive) is self-healed.
+    """
     root = session_root(env)
     if not root.is_dir():
         raise SystemExit(f"no shared root: {root}")
-    if session_id:
-        return resolve_session(env, session_id, project=project, require_active=True)
+    _maybe_update_binding_last_seen(env, root)
+    if pair_id:
+        return resolve_session(env, pair_id, project=project, require_active=True)
+
+    # This instance's binding wins (fast path) when it still names an active
+    # pair. Otherwise drop the dangling binding and fall through to discovery.
+    if env.author and env.agent_session_id:
+        b = read_binding(root, env.author, env.agent_session_id)
+        if b:
+            slug = b.get("pair_slug")
+            cand = root / slug if slug else None
+            if cand and (cand / "session.json").exists() and session_is_active(cand):
+                return cand
+            delete_binding(root, env.author, env.agent_session_id)
 
     # session_is_active() honors state, CLOSED sentinel, AND latest artifact
-    # status (so stale-active sessions with terminal latest artifacts are
-    # excluded). Avoids spurious "multiple active sessions".
+    # status (so stale-active pairs with terminal latest artifacts are excluded).
     candidates = active_sessions(root)
     if not candidates:
-        raise SystemExit(f"no active session under {root}")
+        raise SystemExit(f"no active pair under {root}")
     if len(candidates) > 1:
-        # Finding 5 (codex seq 2): when several sessions are active (the
-        # documented `bootstrap --force` parallel mode), let `.active-session`
-        # disambiguate so preflight-pass and command-success agree. Preflight
-        # already treats a marker that names one of the actives as OK; without
-        # honoring it here, every default command still failed with "multiple
-        # active sessions", making the marker non-predictive.
-        marker = read_active_marker(root)
-        if marker:
-            for s in candidates:
-                if s.name == marker:
-                    return s
         names = ", ".join(s.name for s in candidates)
-        hint = f" (.active-session={marker!r} matches none of them)" if marker else ""
         raise SystemExit(
-            f"multiple active sessions; specify --session-id: {names}{hint}"
+            "multiple active pairs; run `relay pair join <slug>` to bind to one "
+            f"(or pass --pair-id): {names}"
         )
     return candidates[0]
 
@@ -776,64 +1022,36 @@ def session_category(session: Path) -> str:
     return "inactive"
 
 
-def _check_active_marker(root: Path) -> dict:
-    marker = read_active_marker(root)
-    actives = active_sessions(root)
-    active_names = [sd.name for sd in actives]
-    if marker is None:
-        if not active_names:
+def _check_binding_health(root: Path, env: Env) -> dict:
+    """Replaces the old `.active-session` marker check. Reports whether THIS
+    instance's binding points at a live pair. Having no binding is normal on a
+    first turn (before `pair ensure`/`bootstrap`), so it stays non-blocking
+    unless multiple active pairs make a choice necessary."""
+    name = "session.binding"
+    if not env.author or not env.agent_session_id:
+        return {"name": name, "status": "pass",
+                "detail": "no instance identity resolved; binding check skipped"}
+    b = read_binding(root, env.author, env.agent_session_id)
+    if not b:
+        active_names = [sd.name for sd in active_sessions(root)]
+        if len(active_names) > 1:
             return {
-                "name": "session.active_marker",
-                "status": "pass",
-                "detail": "no active sessions and no marker",
+                "name": name, "status": "warn",
+                "detail": (
+                    f"no binding for this instance and {len(active_names)} active "
+                    f"pairs ({', '.join(active_names)}); run `relay pair ensure` "
+                    "or `relay pair join <slug>`"
+                ),
             }
-        if len(active_names) == 1:
-            return {
-                "name": "session.active_marker",
-                "status": "pass",
-                "detail": f"single active session {active_names[0]} (no marker needed)",
-            }
-        # Finding 5: `bootstrap --force` is documented for parallel sessions.
-        # Multiple actives without a marker is the legitimate state for that
-        # mode; downgrade from fail -> warn so callers can pass --session-id
-        # to disambiguate downstream commands without preflight blocking.
-        return {
-            "name": "session.active_marker",
-            "status": "warn",
-            "detail": (
-                f"{len(active_names)} active sessions without a marker "
-                f"({', '.join(active_names)}); "
-                "use --session-id <id> on follow-up commands, or `relay sessions list`."
-            ),
-        }
-    target = root / marker
-    if not (target / "session.json").exists():
-        return {
-            "name": "session.active_marker",
-            "status": "fail",
-            "detail": f".active-session points at missing session {marker!r}",
-        }
-    if marker not in active_names:
-        # Marker points at a real session that's no longer active.
-        return {
-            "name": "session.active_marker",
-            "status": "fail",
-            "detail": f".active-session={marker!r} but that session is not active "
-                      f"(active={active_names or 'none'})",
-        }
-    if len(active_names) > 1:
-        # Marker disambiguates; parallel mode is fine.
-        others = [n for n in active_names if n != marker]
-        return {
-            "name": "session.active_marker",
-            "status": "pass",
-            "detail": f".active-session={marker} (other active: {', '.join(others)})",
-        }
-    return {
-        "name": "session.active_marker",
-        "status": "pass",
-        "detail": f"active session marker matches {marker}",
-    }
+        return {"name": name, "status": "pass",
+                "detail": "no binding for this instance (run `relay pair ensure`)"}
+    slug = b.get("pair_slug")
+    cand = root / slug if slug else None
+    if cand and (cand / "session.json").exists() and session_is_active(cand):
+        return {"name": name, "status": "pass", "detail": f"bound to {slug}"}
+    return {"name": name, "status": "warn",
+            "detail": f"bound pair {slug!r} is no longer active; "
+                      "run `relay pair ensure` to rebind"}
 
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1229,7 @@ def cmd_preflight(args) -> int:
         })
 
     if env.shared_root and env.shared_root.is_dir():
-        out["checks"].append(_check_active_marker(env.shared_root))
+        out["checks"].append(_check_binding_health(env.shared_root, env))
 
     if env.shared_root and env.shared_root.is_dir():
         for r in run_probes(env.shared_root):
@@ -1356,7 +1574,7 @@ def cmd_bootstrap(args) -> int:
         "participants": participants,
     }
     atomic_write_json(session_dir / "session.json", session_json)
-    write_active_marker(env.shared_root, session_slug)
+    join_pair(env, env.shared_root, session_slug)  # creator is the pair's first instance
 
     readme = (
         f"# relay session: {session_slug}\n\n"
@@ -1377,9 +1595,9 @@ def cmd_bootstrap(args) -> int:
 
 def cmd_status(args) -> int:
     env = load_env()
-    session_id = getattr(args, "session_id", None)
-    session = (resolve_session(env, session_id, project=getattr(args, "project", None))
-               if session_id else resolve_active_session(env, getattr(args, "project", None)))
+    pair_id = getattr(args, "pair_id", None)
+    session = (resolve_session(env, pair_id, project=getattr(args, "project", None))
+               if pair_id else resolve_active_session(env, getattr(args, "project", None)))
     _gc_heartbeat_orphans(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
@@ -1465,7 +1683,7 @@ def cmd_next_seq(args) -> int:
     session = resolve_active_session(
         env,
         getattr(args, "project", None),
-        getattr(args, "session_id", None),
+        getattr(args, "pair_id", None),
     )
     print(latest_seq(session) + 1)
     return 0
@@ -1521,15 +1739,15 @@ def cmd_claim(args) -> int:
         session = resolve_active_session(
             env,
             getattr(args, "project", None),
-            getattr(args, "session_id", None),
+            getattr(args, "pair_id", None),
         )
     except SystemExit as exc:
         msg = str(exc)
         hint = ""
-        if "no active session" in msg or "not active" in msg:
-            hint = " — run `relay sessions list` to see existing sessions, or `relay bootstrap --topic <slug>` to start a new one."
-        elif "multiple active sessions" in msg:
-            hint = " — pass `--session-id <id>` to disambiguate."
+        if "no active pair" in msg or "not active" in msg:
+            hint = " — run `relay pairs list` to see existing pairs, or `relay bootstrap --topic <slug>` to start a new one."
+        elif "multiple active pairs" in msg:
+            hint = " — run `relay pair ensure` / `relay pair join <slug>`, or pass `--pair-id <id>`."
         print(f"relay claim: {msg}{hint}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author or "")
@@ -1780,13 +1998,16 @@ def cmd_publish(args) -> int:
         try:
             cmd_heartbeat_stop(type("A", (), {
                 "draft": str(draft_path), "force": True,
-                "project": None, "session_id": None,
+                "project": None, "pair_id": None,
             })())
         except Exception as exc:
             print(f"relay publish: heartbeat stop warning: {exc}", file=sys.stderr)
         if final_status in TERMINAL_STATUSES:
-            if env_pub.shared_root:
-                clear_active_marker(env_pub.shared_root, session.name)
+            # Terminal publish ends this pair; drop the publisher's binding (the
+            # peer self-heals its own dangling binding on its next resolve).
+            if env_pub.shared_root and env_pub.author and env_pub.agent_session_id:
+                delete_binding(env_pub.shared_root, env_pub.author,
+                               env_pub.agent_session_id)
         print(paths["md"])
         return 0
     print(
@@ -2218,16 +2439,16 @@ def cmd_close(args) -> int:
         session = resolve_active_session(
             env,
             getattr(args, "project", None),
-            getattr(args, "session_id", None),
+            getattr(args, "pair_id", None),
         )
     except SystemExit as exc:
         msg = str(exc)
-        if "multiple active sessions" in msg:
+        if "multiple active pairs" in msg:
             print(f"relay close: {msg}", file=sys.stderr)
             return 2
-        # Surface "already closed" instead of the generic "no active session"
-        # when a session in the project already has a CLOSED sentinel.
-        if "no active session" in msg:
+        # Surface "already closed" instead of the generic "no active pair"
+        # when a pair in the project already has a CLOSED sentinel.
+        if "no active pair" in msg:
             try:
                 root = session_root(env)
             except SystemExit:
@@ -2263,8 +2484,8 @@ def cmd_close(args) -> int:
     data["closed_at"] = now_iso()
     data["close_reason"] = args.reason
     atomic_write_json(sj_path, data)
-    if env.shared_root:
-        clear_active_marker(env.shared_root, session.name)
+    if env.shared_root and env.author and env.agent_session_id:
+        delete_binding(env.shared_root, env.author, env.agent_session_id)
 
     print(f"closed: {session}")
     print(f"  reason:   {args.reason}")
@@ -2273,7 +2494,6 @@ def cmd_close(args) -> int:
 
 
 def _session_list_payload(root: Path) -> list[dict]:
-    marker = read_active_marker(root)
     items: list[dict] = []
     for sd in iter_session_dirs(root):
         try:
@@ -2281,6 +2501,8 @@ def _session_list_payload(root: Path) -> list[dict]:
         except (OSError, json.JSONDecodeError):
             sj = {}
         latest = latest_artifact_frontmatter(sd)
+        bindings = binding_for_pair(root, sd.name)
+        live = [b for b in bindings if not _binding_is_stale(b)]
         items.append({
             "session_id": sd.name,
             "project": sj.get("project"),
@@ -2288,7 +2510,9 @@ def _session_list_payload(root: Path) -> list[dict]:
             "state": sj.get("state"),
             "category": session_category(sd),
             "is_active": session_is_active(sd),
-            "active_marker": marker == sd.name,
+            "bound_instances": [b.get("instance_id") for b in bindings],
+            "authors": [b.get("author") for b in live],
+            "open_slots": max(0, 2 - len(live)),
             "closed_sentinel": (sd / "CLOSED").exists(),
             "next_seq": latest_seq(sd) + 1,
             "latest": latest,
@@ -2302,29 +2526,28 @@ def cmd_sessions_list(args) -> int:
     try:
         root = session_root(env)
     except SystemExit as exc:
-        print(f"relay sessions list: {exc}", file=sys.stderr)
+        print(f"relay pairs list: {exc}", file=sys.stderr)
         return 2
     payload = {
         "shared_root": str(root),
-        "active_marker": read_active_marker(root),
-        "sessions": _session_list_payload(root),
+        "pairs": _session_list_payload(root),
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
-    print(f"sessions under {root}:")
-    if not payload["sessions"]:
+    print(f"pairs under {root}:")
+    if not payload["pairs"]:
         print("  (none)")
         return 0
-    for item in payload["sessions"]:
-        marker = " marker" if item["active_marker"] else ""
+    for item in payload["pairs"]:
         latest = item["latest"] or {}
         latest_desc = ""
         if latest:
             latest_desc = f" latest={latest.get('seq')}:{latest.get('status')}"
+        bound = ",".join(i for i in item["bound_instances"] if i) or "-"
         print(
-            f"  {item['session_id']}  {item['category']}{marker}"
-            f" state={item.get('state')}{latest_desc}"
+            f"  {item['session_id']}  {item['category']}"
+            f" slots={item['open_slots']}/2 bound=[{bound}]{latest_desc}"
         )
     return 0
 
@@ -2948,7 +3171,7 @@ def cmd_heartbeat_stop(args) -> int:
             session = resolve_active_session(
                 env,
                 getattr(args, "project", None),
-                getattr(args, "session_id", None),
+                getattr(args, "pair_id", None),
             )
         except SystemExit as exc:
             print(f"relay heartbeat stop: {exc}", file=sys.stderr)
@@ -3099,7 +3322,7 @@ def cmd_heartbeat_tick(args) -> int:
         session = resolve_active_session(
             env,
             getattr(args, "project", None),
-            getattr(args, "session_id", None),
+            getattr(args, "pair_id", None),
         )
     except SystemExit as exc:
         print(f"relay heartbeat tick: {exc}", file=sys.stderr)
@@ -3278,6 +3501,21 @@ def cmd_doctor(args) -> int:
                         )
         report["sessions"].append(entry)
 
+    # Stale binding GC (v0.13). Bindings carry no PID — delete_binding removes
+    # files only, never signals a process (mirrors _heartbeat_purge_files_only).
+    report["stale_bindings"] = []
+    for b in list_bindings(env.shared_root):
+        if _binding_is_stale(b):
+            report["stale_bindings"].append(b.get("instance_id") or b.get("author"))
+            findings += 1
+            if args.fix:
+                delete_binding(env.shared_root, b.get("author", ""),
+                               b.get("agent_session_id", ""))
+                actions.append(f"removed stale binding {b.get('instance_id')}")
+    # Legacy global marker left by pre-v0.13 bootstraps — harmless, informational.
+    legacy = env.shared_root / ".active-session"
+    report["legacy_active_session"] = str(legacy) if legacy.exists() else None
+
     report["findings_count"] = findings
 
     if getattr(args, "json", False):
@@ -3309,6 +3547,13 @@ def _print_doctor_text(report: dict, *, fix: bool) -> None:
             print("    heartbeat sidecars:")
             for sc in s["heartbeat_sidecars"]:
                 print(f"      - {sc['name']}  age={sc['age_seconds']}s")
+    if report.get("stale_bindings"):
+        print("\n  stale bindings:")
+        for ib in report["stale_bindings"]:
+            print(f"      - {ib}")
+    if report.get("legacy_active_session"):
+        print(f"\n  note: pre-v0.13 .active-session marker present (harmless): "
+              f"{report['legacy_active_session']}")
     if report["actions"]:
         print("\n  actions taken:")
         for a in report["actions"]:
@@ -3327,15 +3572,15 @@ def cmd_wait(args) -> int:
         session = resolve_active_session(
             env,
             getattr(args, "project", None),
-            getattr(args, "session_id", None),
+            getattr(args, "pair_id", None),
         )
     except SystemExit as exc:
         msg = str(exc)
         hint = ""
-        if "no active session" in msg:
-            hint = " — run `relay sessions list` to see existing sessions, or `relay bootstrap --topic <slug>` to start a new one."
-        elif "multiple active sessions" in msg:
-            hint = " — pass `--session-id <id>` to disambiguate."
+        if "no active pair" in msg:
+            hint = " — run `relay pairs list` to see existing pairs, or `relay bootstrap --topic <slug>` to start a new one."
+        elif "multiple active pairs" in msg:
+            hint = " — run `relay pair ensure` / `relay pair join <slug>`, or pass `--pair-id <id>`."
         print(f"relay wait: {msg}{hint}", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author)
@@ -3735,6 +3980,144 @@ def cmd_hooks_status(args) -> int:
 # CLI dispatch
 # ---------------------------------------------------------------------------
 
+def cmd_whoami(args) -> int:
+    """Print this instance's resolved identity + current pair binding.
+    Diagnostic for the binding layer; safe with no active pair."""
+    env = load_env()
+    bound = None
+    if env.author and env.agent_session_id and env.shared_root:
+        b = read_binding(env.shared_root, env.author, env.agent_session_id)
+        bound = b.get("pair_slug") if b else None
+    payload = {
+        "author": env.author,
+        "agent_session_id": env.agent_session_id,
+        "agent_session_id_source": env.agent_session_id_source,
+        "instance_id": env.instance_id,
+        "bound_pair": bound,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    print(f"author:            {env.author or '(unset)'}")
+    print(f"agent_session_id:  {env.agent_session_id or '(none)'}"
+          f"  (source: {env.agent_session_id_source})")
+    print(f"instance_id:       {env.instance_id or '(none)'}")
+    print(f"bound_pair:        {bound or '(none)'}")
+    return 0
+
+
+def cmd_pair_join(args) -> int:
+    env = load_env()
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        print(f"relay pair join: {exc}", file=sys.stderr)
+        return 2
+    rc = join_pair(env, root, args.slug)
+    if rc == 0:
+        print(f"bound {env.instance_id} -> {args.slug}")
+    return rc
+
+
+def cmd_pair_leave(args) -> int:
+    env = load_env()
+    if not env.author or not env.agent_session_id:
+        print("relay pair leave: no instance identity to unbind", file=sys.stderr)
+        return 2
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        print(f"relay pair leave: {exc}", file=sys.stderr)
+        return 2
+    delete_binding(root, env.author, env.agent_session_id)
+    print(f"unbound {env.instance_id}")
+    return 0
+
+
+def _pair_candidate(root: Path, sd: Path) -> dict:
+    try:
+        sj = json.loads((sd / "session.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sj = {}
+    live = [x for x in binding_for_pair(root, sd.name) if not _binding_is_stale(x)]
+    return {
+        "slug": sd.name,
+        "title": sj.get("title"),
+        "state": sj.get("state"),
+        "authors": [x.get("author") for x in live],
+        "bound_instances": [x.get("instance_id") for x in live],
+        "open_slots": max(0, 2 - len(live)),
+    }
+
+
+def _ensure_emit(args, payload: dict, rc: int = 0) -> int:
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        print(f"action: {payload.get('action')}")
+        if payload.get("pair"):
+            print(f"  pair: {payload['pair']}")
+        if payload.get("detail"):
+            print(f"  {payload['detail']}")
+        for c in payload.get("candidates", []):
+            authors = ",".join(a for a in c["authors"] if a) or "-"
+            print(f"  - {c['slug']}  slots={c['open_slots']}/2 authors={authors}")
+        for p in payload.get("pairs", []):
+            print(f"  - {p}")
+    return rc
+
+
+def cmd_pair_ensure(args) -> int:
+    """Smart pair resolution for the skill prelude. Emits a structured
+    {action, ...} and an exit code (0 = ready: use/joined; 3 = user input
+    needed: bootstrap/choose/full; 2 = error). Only mechanical decisions live
+    here — the interactive 'ask the user which pair' stays in the skill."""
+    env = load_env()
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        return _ensure_emit(args, {"action": "error", "detail": str(exc)}, rc=2)
+    if not env.author or not env.agent_session_id:
+        return _ensure_emit(args, {"action": "error",
+            "detail": "no instance identity (set RELAY_AUTHOR)"}, rc=2)
+    # 1. already bound to a live pair -> use it (fast path)
+    b = read_binding(root, env.author, env.agent_session_id)
+    if b:
+        slug = b.get("pair_slug")
+        cand = root / slug if slug else None
+        if cand and (cand / "session.json").exists() and session_is_active(cand):
+            return _ensure_emit(args, {"action": "use", "pair": slug,
+                                       "instance_id": env.instance_id}, rc=0)
+        delete_binding(root, env.author, env.agent_session_id)  # stale -> rediscover
+    # 2. discover active pairs
+    actives = active_sessions(root)
+    if not actives:
+        return _ensure_emit(args, {"action": "bootstrap",
+            "detail": "no active pair; bootstrap one"}, rc=3)
+    # 3. joinable = has a free/reclaimable slot AND no live same-author binding
+    joinable = []
+    for sd in actives:
+        live = [x for x in binding_for_pair(root, sd.name) if not _binding_is_stale(x)]
+        if any(x.get("author") == env.author for x in live):
+            continue
+        if len(live) < 2:
+            joinable.append(sd)
+    if len(joinable) == 1:
+        slug = joinable[0].name
+        if join_pair(env, root, slug) == 0:
+            return _ensure_emit(args, {"action": "joined", "pair": slug,
+                                       "instance_id": env.instance_id}, rc=0)
+        return _ensure_emit(args, {"action": "error",
+            "detail": f"auto-join {slug} failed"}, rc=2)
+    if not joinable:
+        return _ensure_emit(args, {"action": "full",
+            "pairs": [s.name for s in actives],
+            "detail": "active pairs exist but none joinable (full or same-author)"},
+            rc=3)
+    return _ensure_emit(args, {"action": "choose",
+        "candidates": [_pair_candidate(root, sd) for sd in joinable]}, rc=3)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="relay",
         description="agent-relay file protocol CLI.")
@@ -3744,6 +4127,13 @@ def build_parser() -> argparse.ArgumentParser:
     pp = sub.add_parser("preflight", help="Check env, mount, project, FS probes.")
     pp.add_argument("--json", action="store_true")
     pp.set_defaults(func=cmd_preflight)
+
+    pwho = sub.add_parser("whoami",
+        help="Print resolved instance identity (author + agent session id).")
+    pwho.add_argument("--json", action="store_true")
+    pwho.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
+    pwho.set_defaults(func=cmd_whoami)
 
     pi = sub.add_parser("init", help="Idempotently create RELAY_SHARED_ROOT + sentinel.")
     pi.add_argument("--same-host", action="store_true",
@@ -3768,10 +4158,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Allow creating a parallel active session.")
     pb.set_defaults(func=cmd_bootstrap)
 
-    ps = sub.add_parser("status", help="Show active session status.")
+    ps = sub.add_parser("status", help="Show the bound pair's status.")
     ps.add_argument("--project", default=None)
-    ps.add_argument("--session-id", default=None,
-                    help="Resolve a specific flat .shared/<session-id> session.")
+    ps.add_argument("--pair-id", default=None,
+                    help="Resolve a specific flat .shared/<pair-id> pair.")
+    ps.add_argument("--agent-session-id", default=None,
+                    help="Override agent session id for instance resolution (used by hooks).")
     ps.add_argument("--last", type=int, default=0,
                      help="Show only last N published artifacts (0 = all).")
     ps.add_argument("--json", action="store_true")
@@ -3779,7 +4171,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pn = sub.add_parser("next-seq", help="Print next available NNN (advisory).")
     pn.add_argument("--project", default=None)
-    pn.add_argument("--session-id", default=None)
+    pn.add_argument("--pair-id", default=None)
     pn.set_defaults(func=cmd_next_seq)
 
     pc = sub.add_parser("claim", help="Scaffold a new draft artifact under .draft/.")
@@ -3789,7 +4181,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Seq this draft supersedes; required when --kind correction. "
                          "Optional for addendum (an addendum adds info without retracting).")
     pc.add_argument("--project", default=None)
-    pc.add_argument("--session-id", default=None)
+    pc.add_argument("--pair-id", default=None)
     pc.set_defaults(func=cmd_claim)
 
     pds = sub.add_parser(
@@ -3871,14 +4263,35 @@ def build_parser() -> argparse.ArgumentParser:
     pcl.add_argument("--reason", required=True)
     pcl.add_argument("--outcome", default=None)
     pcl.add_argument("--project", default=None)
-    pcl.add_argument("--session-id", default=None)
+    pcl.add_argument("--pair-id", default=None)
     pcl.set_defaults(func=cmd_close)
 
-    psessions = sub.add_parser("sessions", help="Session discovery helpers.")
-    ss = psessions.add_subparsers(dest="sessions_cmd", required=True)
-    psl = ss.add_parser("list", help="List all flat sessions without resolving active.")
-    psl.add_argument("--json", action="store_true")
-    psl.set_defaults(func=cmd_sessions_list)
+    ppairs = sub.add_parser("pairs", help="Pair discovery (list all pairs + bindings).")
+    pps = ppairs.add_subparsers(dest="pairs_cmd", required=True)
+    ppl = pps.add_parser("list", help="List all pairs, their bound instances, and open slots.")
+    ppl.add_argument("--json", action="store_true")
+    ppl.set_defaults(func=cmd_sessions_list)
+
+    ppair = sub.add_parser("pair",
+        help="Bind this instance to a pair (join), drop the binding (leave), or "
+             "smart-resolve which pair to work in (ensure).")
+    pair_sub = ppair.add_subparsers(dest="pair_cmd", required=True)
+    pj = pair_sub.add_parser("join", help="Bind this instance to <slug>.")
+    pj.add_argument("slug", help="Pair slug (YYYYMMDD-topic).")
+    pj.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
+    pj.set_defaults(func=cmd_pair_join)
+    pv = pair_sub.add_parser("leave", help="Drop this instance's binding (files only).")
+    pv.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
+    pv.set_defaults(func=cmd_pair_leave)
+    pe = pair_sub.add_parser("ensure",
+        help="Smart-resolve the pair: use the binding, auto-join the sole "
+             "compatible pair, or report that the user must choose / bootstrap.")
+    pe.add_argument("--json", action="store_true")
+    pe.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
+    pe.set_defaults(func=cmd_pair_ensure)
 
     psync = sub.add_parser("sync", help="rsync wrapper (only the RELAY_SYNC=rsync side may run it).")
     psync.add_argument("direction", choices=["push", "pull"])
@@ -3904,7 +4317,9 @@ def build_parser() -> argparse.ArgumentParser:
     pw = sub.add_parser("wait",
         help="Block until peer publishes a new artifact targeting this author.")
     pw.add_argument("--project", default=None)
-    pw.add_argument("--session-id", default=None)
+    pw.add_argument("--pair-id", default=None)
+    pw.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
     pw_timeout = pw.add_mutually_exclusive_group()
     pw_timeout.add_argument("--timeout", type=int, default=None,
                     help="Override RELAY_WAIT_TIMEOUT (default 3600s).")
@@ -3935,7 +4350,9 @@ def build_parser() -> argparse.ArgumentParser:
     phb_stop.add_argument("--draft", default=None,
         help="Optional draft path; if omitted, all sidecars for current author are cleared.")
     phb_stop.add_argument("--project", default=None)
-    phb_stop.add_argument("--session-id", default=None)
+    phb_stop.add_argument("--pair-id", default=None)
+    phb_stop.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
     phb_stop.add_argument("--force", action="store_true",
         help="Remove files even if no daemon is running.")
     phb_stop.set_defaults(func=cmd_heartbeat_stop)
@@ -3943,7 +4360,9 @@ def build_parser() -> argparse.ArgumentParser:
     phb_tick = phs.add_parser("tick",
         help="Refresh the local renewal file mtime so the daemon sees the owner alive.")
     phb_tick.add_argument("--project", default=None)
-    phb_tick.add_argument("--session-id", default=None)
+    phb_tick.add_argument("--pair-id", default=None)
+    phb_tick.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
     phb_tick.set_defaults(func=cmd_heartbeat_tick)
 
     pho = sub.add_parser("hooks",
@@ -3976,6 +4395,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Hooks receive the agent session id on stdin and pass it via
+    # --agent-session-id; surface it as RELAY_AGENT_SESSION_ID so load_env()
+    # (top of the resolve_instance_id precedence chain) picks it up without
+    # each command re-parsing.
+    _asid = getattr(args, "agent_session_id", None)
+    if _asid:
+        os.environ["RELAY_AGENT_SESSION_ID"] = _asid
     return args.func(args)
 
 

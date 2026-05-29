@@ -64,28 +64,30 @@ def _publish_terminal(session: Path) -> None:
     (session / f"{base}.ready").write_text("")
 
 
-def test_sessions_list_shows_active_terminal_closed_separately(monkeypatch, tmp_path, capsys):
-    """R3.c: `relay sessions list` categorizes every session as active / terminal / closed
-    and never raises on zero-active or multiple-active states."""
+def test_pairs_list_shows_active_terminal_closed_separately(monkeypatch, tmp_path, capsys):
+    """`relay pairs list` categorizes every pair as active / terminal / closed,
+    reports bindings + open slots, and never raises on zero- or multiple-active."""
     shared = _setup_shared(monkeypatch, tmp_path)
     active = _write_session(shared, "20260527-active")
     terminal = _write_session(shared, "20260527-terminal")
     _publish_terminal(terminal)
     closed = _write_session(shared, "20260527-closed", state="closed", closed_sentinel=True)
-    (shared / ".active-session").write_text(active.name + "\n")
+    relay.join_pair(relay.load_env(), shared, active.name)
 
     rc = relay.cmd_sessions_list(type("A", (), {"json": True})())
     data = json.loads(capsys.readouterr().out)
-    by_id = {item["session_id"]: item for item in data["sessions"]}
+    by_id = {item["session_id"]: item for item in data["pairs"]}
     assert rc == 0
     assert by_id[active.name]["category"] == "active"
     assert by_id[terminal.name]["category"] == "terminal"
     assert by_id[closed.name]["category"] == "closed"
-    assert by_id[active.name]["active_marker"] is True
+    # the bound instance shows up and one slot is now taken
+    assert by_id[active.name]["bound_instances"]
+    assert by_id[active.name]["open_slots"] == 1
 
     second_active = _write_session(shared, "20260527-second-active")
     rc = relay.cmd_sessions_list(type("A", (), {"json": True})())
     data = json.loads(capsys.readouterr().out)
-    categories = {item["session_id"]: item["category"] for item in data["sessions"]}
+    categories = {item["session_id"]: item["category"] for item in data["pairs"]}
     assert rc == 0
     assert categories[second_active.name] == "active"

@@ -4,6 +4,59 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.13.0 — 2026-05-29
+
+Multiple concurrent **pairs** per project, keyed by per-instance bindings. The
+collaboration unit (formerly "session") is now a **pair** of two **instances**,
+where an instance is one running agent session identified by
+`<author>:<agent-session-id>`. This lets two agent windows on one host each work
+in their own pair without colliding. (Pre-1.0: the product/CLI is still named
+`relay` / `RELAY_*` / `agent-relay`; only the collaboration-unit vocabulary
+changed. A product rename is a separate future pass.)
+
+### New
+
+- **Instance identity.** `relay` resolves this instance's agent session id from
+  `RELAY_AGENT_SESSION_ID` (hook-injected) → `CLAUDE_CODE_SESSION_ID` (Claude
+  Code) → `CODEX_THREAD_ID` (Codex) → a persisted per-terminal fallback, so it
+  never hard-fails. `relay whoami` prints it and the current binding.
+- **Binding registry.** Each instance binds to one pair via a per-instance file
+  `.shared/_relay/bindings/<author>-<sha256(full-id)[:24]>.json` (full id hashed
+  — never a truncated prefix). This replaces the single global `.active-session`
+  marker, so parallel pairs each resolve to their own pair with no `--pair-id`.
+- **New commands.** `relay pair ensure` (smart resolver: use binding → auto-join
+  the sole compatible pair → else report `choose`/`bootstrap`/`full`),
+  `relay pair join <slug>` / `relay pair leave`, `relay whoami`.
+- `relay bootstrap` binds its creator; `relay close` / terminal publish drop the
+  closing instance's binding. `relay doctor [--fix]` GCs stale bindings (files
+  only — never signals a PID).
+
+### Breaking changes
+
+- **`.shared/.active-session` is retired.** The global marker and its
+  read/write/clear/`_check_active_marker` helpers are removed (no compat shim,
+  pre-1.0). Existing markers are inert; `relay doctor` reports them as
+  informational. Multi-pair users now bind via `relay pair ensure` / `pair join`.
+- **`relay sessions list` → `relay pairs list`** (adds `bound_instances` /
+  `open_slots`; JSON key `sessions` → `pairs`).
+- **`--session-id` → `--pair-id`** on `status` / `next-seq` / `claim` / `close` /
+  `wait` / `heartbeat stop|tick`.
+- **Resolver errors reworded**: `no active session` → `no active pair`;
+  `multiple active sessions` → `multiple active pairs`. Resolution now consults
+  this instance's binding before falling back to the sole-active rule.
+- **preflight** replaces the `session.active_marker` check with
+  `session.binding` (bound→active = pass; missing binding = pass, or warn if >1
+  active pair; binding→inactive pair = warn, not the old hard fail).
+
+### Notes
+
+- The published-artifact protocol is unchanged (filenames, frontmatter, sidecars,
+  append-only, `session.json` schema stays v3). The agent session id is used only
+  by the binding layer.
+- **Same-agent pairs (claude+claude) are unsupported**: artifacts route by
+  `author`, so `join`/`ensure` refuse a pair already holding a live same-author
+  instance. The canonical claude+codex pair is unaffected.
+
 ## 0.12.0 — 2026-05-29
 
 - `RELAY_SHARED_ROOT` is now optional for normal per-project setups. When it

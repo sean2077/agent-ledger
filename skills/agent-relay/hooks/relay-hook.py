@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 
 
 def now_iso() -> str:
@@ -191,6 +191,9 @@ def compute_state_fingerprint(status_json: dict) -> str:
     latest = pubs[-1] if pubs else {}
     drafts = status_json.get("drafts", []) or []
     parts = [
+        # pair slug first: one host in two different pairs must not dedup across
+        # them (the per-host state file is shared by same-author instances).
+        str((status_json.get("session") or {}).get("session_id", "")),
         str(latest.get("seq", "")),
         str(latest.get("author", "")),
         str(latest.get("peer", "")),
@@ -408,7 +411,12 @@ def handle_stop(payload: dict, shared_root: Path,
     if not relay:
         return None
 
-    status = call_relay_json(relay, "status")
+    # Resolve which pair to report on by passing this instance's agent session
+    # id, so `relay status` resolves the bound pair (v0.13 multi-pair). Codex
+    # provides it on stdin; Claude Code exposes CLAUDE_CODE_SESSION_ID in env.
+    agent_session_id = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    extra = ["--agent-session-id", agent_session_id] if agent_session_id else []
+    status = call_relay_json(relay, "status", *extra)
     if status is None:
         return None
 
