@@ -3,7 +3,7 @@ name: agent-relay
 description: "Cross-review relay for interactive Claude Code <-> Codex CLI (and other markdown-capable agents) through a shared .shared/ file ledger, with no API-key orchestrator. Use when user says: continue the relay, handoff to claude/codex, start a relay pair, sync code to remote, check relay status. Project-agnostic; uses the `relay` CLI for mechanical ops and RELAY_* env vars for config."
 metadata:
   requires:
-    bins: ["relay", "bash"]
+    bins: ["bash"]
 ---
 
 # agent-relay
@@ -40,7 +40,12 @@ Codex trust note: on the Codex side each new hook entry requires a one-time `/ho
 
 ## Resolve `relay` once per turn
 
-`relay` may not be on `$PATH`. Walk this chain at the start of each turn (project-local wins over global) and use `"$RELAY"` everywhere below:
+`relay` may not be on `$PATH`, and the skill runtime does not expose a
+portable `$SKILL_DIR`. Resolve it once at the start of each turn and use
+`"$RELAY"` everywhere below. Priority: explicit `RELAY_BIN`, project-local
+skill installs, this repo's `skills/agent-relay/bin/relay`, `PATH`, then
+common per-user skill installs. The project-local copy wins so an older global
+symlink cannot shadow the checked-out CLI.
 
 ```bash
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -50,17 +55,19 @@ else
   for cand in \
       "$ROOT/.agents/skills/agent-relay/bin/relay" \
       "$ROOT/.claude/skills/agent-relay/bin/relay" \
+      "$ROOT/.codex/skills/agent-relay/bin/relay" \
       "$ROOT/skills/agent-relay/bin/relay" \
-      "/usr/local/bin/relay" \
-      "$HOME/.local/bin/relay" \
       "$(command -v relay 2>/dev/null)" \
-      "$HOME/.agents/skills/agent-relay/bin/relay" \
+      "$HOME/.codex/skills/agent-relay/bin/relay" \
       "$HOME/.claude/skills/agent-relay/bin/relay" \
-      "$HOME/.codex/skills/agent-relay/bin/relay" ; do
+      "$HOME/.agents/skills/agent-relay/bin/relay" ; do
     [ -n "$cand" ] && [ -x "$cand" ] && { RELAY="$cand"; break; }
   done
 fi
-[ -n "$RELAY" ] || { echo "cannot locate relay CLI" >&2; exit 2; }
+[ -n "${RELAY:-}" ] || {
+  echo 'cannot locate relay CLI; install with: ln -s "$PWD/skills/agent-relay/bin/relay" ~/.local/bin/relay' >&2
+  exit 2
+}
 export RELAY
 ```
 

@@ -180,22 +180,44 @@ def test_first_brief_template_removed_from_surface():
     assert not (ROOT / "skills/agent-relay/templates/first-brief.md").exists()
 
 
-def test_skill_relay_lookup_chain_matches_dispatcher_contract():
-    """F5: SKILL.md lookup chain includes the same project/global fallbacks as hooks."""
+def test_skill_relay_lookup_guidance_documents_priority_contract():
+    """F5: SKILL.md documents the supported lookup priority without requiring
+    relay to be globally installed on PATH."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
-    for needle in [
+    hook_src = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
+    for needle in (
+        'bins: ["bash"]',
+        "the skill runtime does not expose a",
+        "portable `$SKILL_DIR`",
+        "Priority: explicit `RELAY_BIN`",
+        "project-local",
+        "skill installs",
+        "this repo's",
+        "`skills/agent-relay/bin/relay`",
+        "`PATH`",
+        "common per-user skill installs",
+        "older global",
+        "symlink cannot shadow",
         "${RELAY_BIN:-}",
         "$ROOT/.agents/skills/agent-relay/bin/relay",
         "$ROOT/.claude/skills/agent-relay/bin/relay",
+        "$ROOT/.codex/skills/agent-relay/bin/relay",
         "$ROOT/skills/agent-relay/bin/relay",
-        "/usr/local/bin/relay",
-        "$HOME/.local/bin/relay",
         "$(command -v relay 2>/dev/null)",
-        "$HOME/.agents/skills/agent-relay/bin/relay",
-        "$HOME/.claude/skills/agent-relay/bin/relay",
         "$HOME/.codex/skills/agent-relay/bin/relay",
-    ]:
+        "$HOME/.claude/skills/agent-relay/bin/relay",
+        "$HOME/.agents/skills/agent-relay/bin/relay",
+        'ln -s "$PWD/skills/agent-relay/bin/relay" ~/.local/bin/relay',
+    ):
         assert needle in text
+    assert 'bins: ["relay", "bash"]' not in text
+    for needle in (
+        '".agents/skills/agent-relay/bin/relay"',
+        '".claude/skills/agent-relay/bin/relay"',
+        '".codex/skills/agent-relay/bin/relay"',
+        '"skills/agent-relay/bin/relay"',
+    ):
+        assert needle in hook_src
 
 
 def test_skill_documents_terminal_timeout_publish_command():

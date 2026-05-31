@@ -109,7 +109,7 @@ def resolve_hook_author(payload: dict, host: str) -> str:
 # ---------------------------------------------------------------------------
 
 def find_relay() -> Optional[Path]:
-    """Walk the same chain SKILL.md specifies (project-local wins).
+    """Walk the same priority SKILL.md specifies (project-local wins).
 
     `RELAY_BIN` env var, if set and executable, wins over the chain — useful
     for tests and for fixing the binary location explicitly.
@@ -137,6 +137,7 @@ def find_relay() -> Optional[Path]:
         chain.extend([
             root / ".agents/skills/agent-relay/bin/relay",
             root / ".claude/skills/agent-relay/bin/relay",
+            root / ".codex/skills/agent-relay/bin/relay",
             root / "skills/agent-relay/bin/relay",
         ])
     chain.extend([
