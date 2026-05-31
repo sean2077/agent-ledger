@@ -42,6 +42,8 @@ def test_doctor_clean_session_reports_no_findings(monkeypatch, tmp_path, capsys)
     rc = relay.cmd_doctor(_doctor_args())
     assert rc == 0
     out = capsys.readouterr().out
+    assert "0 with findings, 1 clean hidden" in out
+    assert "session [active]" not in out
     assert "summary: 0 findings" in out
 
 

@@ -3816,38 +3816,61 @@ def cmd_doctor(args) -> int:
 
 def _print_doctor_text(report: dict, *, fix: bool) -> None:
     print(f"relay doctor :: {report['shared_root']}")
-    print(f"  author: {report['author'] or '(unset)'}")
-    if not report["sessions"]:
-        print("  no sessions found.")
-        return
-    for s in report["sessions"]:
+    sessions = report.get("sessions", [])
+    sessions_with_findings = [s for s in sessions if _doctor_session_has_findings(s)]
+    clean_sessions = len(sessions) - len(sessions_with_findings)
+    print(
+        f"author: {report['author'] or '(unset)'} | "
+        f"sessions: {len(sessions)} total, "
+        f"{len(sessions_with_findings)} with findings, {clean_sessions} clean hidden"
+    )
+    if sessions_with_findings:
+        print("\nsessions with findings:")
+    for s in sessions_with_findings:
         marker = "[active]" if s["is_active"] else "[inactive]"
-        print(f"\n  session {marker}: {s['session_id']}")
+        parts = []
         if s["drafts"]:
-            print("    drafts (.draft/):")
+            parts.append(f"drafts={len(s['drafts'])}")
+        if s["heartbeat_pidfile"]:
+            hp = s["heartbeat_pidfile"]
+            parts.append("heartbeat_pidfile=" + ("alive" if hp["alive"] else "dead"))
+        if s["heartbeat_sidecars"]:
+            parts.append(f"heartbeat_sidecars={len(s['heartbeat_sidecars'])}")
+        detail = f" ({', '.join(parts)})" if parts else ""
+        print(f"  - {s['session_id']} {marker}{detail}")
+        if s["drafts"]:
+            print("    drafts:")
             for d in s["drafts"]:
-                print(f"      - {d['name']}  age={d['age_seconds']}s")
+                print(f"      {d['name']} age={d['age_seconds']}s")
         hp = s["heartbeat_pidfile"]
         if hp:
             tag = "alive" if hp["alive"] else "DEAD"
-            print(f"    heartbeat pidfile: pid={hp['pid']} ({tag})  {hp['path']}")
+            print(f"    heartbeat pidfile: pid={hp['pid']} {tag} {hp['path']}")
         if s["heartbeat_sidecars"]:
             print("    heartbeat sidecars:")
             for sc in s["heartbeat_sidecars"]:
-                print(f"      - {sc['name']}  age={sc['age_seconds']}s")
+                print(f"      {sc['name']} age={sc['age_seconds']}s")
     if report.get("stale_bindings"):
-        print("\n  stale bindings:")
+        print("\nstale bindings:")
         for ib in report["stale_bindings"]:
-            print(f"      - {ib}")
+            print(f"  - {ib}")
     if report.get("legacy_active_session"):
-        print(f"\n  note: pre-v0.13 .active-session marker present (harmless): "
+        print(f"\nnote: pre-v0.13 .active-session marker present (harmless): "
               f"{report['legacy_active_session']}")
     if report["actions"]:
-        print("\n  actions taken:")
+        print("\nactions taken:")
         for a in report["actions"]:
-            print(f"    - {a}")
+            print(f"  - {a}")
     print(f"\nsummary: {report['findings_count']} findings"
           f"{' (fix applied)' if fix else ''}")
+
+
+def _doctor_session_has_findings(session: dict) -> bool:
+    return bool(
+        session.get("drafts")
+        or session.get("heartbeat_pidfile")
+        or session.get("heartbeat_sidecars")
+    )
 
 
 def cmd_wait(args) -> int:
