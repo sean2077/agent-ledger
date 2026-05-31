@@ -4,6 +4,19 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.15.1 — 2026-06-01
+
+Relay CLI lookup guidance and hook parity fix.
+
+### Fixed
+
+- `SKILL.md` now documents a shorter relay CLI resolution flow that keeps
+  project-local skill installs (`.agents`, `.claude`, `.codex`, and repo
+  `skills/`) ahead of `PATH`, so a stale global symlink cannot shadow the
+  checked-out CLI.
+- The hook dispatcher lookup chain now includes the project-local `.codex`
+  skill install path and stays covered by docs-consistency tests.
+
 ## 0.15.0 — 2026-05-31
 
 Claim-time liveness and command-surface cleanup.
