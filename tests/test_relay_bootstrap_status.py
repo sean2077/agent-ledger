@@ -250,7 +250,7 @@ def test_status_resolves_flat_layout(monkeypatch, tmp_path, capsys):
 
 def test_bootstrap_binds_creator(monkeypatch, tmp_path):
     """v0.13: bootstrap binds the creating instance to the new pair (replacing
-    the old .active-session marker)."""
+    the retired global marker)."""
     shared = _setup_shared(monkeypatch, tmp_path)
     assert relay.cmd_bootstrap(type("A", (), {"topic": "marker", "title": None})()) == 0
     bindings = relay.list_bindings(shared)
@@ -269,7 +269,7 @@ def test_bootstrap_refuses_when_active_session_exists(monkeypatch, tmp_path, cap
 
 
 def test_bootstrap_force_allows_parallel_active_session(monkeypatch, tmp_path):
-    """M3 (a): bootstrap --force overrides the active-session refusal."""
+    """M3 (a): bootstrap --force overrides the active-pair refusal."""
     shared = _setup_shared(monkeypatch, tmp_path)
     assert relay.cmd_bootstrap(type("A", (), {"topic": "one", "title": None})()) == 0
     assert relay.cmd_bootstrap(type("A", (), {"topic": "two", "title": None, "force": True})()) == 0

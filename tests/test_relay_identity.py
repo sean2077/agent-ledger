@@ -213,6 +213,16 @@ def test_bootstrap_custom_author_requires_peer(monkeypatch, tmp_path, capsys):
     assert rc == 0
 
 
+def test_bootstrap_rejects_same_agent_pair(monkeypatch, tmp_path, capsys):
+    _git_repo(monkeypatch, tmp_path)
+    _clear(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "codex-thread")
+    rc = relay.cmd_bootstrap(_args(topic="same", title=None, peer="codex", force=False))
+    assert rc == 2
+    assert "--peer cannot equal author" in capsys.readouterr().err
+    assert not any((tmp_path / "proj" / ".shared").glob("*/session.json"))
+
+
 def test_claim_scaffolds_peer_from_session_without_relay_peer(monkeypatch, tmp_path, capsys):
     repo = _git_repo(monkeypatch, tmp_path)
     _clear(monkeypatch)

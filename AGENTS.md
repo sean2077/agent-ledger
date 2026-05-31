@@ -107,9 +107,9 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
   to guess: `RELAY_AUTHOR` may disambiguate, else author is unresolved
   (`dual_platform`) and identity-boundary commands fail closed.
 - `peer`: **derived from `session.json` participants** (the one that isn't you),
-  via `resolve_peer()`, *after* the pair is resolved. `RELAY_PEER` is **not read
-  at runtime** (compat-input only). A pair has exactly two participants;
-  `resolve_peer` fails closed otherwise.
+  via `resolve_peer()`, *after* the pair is resolved. `RELAY_PEER` is not loaded
+  or consulted. A pair has exactly two participants; `resolve_peer` fails closed
+  otherwise.
 - `agent_session_id`: per-instance id for the binding registry only (never in
   artifacts). `RELAY_AGENT_SESSION_ID` overrides *only the session id*, not the
   author (hooks inject it). Degraded identity (no platform/tty/atuin signal) is

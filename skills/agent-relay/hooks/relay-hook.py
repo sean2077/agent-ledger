@@ -88,6 +88,22 @@ def detect_host(payload: dict) -> str:
     return "codex"  # safe default; both shapes are tolerated downstream
 
 
+def resolve_hook_author(payload: dict, host: str) -> str:
+    """Resolve the artifact author for hook decisions.
+
+    Stop hooks run inside a concrete platform event, so the hook payload shape is
+    the primary signal. RELAY_AUTHOR remains a fallback only for unusual manual
+    invocations; normal Claude/Codex hooks should not need identity env.
+    """
+    if host in {"claude", "codex"}:
+        return host
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "claude"
+    if os.environ.get("CODEX_THREAD_ID"):
+        return "codex"
+    return os.environ.get("RELAY_AUTHOR", "")
+
+
 # ---------------------------------------------------------------------------
 # locate `relay` CLI
 # ---------------------------------------------------------------------------
@@ -434,7 +450,7 @@ def handle_stop(payload: dict, shared_root: Path,
 
     pubs = status.get("published", []) or []
     drafts = status.get("drafts", []) or []
-    author = os.environ.get("RELAY_AUTHOR", "")
+    author = resolve_hook_author(payload, host)
     latest = pubs[-1] if pubs else None
     session_id = (status.get("session") or {}).get("session_id", "")
 

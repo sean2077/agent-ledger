@@ -24,7 +24,6 @@ def _mk_session(root: Path, slug: str, *, state: str = "active",
 def _env(author: str, asid: str, root: Path) -> "relay.Env":
     return relay.Env(
         author=author,
-        peer="codex" if author == "claude" else "claude",
         shared_root=root, shared_root_source="env", project="p",
         remote_ssh=None, remote_path=None, sync_raw=None,
         agent_session_id=asid, agent_session_id_source="platform-test",

@@ -331,7 +331,6 @@ def _preflight_exit_code(checks: list[dict]) -> int:
 @dataclasses.dataclass
 class Env:
     author: Optional[str]
-    peer: Optional[str]
     shared_root: Optional[Path]
     shared_root_source: str
     project: Optional[str]
@@ -347,8 +346,8 @@ class Env:
     # binding registry to tell parallel pairs apart — NOT by the artifact
     # protocol (filenames / frontmatter still use `author`). See
     # short_instance_id() for the display form and binding_key() for the
-    # collision-safe key. `peer` carries RELAY_PEER for backward-compat input
-    # only; runtime peer is derived from session.json via resolve_peer().
+    # collision-safe key. Runtime peer is derived from session.json via
+    # resolve_peer(); RELAY_PEER is not loaded or consulted.
     agent_session_id: Optional[str] = None
     agent_session_id_source: str = "none"
     instance_id: Optional[str] = None
@@ -373,7 +372,6 @@ def load_env() -> Env:
     ident = resolve_identity()
     env = Env(
         author=ident.author,
-        peer=os.environ.get("RELAY_PEER") or None,  # compat input only; see resolve_peer()
         shared_root=shared_path,
         shared_root_source=shared_root_source,
         project=os.environ.get("RELAY_PROJECT") or None,

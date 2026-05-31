@@ -235,7 +235,7 @@ map lacks managed-entry keys.
 | Var | Default | Effect |
 |---|---|---|
 | `RELAY_SHARED_ROOT` | `cwd/.shared` | Where to look for `_relay/.sentinel` |
-| `RELAY_AUTHOR` | (auto-detected) | Override the platform-detected author (custom agents only); whose drafts to surface in Stop |
+| `RELAY_AUTHOR` | unset | Fallback for unusual manual hook invocation; normal Claude/Codex Stop decisions use the hook payload/platform author |
 | `RELAY_BIN` | (search chain) | Pin the `relay` binary explicitly (tests) |
 | `RELAY_HOOK_FORCE` | `0` | `1` skips the sentinel check (debug / tests) |
 | `RELAY_HOOK_QUIET` | `1` | Reserved for future verbosity tuning |

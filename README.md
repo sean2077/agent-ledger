@@ -46,6 +46,10 @@ Nothing to configure: each terminal's platform signal names its author, and
 peer is derived from the pair. Just run the relay skill in each agent;
 `relay bootstrap --topic <slug>` starts the pair.
 
+Pairs must be two different artifact authors. `claude+codex` is the intended
+path; `claude+claude` or `codex+codex` is refused because artifacts route by
+the `peer` author field, not by per-window instance id.
+
 ### Two machines (rsync transport)
 
 On the side that owns the rsync transport:

@@ -718,7 +718,7 @@ def test_publish_refuses_non_draft_path(monkeypatch, tmp_path, capsys):
 
 
 # -----------------------------------------------------------------------------
-# v3 bundle coverage for M3 --session-id + R1 publish guard.
+# v3 bundle coverage for M3 --pair-id + R1 publish guard.
 # -----------------------------------------------------------------------------
 
 

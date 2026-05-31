@@ -52,7 +52,6 @@ def _bootstrap_relay_project(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("RELAY_SYNC", "none")
     monkeypatch.setenv("RELAY_AUTHOR", "claude")
-    monkeypatch.setenv("RELAY_PEER", "codex")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
     session = relay.resolve_active_session(relay.load_env())
@@ -459,6 +458,28 @@ def test_11_stop_peer_addressed_to_me_blocks(monkeypatch, tmp_path):
     # continue: false would override decision: block.
     assert "continue" not in out, f"Stop block must not carry continue; got {out}"
     assert "stopReason" not in out
+
+
+def test_11a_stop_peer_addressed_to_me_uses_payload_author_not_relay_author(monkeypatch, tmp_path):
+    """v0.15 cleanup: Stop hooks should work in zero-env same-host setup.
+
+    The hook payload identifies Claude/Codex; RELAY_AUTHOR is no longer needed
+    to decide whether the latest artifact is addressed to this agent.
+    """
+    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
+    payload = _claude_stop(repo)
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": None,
+        "RELAY_PEER": None,
+        "CLAUDE_CODE_SESSION_ID": None,
+        "CODEX_THREAD_ID": None,
+    })
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["decision"] == "block"
+    assert "addressed=me" in out["reason"]
 
 
 def test_11b_stop_draft_block_shape_clean(monkeypatch, tmp_path):

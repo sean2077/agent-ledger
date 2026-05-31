@@ -274,7 +274,7 @@ def _claim_draft_in(session, kind):
 
 def test_cross_session_renewal_drives_wait_exit_11(monkeypatch, tmp_path, capsys):
     """The locked invariant: two sessions same author, session B ticks, session A's
-    renewal-file heartbeat must go stale, and `relay wait --session-id sessionA`
+    renewal-file heartbeat must go stale, and `relay wait --pair-id sessionA`
     must report exit 11.
 
     Uses the helper directly to bypass the 60s threshold floor — the locked spec
