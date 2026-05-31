@@ -44,7 +44,7 @@ def test_probes_posix_fail_when_world_writable(tmp_path: Path):
 def test_preflight_mtime_warning_is_non_blocking(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -70,7 +70,7 @@ def test_preflight_mtime_warning_is_non_blocking(monkeypatch, capsys, tmp_path):
 def test_preflight_other_warnings_still_return_warning_exit(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -96,7 +96,7 @@ def test_preflight_fails_when_no_env(monkeypatch, capsys):
     rc = relay.cmd_preflight(args)
     assert rc == 2
     out = capsys.readouterr().out
-    # v0.14: author is auto-detected; with no platform signal and no
+    # Author is auto-detected; with no platform signal and no
     # RELAY_AUTHOR, identity.author fails. RELAY_SYNC defaults to none.
     assert "identity.author" in out
     assert "sync=none (source: default)" in out
@@ -106,7 +106,7 @@ def test_preflight_fails_when_no_env(monkeypatch, capsys):
 def test_preflight_json_mode(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -126,7 +126,7 @@ def test_preflight_json_mode(monkeypatch, capsys, tmp_path):
 def test_preflight_sentinel_missing(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(tmp_path)
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(tmp_path),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="myproj",
@@ -151,7 +151,7 @@ def test_preflight_defaults_shared_root_inside_git(monkeypatch, capsys, tmp_path
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_SYNC="none", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="none", RELAY_AUTHOR="codex",
     )
     args = type("A", (), {"json": True})()
     rc = relay.cmd_preflight(args)
@@ -176,7 +176,7 @@ def test_preflight_shape_a_does_not_require_remote_vars(monkeypatch, capsys, tmp
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         # Deliberately omitting RELAY_SYNC and RELAY_REMOTE_*.
     )
@@ -206,7 +206,7 @@ def test_preflight_shape_b_still_requires_remote_vars(monkeypatch, capsys, tmp_p
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
     )
     import relay as _relay
@@ -231,7 +231,7 @@ def test_preflight_project_consistency_mismatch(monkeypatch, capsys, tmp_path):
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="totally-wrong",  # mismatch with derived 'repo'
@@ -261,7 +261,7 @@ def test_preflight_fails_shared_root_outside_git_toplevel(monkeypatch, capsys, t
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
@@ -289,7 +289,7 @@ def test_preflight_resolves_sync_from_explicit_env(monkeypatch, capsys, tmp_path
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
         RELAY_SYNC="rsync",
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
@@ -309,7 +309,7 @@ def test_preflight_unset_sync_defaults_to_none_in_shape_a(monkeypatch, capsys, t
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
         # Deliberately omit RELAY_SYNC.
     )
@@ -328,7 +328,7 @@ def test_preflight_unset_sync_defaults_to_none_in_shape_b(monkeypatch, capsys, t
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
     )
     monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
@@ -349,7 +349,7 @@ def test_preflight_ignores_leftover_relay_role(monkeypatch, capsys, tmp_path):
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
         RELAY_ROLE="host",  # leftover from a pre-cleanup envrc — must be ignored
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
     )
     monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
@@ -369,7 +369,7 @@ def test_preflight_sync_rsync_with_shape_a_is_contradiction(monkeypatch, capsys,
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
         RELAY_SYNC="rsync",
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
@@ -388,7 +388,7 @@ def test_preflight_invalid_sync_value_fails(monkeypatch, capsys, tmp_path):
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
         RELAY_SYNC="ftp",  # nonsense
     )
@@ -407,7 +407,7 @@ def test_preflight_sync_rsync_requires_remote_vars(monkeypatch, capsys, tmp_path
     repo = _bootstrap_repo_with_shared(tmp_path)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
-        RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(repo / ".shared"),
         RELAY_SYNC="rsync",
     )
@@ -434,7 +434,7 @@ def test_preflight_project_consistency_passes_when_canonical_form_matches(
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="actibot-ego-jy",  # sanitized form of toplevel basename
@@ -459,7 +459,7 @@ def test_preflight_project_consistency_still_fails_on_real_mismatch(
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
         RELAY_PROJECT="beta",
@@ -485,7 +485,7 @@ def test_preflight_warns_when_unbound_with_multiple_active(
     shared.mkdir(mode=0o700)
     (shared / "_relay").mkdir()
     (shared / "_relay" / ".sentinel").touch()
-    # Plant two active sessions.
+    # Plant two active pairs.
     for sid in ("20260529-a", "20260529-b"):
         s = shared / sid
         s.mkdir()
@@ -495,14 +495,14 @@ def test_preflight_warns_when_unbound_with_multiple_active(
         )
     # NO .active-session marker — caller is in parallel mode.
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    chk = next(c for c in data["checks"] if c["name"] == "session.binding")
+    chk = next(c for c in data["checks"] if c["name"] == "pair.binding")
     assert chk["status"] == "warn"
     assert "20260529-a" in chk["detail"]
     assert "20260529-b" in chk["detail"]
@@ -531,7 +531,7 @@ def test_preflight_passes_when_bound_among_many_actives(
             f'"state": "active"}}'
         )
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
@@ -539,7 +539,7 @@ def test_preflight_passes_when_bound_among_many_actives(
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    chk = next(c for c in data["checks"] if c["name"] == "session.binding")
+    chk = next(c for c in data["checks"] if c["name"] == "pair.binding")
     assert chk["status"] == "pass"
     assert "20260529-a" in chk["detail"]
     assert rc == 0
@@ -562,7 +562,7 @@ def test_preflight_warns_when_binding_points_at_inactive_pair(monkeypatch, capsy
         '"state": "active"}'
     )
     _isolated_env(monkeypatch,
-        RELAY_SYNC="rsync", RELAY_AUTHOR="codex", RELAY_PEER="claude",
+        RELAY_SYNC="rsync", RELAY_AUTHOR="codex",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y", RELAY_REMOTE_PATH="/r",
     )
@@ -576,7 +576,7 @@ def test_preflight_warns_when_binding_points_at_inactive_pair(monkeypatch, capsy
     rc = relay.cmd_preflight(type("A", (), {"json": True})())
     import json
     data = json.loads(capsys.readouterr().out)
-    chk = next(c for c in data["checks"] if c["name"] == "session.binding")
+    chk = next(c for c in data["checks"] if c["name"] == "pair.binding")
     assert chk["status"] == "warn"
     assert "20260527-gone" in chk["detail"]
     assert rc == 1

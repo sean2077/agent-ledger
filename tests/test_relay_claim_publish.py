@@ -25,10 +25,9 @@ def _bootstrap(monkeypatch, tmp_path: Path, topic="t"):
     monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
     monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": topic, "title": None})())
-    return relay.resolve_active_session(relay.load_env())
+    return relay.resolve_active_pair(relay.load_env())
 
 
 def test_claim_creates_draft_with_scaffold(monkeypatch, tmp_path, capsys):
@@ -751,15 +750,15 @@ def test_claim_with_pair_id_resolves_among_multiple_active(monkeypatch, tmp_path
     assert second != first
 
 
-def test_publish_refuses_draft_when_session_inactive(monkeypatch, tmp_path, capsys):
-    """R1: cmd_publish blocks publishing into a session whose latest is terminal or CLOSED."""
+def test_publish_refuses_draft_when_pair_inactive(monkeypatch, tmp_path, capsys):
+    """R1: cmd_publish blocks publishing into a pair whose latest is terminal or CLOSED."""
     session = _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()
     draft = _claim_filled(session, capsys)
     (session / "CLOSED").write_text('reason = "already done"\n')
     rc = relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
     assert rc == 2
-    assert "inactive session" in capsys.readouterr().err
+    assert "inactive pair" in capsys.readouterr().err
     assert draft.exists()
 
 

@@ -29,10 +29,9 @@ def _bootstrap(monkeypatch, tmp_path, topic="t"):
     monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
     monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": topic, "title": None})())
-    return relay.resolve_active_session(relay.load_env())
+    return relay.resolve_active_pair(relay.load_env())
 
 
 def _publish_one(session: Path, status: str, *, kind="note") -> Path:

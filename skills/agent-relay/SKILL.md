@@ -1,6 +1,6 @@
 ---
 name: agent-relay
-description: "Cross-review relay for interactive Claude Code <-> Codex CLI (and other markdown-capable agents) through a shared .shared/ file ledger, with no API-key orchestrator. Use when user says: continue the relay, handoff to claude/codex, start a relay session, sync code to remote, check relay status. Project-agnostic; uses the `relay` CLI for mechanical ops and RELAY_* env vars for config."
+description: "Cross-review relay for interactive Claude Code <-> Codex CLI (and other markdown-capable agents) through a shared .shared/ file ledger, with no API-key orchestrator. Use when user says: continue the relay, handoff to claude/codex, start a relay pair, sync code to remote, check relay status. Project-agnostic; uses the `relay` CLI for mechanical ops and RELAY_* env vars for config."
 metadata:
   requires:
     bins: ["relay", "bash"]
@@ -90,7 +90,7 @@ Interpret the preflight exit code as three levels:
 
 Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds target 0700" — privacy preference, not protocol-breaking, but worth flagging).
 
-`fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which defaults to the current git project's `.shared`), `project.consistency` mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken. (Binding health is reported under `session.binding`; a stale or missing binding is a **warn**, never a fail — resolve it with `relay pair ensure` below.)
+`fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which defaults to the current git project's `.shared`), `project.consistency` mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken. (Binding health is reported under `pair.binding`; a stale or missing binding is a **warn**, never a fail — resolve it with `relay pair ensure` below.)
 
 ## Resolve your pair (bind once; then it's automatic)
 
@@ -122,10 +122,10 @@ Read `{{ARGUMENTS}}` and the most recent user message. Pick exactly one intent. 
 | Intent | User phrasing examples |
 |---|---|
 | `handoff` (default) | "continue the relay", "respond to claude", "review the plan", "fix what they asked", anything implying "do the next round", **OR no arguments at all** |
-| `bootstrap` | "start a relay session about X", "set up relay for this project", or when `relay pair ensure` reports `bootstrap` AND user wants to start one |
-| `status` | "what's the relay state", "show me the session", "who needs to act next" — only when the user is explicitly read-only |
+| `bootstrap` | "start a relay pair about X", "set up relay for this project", or when `relay pair ensure` reports `bootstrap` AND user wants to start one |
+| `status` | "what's the relay state", "show me the pair", "who needs to act next" — only when the user is explicitly read-only |
 | `sync` | "push to remote", "pull from remote", "sync the code" |
-| `close` | "close the session", "we're done", "wrap up the relay" |
+| `close` | "close the pair", "we're done", "wrap up the relay" |
 
 If user input is ambiguous between handoff and something else → prefer handoff; the turn-check makes it safe.
 
@@ -221,7 +221,7 @@ Avoid:
 
 ## Intent: bootstrap
 
-Run this when starting a new project-session, **not** when continuing an existing one.
+Run this when starting a new relay pair, **not** when continuing an existing one.
 
 ```bash
 "$RELAY" bootstrap --topic <slug> [--title "Human readable"]
@@ -250,9 +250,9 @@ After bootstrap, immediately do `handoff` to write the first artifact (typically
 ```
 
 Report to user:
-- Active session path
+- Active pair path
 - Latest published artifact (seq, author, kind, status)
-- Whether session is still active (`is_active` field)
+- Whether pair is still active (`is_active` field)
 - Next available seq
 - Any drafts sitting in `.draft/` (someone interrupted mid-claim)
 

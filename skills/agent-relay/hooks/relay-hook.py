@@ -474,7 +474,7 @@ def handle_stop(payload: dict, shared_root: Path,
     if my_drafts:
         reason = (
             f"[relay-state] unpublished draft(s): {', '.join(my_drafts)}\n"
-            f"[relay-action] `relay publish <draft>` or close the session"
+            f"[relay-action] `relay publish <draft>` or close the pair"
         )
         append_trail(shared_root, {
             "event": "Stop", "host": host, "decision": "block-draft",

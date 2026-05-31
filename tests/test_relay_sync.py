@@ -21,7 +21,6 @@ def _setup(monkeypatch, tmp_path, *, sync="rsync"):
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("RELAY_SYNC", sync)
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
     if sync == "rsync":
         monkeypatch.setenv("RELAY_REMOTE_SSH", "user@remote")
@@ -58,7 +57,6 @@ def test_sync_ignores_leftover_relay_role(monkeypatch, tmp_path, capsys):
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("RELAY_ROLE", "host")  # leftover — must be inert
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(repo / ".shared"))
     monkeypatch.setattr(relay, "_is_fuse_mount", lambda p: False)
     rc = relay.cmd_sync(_args())

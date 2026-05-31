@@ -71,7 +71,6 @@ signal pins its identity with `relay init --author <name>` (an override).
   `$git_toplevel/.shared` (equivalent to `$PWD/.shared` from the project root).
 - `RELAY_SYNC=rsync` is for the side that owns the rsync transport; unset
   defaults to `none`.
-- `RELAY_AUTHOR` / `RELAY_PEER` are **no longer required** — `RELAY_AUTHOR` is
-  only an override for a custom agent; `RELAY_PEER` is not read at runtime
-  (peer comes from the pair's `session.json`).
+- `RELAY_AUTHOR` is only an override for a custom agent. `RELAY_PEER` is retired
+  and not read at runtime; peer comes from the pair's `session.json`.
 - `direnv` is optional, and only useful for the rsync owner's `.envrc`.

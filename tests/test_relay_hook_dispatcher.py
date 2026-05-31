@@ -40,7 +40,7 @@ def _new_repo(tmp_path: Path) -> Path:
 
 
 def _bootstrap_relay_project(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
-    """Create a real relay project with sentinel + active session."""
+    """Create a real relay project with sentinel + active pair."""
     repo = _new_repo(tmp_path)
     monkeypatch.chdir(repo)
     shared = repo / ".shared"
@@ -54,7 +54,7 @@ def _bootstrap_relay_project(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     monkeypatch.setenv("RELAY_AUTHOR", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
-    session = relay.resolve_active_session(relay.load_env())
+    session = relay.resolve_active_pair(relay.load_env())
     return repo, session
 
 
@@ -152,7 +152,6 @@ def _publish_artifact(session: Path, seq: int, author: str, peer: str,
     })()
     # we want author=<author>, swap env
     os.environ["RELAY_AUTHOR"] = author
-    os.environ["RELAY_PEER"] = peer
     relay.cmd_claim(args)
     # Find the new draft
     drafts = sorted((session / ".draft").glob(f"*-{author}-{kind}.md"))
@@ -188,8 +187,7 @@ def test_01_fastpath_no_sentinel_no_shared(monkeypatch, tmp_path):
             monkeypatch.delenv(k, raising=False)
     payload = _claude_session_start(tmp_path)
     r = _run_hook(payload, env_overrides={"RELAY_SHARED_ROOT": None,
-                                          "RELAY_AUTHOR": None,
-                                          "RELAY_PEER": None})
+                                          "RELAY_AUTHOR": None})
     assert r.returncode == 0
     assert r.stdout == "", f"expected silent, got: {r.stdout!r}"
 
@@ -472,7 +470,6 @@ def test_11a_stop_peer_addressed_to_me_uses_payload_author_not_relay_author(monk
     r = _run_hook(payload, env_overrides={
         "RELAY_SHARED_ROOT": str(repo / ".shared"),
         "RELAY_AUTHOR": None,
-        "RELAY_PEER": None,
         "CLAUDE_CODE_SESSION_ID": None,
         "CODEX_THREAD_ID": None,
     })

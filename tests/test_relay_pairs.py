@@ -33,11 +33,10 @@ def _shared(monkeypatch, tmp_path) -> Path:
     return shared
 
 
-def _instance(monkeypatch, author: str, asid: str, peer: str = "codex") -> None:
+def _instance(monkeypatch, author: str, asid: str) -> None:
     """Pin a deterministic instance identity via the override env var (beats
     any ambient CLAUDE_CODE_SESSION_ID)."""
     monkeypatch.setenv("RELAY_AUTHOR", author)
-    monkeypatch.setenv("RELAY_PEER", peer)
     monkeypatch.setenv("RELAY_AGENT_SESSION_ID", asid)
 
 
@@ -155,7 +154,6 @@ def _degrade(monkeypatch) -> None:
     for k in ("RELAY_AGENT_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("RELAY_AUTHOR", "claude")
-    monkeypatch.setenv("RELAY_PEER", "codex")
     monkeypatch.setattr(relay, "_terminal_signal", lambda: ("shared", "degraded"))
 
 

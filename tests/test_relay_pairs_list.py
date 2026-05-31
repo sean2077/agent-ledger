@@ -17,7 +17,6 @@ def _setup_shared(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
     monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     return shared
 

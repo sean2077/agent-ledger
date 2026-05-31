@@ -26,10 +26,9 @@ def _bootstrap(monkeypatch, tmp_path):
     monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
     monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
-    return relay.resolve_active_session(relay.load_env())
+    return relay.resolve_active_pair(relay.load_env())
 
 
 def _publish_one(session: Path, capsys, kind="note", status="ready"):
@@ -99,7 +98,7 @@ def test_close_deletes_binding(monkeypatch, tmp_path, capsys):
 
 
 def test_close_preserves_multiple_active_error_when_closed_sentinel_exists(monkeypatch, tmp_path, capsys):
-    """R2: cmd_close does not mask 'multiple active sessions' with the 'already closed' message."""
+    """R2: cmd_close does not mask 'multiple active pairs' with the 'already closed' message."""
     first = _bootstrap(monkeypatch, tmp_path)
     shared = first.parent
     second = shared / "20990101-second"

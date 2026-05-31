@@ -37,7 +37,7 @@ def _isolated_env(monkeypatch, **kwargs):
 def _bootstrap(monkeypatch, tmp_path: Path, *, author="claude", peer="codex"):
     """Create a fresh git repo + .shared/ + bootstrap a session.
 
-    Returns the active session Path.
+    Returns the active pair Path.
     """
     repo = tmp_path / "myproj"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
@@ -49,13 +49,12 @@ def _bootstrap(monkeypatch, tmp_path: Path, *, author="claude", peer="codex"):
     _isolated_env(monkeypatch,
         RELAY_SYNC="none" if author == "claude" else "rsync",
         RELAY_AUTHOR=author,
-        RELAY_PEER=peer,
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y",
         RELAY_REMOTE_PATH="/r",
     )
     relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
-    return relay.resolve_active_session(relay.load_env())
+    return relay.resolve_active_pair(relay.load_env())
 
 
 def _publish_artifact(session: Path, *, seq: int, author: str, peer: str,
@@ -161,8 +160,8 @@ def test_wait_returns_2_when_author_missing(monkeypatch, tmp_path, capsys):
     assert "RELAY_AUTHOR" in err
 
 
-def test_wait_returns_2_when_no_session(monkeypatch, tmp_path, capsys):
-    """No active session → exit 2."""
+def test_wait_returns_2_when_no_pair(monkeypatch, tmp_path, capsys):
+    """No active pair -> exit 2."""
     repo = tmp_path / "myproj"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     monkeypatch.chdir(repo)
@@ -173,7 +172,6 @@ def test_wait_returns_2_when_no_session(monkeypatch, tmp_path, capsys):
     _isolated_env(monkeypatch,
         RELAY_SYNC="none",
         RELAY_AUTHOR="claude",
-        RELAY_PEER="codex",
         RELAY_SHARED_ROOT=str(shared),
     )
     rc = relay.cmd_wait(_wait_args(timeout=1, poll=1))
@@ -377,14 +375,13 @@ def test_wait_returns_130_on_sigint(monkeypatch, tmp_path):
     env.update({
         "RELAY_SYNC": "none",
         "RELAY_AUTHOR": "claude",
-        "RELAY_PEER": "codex",
         "RELAY_SHARED_ROOT": str(session.parent),
         "RELAY_WAIT_TIMEOUT": "60",
         "RELAY_WAIT_POLL_INTERVAL": "1",
         "RELAY_WAIT_READY_SENTINEL": str(ready_sentinel),
     })
     # Drop unrelated RELAY_ vars that may pollute (project, etc.)
-    keep = {"RELAY_SYNC", "RELAY_AUTHOR", "RELAY_PEER", "RELAY_SHARED_ROOT",
+    keep = {"RELAY_SYNC", "RELAY_AUTHOR", "RELAY_SHARED_ROOT",
             "RELAY_WAIT_TIMEOUT", "RELAY_WAIT_POLL_INTERVAL",
             "RELAY_WAIT_READY_SENTINEL"}
     for k in list(env):

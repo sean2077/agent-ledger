@@ -29,7 +29,7 @@ def _relay_test_env(monkeypatch):
     """Deterministic baseline for every test:
 
     - Clear `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`: the shell running
-      pytest under Claude Code (or Codex) exports them, and since v0.14 derives
+      pytest under Claude Code (or Codex) exports them, and current identity derives
       `author` from those platform signals, an ambient value would override the
       RELAY_AUTHOR a test sets. Tests covering platform detection set these
       explicitly (after this fixture runs).

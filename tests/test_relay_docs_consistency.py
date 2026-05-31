@@ -58,7 +58,7 @@ def test_relay_source_retires_active_session_marker():
     binding-aware resolver and join_pair replace them."""
     src = (ROOT / "skills/agent-relay/bin/relay").read_text(encoding="utf-8")
     assert "write_active_marker" not in src
-    assert "def resolve_active_session" in src
+    assert "def resolve_active_pair" in src
     assert "def join_pair" in src
 
 
@@ -315,7 +315,7 @@ def test_v07_error_exits_carry_recovery_hints():
         ("heartbeat already running for", "relay heartbeat stop --force"),
         ("cannot derive renewal path", "RELAY_PROJECT"),
         ("owner not alive at start", "--owner-kind renewal-file"),
-        ("refusing to publish into inactive session", "relay bootstrap"),
+        ("refusing to publish into inactive pair", "relay bootstrap"),
         ("RELAY_REMOTE_SSH and RELAY_REMOTE_PATH must be set", "relay sync push --dry-run"),
         ("is not a valid slug", "set RELAY_PROJECT"),  # bootstrap bad-slug hint
     ]
@@ -403,7 +403,7 @@ def test_v07_wait_hint_paths_include_doctor_or_sessions():
     """relay wait resolver-fail and claim resolver-fail hints must mention
     `relay pairs list` (the discovery command) and `relay bootstrap`."""
     src = (ROOT / "skills/agent-relay/bin/relay").read_text(encoding="utf-8")
-    # Both wait and claim wrap resolve_active_session with a hint block.
+    # Both wait and claim wrap resolve_active_pair with a hint block.
     for verb in ("relay wait:", "relay claim:"):
         idx = src.find(verb)
         # Find the resolver-fail hint block by searching for "no active pair" near verb.

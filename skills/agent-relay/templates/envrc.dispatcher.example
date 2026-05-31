@@ -9,7 +9,7 @@
 #   1) direnv installed:  `direnv allow` once; auto-loads on cd.
 #   2) no direnv:         `source .envrc` manually.
 #
-# v0.14: author auto-detects from the platform signal (CLAUDE_CODE_SESSION_ID
+# v0.15: author auto-detects from the platform signal (CLAUDE_CODE_SESSION_ID
 # for Claude Code, CODEX_THREAD_ID for Codex) and peer is derived from the
 # pair, so the common cases need NO per-host file at all:
 #
@@ -34,5 +34,5 @@ if [ -f "$LOCAL_ENVRC" ]; then
   # shellcheck disable=SC1090
   source "$LOCAL_ENVRC"
 fi
-# No per-host file is normal in v0.14 (author auto-detects); only the rsync
+# No per-host file is normal in v0.15 (author auto-detects); only the rsync
 # transport owner needs one. Run `relay init --sync rsync` to create it.

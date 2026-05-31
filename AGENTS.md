@@ -95,7 +95,7 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 
 `kind` ∈ `plan | review | fix | note | question | decision | correction | addendum`.
 
-## 5. Identity & env model (v0.14 — simplified)
+## 5. Identity & env model (v0.15 — simplified)
 
 **Author is auto-detected from the platform signal. You almost never set env.**
 
@@ -187,7 +187,26 @@ the rsync side. (The pre-v0.14 per-terminal `export RELAY_AUTHOR` dance and the
   docs), no compat shims; keep the history in `CHANGELOG.md`.
 - **stdlib only, single file** for `bin/relay` (see §2).
 
-## 9. Commit protocol (Lore trailers)
+## 9. Source-of-truth discipline
+
+`AGENTS.md` is the authoritative agent-facing contract. Any change that alters
+architecture, protocol semantics, command surface, workflow, identity/env model,
+safety rules, testing requirements, or release/commit conventions must update
+this file in the same commit, or explicitly state in the commit message why
+`AGENTS.md` remains unchanged.
+
+Do not use `AGENTS.md` as a changelog for routine internal implementation
+changes; keep version history in `CHANGELOG.md`. But if future agents need to
+know a rule to work safely or correctly, that rule belongs here.
+
+Keep source-of-truth boundaries explicit:
+- `AGENTS.md` owns current agent-facing rules and operational invariants.
+- `references/file-protocol.md` owns durable on-disk, frontmatter, and JSON
+  contracts. Historical field names such as `session.json`, `session_id`, and
+  JSON output keys stay there unless a deliberate schema migration is designed.
+- `CHANGELOG.md` owns version history and removed/deprecated behavior records.
+
+## 10. Commit protocol (Lore trailers)
 
 Every commit to this repo carries the seven **Lore** trailers plus
 `Co-Authored-By`. They capture the *reasoning*, not just the diff:

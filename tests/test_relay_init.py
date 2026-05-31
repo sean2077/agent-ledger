@@ -18,7 +18,7 @@ def _isolated_env(monkeypatch, **kwargs):
 
 
 def _args(**kw):
-    base = {"same_host": False, "author": None, "peer": None, "sync": None}
+    base = {"same_host": False, "author": None, "sync": None}
     base.update(kw)
     return type("A", (), base)()
 
@@ -111,13 +111,13 @@ def test_init_hints_lead_with_same_host_and_flag_alternatives(monkeypatch, tmp_p
     out = capsys.readouterr().out
     assert "--same-host" in out
     assert "--sync rsync" in out
-    assert "auto-detect" in out  # v0.14: explains no RELAY_AUTHOR needed
+    assert "auto-detect" in out  # explains no RELAY_AUTHOR needed
     # The retired --role flag must not reappear in hints.
     assert "--role" not in out
 
 
 def test_init_same_host_needs_no_env_and_writes_no_file(monkeypatch, tmp_path, capsys):
-    """v0.14: --same-host for claude+codex is zero-config — it must NOT write a
+    """--same-host for claude+codex is zero-config; it must NOT write a
     per-host .envrc and must tell the user author auto-detects."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
@@ -161,7 +161,7 @@ def test_init_suppresses_envrc_nag_when_identity_env_set(monkeypatch, tmp_path, 
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch,
                   RELAY_SHARED_ROOT=str(repo / ".shared"),
-                  RELAY_AUTHOR="codex", RELAY_PEER="claude")
+                  RELAY_AUTHOR="codex")
     hostname = relay._hostname_short()
     assert not (repo / f".envrc.{hostname}").exists()
     rc = relay.cmd_init(_args())
@@ -175,13 +175,13 @@ def test_init_suppresses_envrc_nag_when_identity_env_set(monkeypatch, tmp_path, 
 
 def test_init_author_sync_renders_envrc(monkeypatch, tmp_path, capsys):
     """`relay init --author X --sync none` writes a working envrc that pins the
-    custom author. v0.14: RELAY_PEER is NOT rendered (runtime peer is derived
+    custom author. RELAY_PEER is NOT rendered (runtime peer is derived
     from the pair)."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(author="codex", peer="claude", sync="none"))
+    rc = relay.cmd_init(_args(author="codex", sync="none"))
     assert rc == 0
     target = repo / f".envrc.{relay._hostname_short()}"
     assert target.is_file()
@@ -198,13 +198,13 @@ def test_init_author_sync_renders_envrc(monkeypatch, tmp_path, capsys):
     assert (repo / ".envrc").is_file()
 
 
-def test_init_author_peer_sync_rsync_advises_remote_vars(monkeypatch, tmp_path, capsys):
+def test_init_author_sync_rsync_advises_remote_vars(monkeypatch, tmp_path, capsys):
     """--sync=rsync warns about missing RELAY_REMOTE_* (but doesn't fail)."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(author="codex", peer="claude", sync="rsync"))
+    rc = relay.cmd_init(_args(author="codex", sync="rsync"))
     assert rc == 0
     err = capsys.readouterr().err
     assert "--sync=rsync" in err
@@ -212,20 +212,20 @@ def test_init_author_peer_sync_rsync_advises_remote_vars(monkeypatch, tmp_path, 
 
 
 def test_init_same_host_and_author_are_mutually_exclusive(monkeypatch, tmp_path, capsys):
-    """Pick one: --same-host OR --author/--peer/--sync."""
+    """Pick one: --same-host OR --author/--sync."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(same_host=True, author="codex", peer="claude", sync="none"))
+    rc = relay.cmd_init(_args(same_host=True, author="codex", sync="none"))
     assert rc == 2
     err = capsys.readouterr().err
     assert "mutually exclusive" in err
 
 
 def test_init_author_without_peer_succeeds(monkeypatch, tmp_path, capsys):
-    """v0.14: --peer is no longer required (runtime peer is derived from the
-    pair). --author alone renders a valid envrc pinning the custom author."""
+    """--peer is no longer accepted by init; --author alone renders a valid
+    envrc pinning the custom author."""
     repo = tmp_path / "myproj"
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
@@ -257,40 +257,11 @@ def test_init_rejects_unsafe_author_slug(monkeypatch, tmp_path, capsys, bad):
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(author=bad, peer="codex", sync="none"))
+    rc = relay.cmd_init(_args(author=bad, sync="none"))
     assert rc == 2, f"unsafe author {bad!r} should be rejected"
     err = capsys.readouterr().err
     assert "--author" in err
     assert not (repo / f".envrc.{relay._hostname_short()}").exists()
-
-
-@pytest.mark.parametrize("bad", [
-    "has space",
-    "semi;colon",
-    "back`tick",
-])
-def test_init_rejects_unsafe_peer_slug(monkeypatch, tmp_path, capsys, bad):
-    """Finding 8: --peer gets the same treatment as --author."""
-    repo = tmp_path / "myproj"
-    _init_git_repo(repo)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(author="codex", peer=bad, sync="none"))
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "--peer" in err
-
-
-def test_init_rejects_author_equals_peer(monkeypatch, tmp_path, capsys):
-    """Finding 8 corollary: A==B is a clear configuration mistake."""
-    repo = tmp_path / "myproj"
-    _init_git_repo(repo)
-    monkeypatch.chdir(repo)
-    _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    rc = relay.cmd_init(_args(author="codex", peer="codex", sync="none"))
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "cannot be the same" in err
 
 
 @pytest.mark.parametrize("ok", ["claude", "codex", "gpt55", "agent-2", "x"])
@@ -300,9 +271,7 @@ def test_init_accepts_valid_slug_identities(monkeypatch, tmp_path, capsys, ok):
     _init_git_repo(repo)
     monkeypatch.chdir(repo)
     _isolated_env(monkeypatch, RELAY_SHARED_ROOT=str(repo / ".shared"))
-    # use a distinct peer so author!=peer
-    peer = "other-side" if ok != "other-side" else "claude"
-    rc = relay.cmd_init(_args(author=ok, peer=peer, sync="none"))
+    rc = relay.cmd_init(_args(author=ok, sync="none"))
     assert rc == 0
     body = (repo / f".envrc.{relay._hostname_short()}").read_text()
     assert f"RELAY_AUTHOR={ok}" in body

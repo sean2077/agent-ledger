@@ -28,19 +28,19 @@
 
 **Slug rules**:
 
-- `session-slug`: `YYYYMMDD-<topic>`, topic same rules. Single date prefix; the day is local time of `relay bootstrap`.
+- `pair-slug`: `YYYYMMDD-<topic>`, topic same rules. Single date prefix; the day is local time of `relay bootstrap`.
 - `project`: kept only as `session.json.project` metadata. It is not a directory level.
 
 **Hidden vs visible**:
 
 - `.draft/` is hidden; peers and `relay status` do not list its contents.
-- All other files under the session dir are visible artifacts.
+- All other files under the pair dir are visible artifacts.
 
 ## 2. File naming
 
 `NNN-<author>-<kind>.md`
 
-- `NNN`: three-digit zero-padded sequence number, starting at `001`. Allows up to 999 artifacts per session; if you hit the ceiling, open a new session.
+- `NNN`: three-digit zero-padded sequence number, starting at `001`. Allows up to 999 artifacts per pair; if you hit the ceiling, open a new pair.
 - `<author>`: short identifier of the writer. Recommended: `codex`, `claude`. Free-form ASCII + digits.
 - `<kind>`: short identifier of the artifact type. Vocabulary in §4.
 
@@ -75,13 +75,13 @@ Drafts have no sidecars.
 |---|---|---|---|
 | `schema_version` | int | yes | currently `3`; bump on breaking changes |
 | `project` | str | yes | project slug for audit/display only; not a path component |
-| `session_id` | str | yes | session-slug |
+| `session_id` | str | yes | pair-slug (historical field name) |
 | `title` | str | yes | human description |
 | `state` | enum | yes | `"active"` or `"closed"` |
 | `created_at` | ISO 8601 | yes | bootstrap time |
 | `closed_at` | ISO 8601 \| null | yes | null while active; filled by `relay close` |
 | `close_reason` | str \| null | yes | null while active; free-form by `relay close --reason` |
-| `participants` | str[] | yes | agent identities expected to write in this session |
+| `participants` | str[] | yes | agent identities expected to write in this pair |
 
 Per-file frontmatter (§4) carries the round structure; `session.json` itself stays minimal.
 
@@ -140,10 +140,10 @@ Free-form short ASCII, but the well-known values are:
 
 ### 4.3 `status` vocabulary + terminal semantics
 
-| status | meaning | session-active impact | publish writes? |
+| status | meaning | pair-active impact | publish writes? |
 |---|---|---|---|
 | `draft` | in `.draft/`, not yet published | does not count | ✗ (publish writes `ready`) |
-| `ready` | published, awaiting peer | **keeps session active** | ✓ (default) |
+| `ready` | published, awaiting peer | **keeps pair active** | ✓ (default) |
 | `closed` | this artifact concluded by author | **terminal** (no peer action expected) | ✓ (e.g., final decision) |
 | `cancelled` | author/user withdrew | **terminal** | ✓ |
 | `failed` | author or peer recorded that the artifact or requested work is broken and should not continue | **terminal** | ✓ |
@@ -151,12 +151,12 @@ Free-form short ASCII, but the well-known values are:
 
 **All four terminal statuses (`closed`/`cancelled`/`failed`/`timed_out`) signal that THIS artifact no longer requires peer response.** A local `relay publish` validation failure leaves the draft in place and does not create a `failed` artifact.
 
-## 5. Session-active rule (CLI must hard-code this)
+## 5. Pair-active rule (CLI must hard-code this)
 
 ```
-session is active ⟺
+pair is active ⟺
     session.json.state == "active"
-    AND no CLOSED sentinel file exists in session dir
+    AND no CLOSED sentinel file exists in pair dir
     AND (
         no published files yet (just bootstrapped)
         OR latest published file's status NOT IN {closed, cancelled, failed, timed_out}
@@ -165,7 +165,7 @@ session is active ⟺
 
 "Latest published file" = highest `seq` among `*.md` files with companion `.ready` sentinel.
 
-`relay status` evaluates this; `relay close` independently can move session to closed via state transition or sentinel.
+`relay status` evaluates this; `relay close` independently can move the pair to closed via state transition or sentinel.
 
 If more than one pair is active, `relay status`, `relay claim`, and `relay close` without `--pair-id` (and without a resolvable instance binding) refuse. `relay pairs list` is the discovery fallback and must not fail merely because zero or multiple pairs are active.
 
@@ -205,7 +205,7 @@ If you need to mark something as closed/cancelled/failed/timed_out, write a *new
 
 ### 7.1 Sequence allocation
 
-Sequence allocation is internal: `relay claim` derives the next NNN as `max(seqs in session + .draft) + 1` (or `001` if empty) and reserves it atomically. There is no public "reserve a seq ahead of time" command — pre-reserving would race the append-only allocator.
+Sequence allocation is internal: `relay claim` derives the next NNN as `max(seqs in pair + .draft) + 1` (or `001` if empty) and reserves it atomically. There is no public "reserve a seq ahead of time" command — pre-reserving would race the append-only allocator.
 
 `relay claim`:
 
@@ -219,10 +219,10 @@ Sequence allocation is internal: `relay claim` derives the next NNN as `max(seqs
 1. Validate the draft (see §8).
 2. **Reserve the final `.md` path exclusively** via `open(..., O_CREAT|O_EXCL)` (`atomic_reserve_text`), write the rendered content into the reserved fd, and fsync. This is the concurrency primitive — a second publisher racing the same seq gets `FileExistsError`, never a silent clobber. (v0.8 used tmp+`os.replace`, which is atomic but *unconditional*: two publishers could both pass an `exists()` check and the later `os.replace` would overwrite the earlier `.md`. Fixed in v0.9.)
 3. On `FileExistsError`, increment seq and retry, emitting a `seq NNN taken by concurrent publisher, retrying as NNN` line to stderr so the bump is observable. Up to 10 total attempts with `random.uniform(0.05, 0.20)` jitter.
-4. Write sidecars **after** the visible `.md`: compute sha256 → `<published>.md.sha256`, then touch `<published>.ready`, then fsync the session dir. The original draft is unlinked once the triad is in place.
+4. Write sidecars **after** the visible `.md`: compute sha256 → `<published>.md.sha256`, then touch `<published>.ready`, then fsync the pair dir. The original draft is unlinked once the triad is in place.
 5. After exhausting 10 attempts, exit 2 with the `relay doctor` recovery hint.
 
-**Incomplete-triad invisibility.** Between step 2 and step 4 the `.md` exists on disk without its `.sha256`/`.ready` siblings. This partial state is **invisible to protocol-compliant readers**: `list_published()` (and everything that funnels through it — `status`, wait, sessions-list, latest-artifact helpers) returns a `.md` only when both `.ready` and `.md.sha256` exist AND the re-hashed `.md` matches the recorded digest. A reader MUST gate on `.ready` + sha256 match; it MUST NOT treat a bare `NNN-*.md` as published.
+**Incomplete-triad invisibility.** Between step 2 and step 4 the `.md` exists on disk without its `.sha256`/`.ready` siblings. This partial state is **invisible to protocol-compliant readers**: `list_published()` (and everything that funnels through it — `status`, wait, pairs-list, latest-artifact helpers) returns a `.md` only when both `.ready` and `.md.sha256` exist AND the re-hashed `.md` matches the recorded digest. A reader MUST gate on `.ready` + sha256 match; it MUST NOT treat a bare `NNN-*.md` as published.
 
 ### 7.2 No locks
 
@@ -250,9 +250,9 @@ On success:
 3. Exclusive `O_CREAT|O_EXCL` reservation of the published `.md` path, content written + fsync'd (see §7.1 for the concurrency rationale and the incomplete-triad invisibility guarantee).
 4. Compute sha256, write `<published>.md.sha256`.
 5. Touch `<published>.ready`.
-6. fsync the session dir; unlink the draft.
+6. fsync the pair dir; unlink the draft.
 
-`relay publish` refuses inactive sessions by default. The escape hatch is limited to terminal append-only notes: `--force --force-reason TEXT --status <closed|cancelled|failed|timed_out>`. The override reason is recorded as `force_reason: TEXT` in the published frontmatter.
+`relay publish` refuses inactive pairs by default. The escape hatch is limited to terminal append-only notes: `--force --force-reason TEXT --status <closed|cancelled|failed|timed_out>`. The override reason is recorded as `force_reason: TEXT` in the published frontmatter.
 
 ## 9. Close semantics
 
@@ -288,7 +288,7 @@ Consumers (peer's `relay status`, peer reading) should treat artifacts without a
 
 ## 11. Reserved file names
 
-Inside a session directory, these names are reserved by the protocol:
+Inside a pair directory, these names are reserved by the protocol:
 
 - `session.json`
 - `CLOSED`
@@ -313,7 +313,7 @@ A **pair** is the collaboration unit (`.shared/<pair-slug>/`) holding at most **
 
 Each instance records which pair it is in as one file under `.shared/_relay/bindings/<binding-key>.json`, where `binding-key = <author>-<sha256(full agent-session-id)[:24]>` (the FULL id is hashed, never a truncated prefix — time-prefixed ids would otherwise collide). This per-instance binding replaces the single global `.active-session` marker, so two same-host instances each track their own current pair. Fields: `schema_version` (1), `instance_id` (short display form), `author`, `agent_session_id` (full), `pair_slug`, `bound_at`, `last_seen` (ISO 8601, refreshed best-effort + throttled).
 
-`resolve_active_session()` resolution order:
+`resolve_active_pair()` resolution order:
 
 ```
 explicit --pair-id > this instance's binding (if it still names an active pair)
@@ -326,21 +326,21 @@ A binding whose pair is gone/inactive is dropped (self-healed) on resolve. `rela
 
 **Same-agent limitation.** Because artifacts route by `author` (the `peer` field), two instances of the SAME agent (claude+claude) cannot be addressed within one pair. `join` / `ensure` therefore refuse a pair that already holds a live same-author instance. Real same-agent pairing would require an artifact-routing change (e.g. a `peer_instance` field) and is out of scope.
 
-`preflight` reports binding health under the check name `session.binding`: bound→active pair = pass; no binding = pass (or **warn** if >1 active pair forces a choice); binding→inactive pair = **warn** (recoverable). A pre-v0.13 `.active-session` file left on disk is inert; `relay doctor` surfaces it as informational.
+`preflight` reports binding health under the check name `pair.binding`: bound→active pair = pass; no binding = pass (or **warn** if >1 active pair forces a choice); binding→inactive pair = **warn** (recoverable). A pre-v0.13 `.active-session` file left on disk is inert; `relay doctor` surfaces it as informational.
 
 `relay pairs list` lists every pair with its category (`active`/`terminal`/`closed`/`inactive`), bound instances, and open slots.
 
 ## 14. Issue ledger (out-of-band feedback, v0.10)
 
-Separate from the session ledger above. The issue ledger is a
+Separate from the relay pair ledger above. The issue ledger is a
 **user-local machine** store where agents record problems they hit
 *while using the relay tool itself*, so a developer can triage them
 later.
 
 - **Location**: `~/.agent-ledger/relay-issues/`, overridable via
-  `RELAY_ISSUES_DIR`. Deliberately NOT under `.shared/` (per-session,
+  `RELAY_ISSUES_DIR`. Deliberately NOT under `.shared/` (per-pair,
   gitignored, ephemeral) and NOT under any repo — issues accrue across
-  every project and session for this user on this machine. **`relay
+  every project and pair for this user on this machine. **`relay
   sync` never moves issues**: they stay on the host that filed them, so
   each developer triages their own machine's ledger.
 - **One file per issue**: `<id>.md` where `id` is
@@ -358,7 +358,7 @@ later.
   `pair` (active pair slug if resolvable, else null), `severity` (`minor`/`major`),
   `area` (`cli`/`hooks`/`docs`/`protocol`/`tests`/`build`/`other`),
   `title`, `status` (`open`/`resolved`), `resolved_at`, `resolution`.
-- **Mutability**: unlike published session artifacts, issues are a
+- **Mutability**: unlike published pair artifacts, issues are a
   mutable tracker — `relay issue resolve` rewrites the file in place.
   They carry no `.ready`/`.sha256` sidecars and are not append-only.
 

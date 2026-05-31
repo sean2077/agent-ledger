@@ -340,7 +340,7 @@ class Env:
     # Resolution lives in `_resolve_sync`; unset defaults to `none`.
     sync_raw: Optional[str] = None
     # Per-instance identity. `author` and `agent_session_id` are both produced
-    # by resolve_identity() (v0.14): the author is detected from the platform
+    # by resolve_identity(): the author is detected from the platform
     # signal (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID), falling back to
     # RELAY_AUTHOR; the session id is the agent's OWN id, used only by the
     # binding registry to tell parallel pairs apart — NOT by the artifact
@@ -351,7 +351,7 @@ class Env:
     agent_session_id: Optional[str] = None
     agent_session_id_source: str = "none"
     instance_id: Optional[str] = None
-    # v0.14: how `author` was determined ("platform-claude" | "platform-codex"
+    # How `author` was determined ("platform-claude" | "platform-codex"
     # | "env-disambiguated" | "env" | "none") plus any identity diagnostics
     # ("author_conflict", "dual_platform"), surfaced by preflight / whoami.
     author_source: str = "none"
@@ -485,7 +485,7 @@ def short_instance_id(author: Optional[str],
 
 
 # Platform session-id env vars that also identify *which* agent is running.
-# This is the single source of truth for author auto-detection (v0.14).
+# This is the single source of truth for author auto-detection.
 PLATFORM_AUTHOR_ENV = {
     "claude": "CLAUDE_CODE_SESSION_ID",
     "codex": "CODEX_THREAD_ID",
@@ -494,7 +494,7 @@ PLATFORM_AUTHOR_ENV = {
 
 @dataclasses.dataclass
 class Identity:
-    """The resolved identity of the running agent instance (v0.14).
+    """The resolved identity of the running agent instance.
 
     `author` is detected from the platform signal first (so RELAY_AUTHOR is no
     longer required for claude/codex), falling back to RELAY_AUTHOR for other
@@ -926,7 +926,7 @@ def session_root(env: Env) -> Path:
     return env.shared_root
 
 
-def iter_session_dirs(root: Path) -> list[Path]:
+def iter_pair_dirs(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
     sessions: list[Path] = []
@@ -938,11 +938,11 @@ def iter_session_dirs(root: Path) -> list[Path]:
     return sessions
 
 
-def active_sessions(root: Path) -> list[Path]:
-    return [sd for sd in iter_session_dirs(root) if session_is_active(sd)]
+def active_pair_dirs(root: Path) -> list[Path]:
+    return [sd for sd in iter_pair_dirs(root) if session_is_active(sd)]
 
 
-def resolve_session(env: Env, session_id: str | None = None, *,
+def resolve_pair(env: Env, session_id: str | None = None, *,
                     project: str | None = None, require_active: bool = False) -> Path:
     root = session_root(env)
     if not root.is_dir():
@@ -950,16 +950,16 @@ def resolve_session(env: Env, session_id: str | None = None, *,
     if session_id:
         candidate = root / session_id
         if not (candidate / "session.json").exists():
-            raise SystemExit(f"no session {session_id!r} under {root}")
+            raise SystemExit(f"no pair {session_id!r} under {root}")
         if require_active and not session_is_active(candidate):
-            raise SystemExit(f"session is not active: {session_id}")
+            raise SystemExit(f"pair is not active: {session_id}")
         return candidate
     if require_active:
-        return resolve_active_session(env, project)
-    raise SystemExit("session_id is required unless resolving the active session")
+        return resolve_active_pair(env, project)
+    raise SystemExit("pair_id is required unless resolving the active pair")
 
 
-def resolve_active_session(env: Env, project: str | None = None,
+def resolve_active_pair(env: Env, project: str | None = None,
                            pair_id: str | None = None) -> Path:
     """Resolve which pair a command operates on.
 
@@ -974,7 +974,7 @@ def resolve_active_session(env: Env, project: str | None = None,
         raise SystemExit(f"no shared root: {root}")
     _maybe_update_binding_last_seen(env, root)
     if pair_id:
-        return resolve_session(env, pair_id, project=project, require_active=True)
+        return resolve_pair(env, pair_id, project=project, require_active=True)
 
     # This instance's binding wins (fast path) when it still names an active
     # pair. Otherwise drop the dangling binding and fall through to discovery.
@@ -989,7 +989,7 @@ def resolve_active_session(env: Env, project: str | None = None,
 
     # session_is_active() honors state, CLOSED sentinel, AND latest artifact
     # status (so stale-active pairs with terminal latest artifacts are excluded).
-    candidates = active_sessions(root)
+    candidates = active_pair_dirs(root)
     if not candidates:
         raise SystemExit(f"no active pair under {root}")
     if len(candidates) > 1:
@@ -1015,7 +1015,7 @@ def resolve_peer(session_dir: Path, author: str) -> Optional[str]:
     Fail closed (return None) when participants are malformed, not exactly two,
     don't contain `author`, or leave no single other party — callers must
     handle a None peer rather than guess. Runtime peer derivation lives here so
-    RELAY_PEER is no longer consulted (v0.14); session.json is the source of
+    RELAY_PEER is no longer consulted; session.json is the source of
     truth once a pair exists."""
     try:
         sj = json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
@@ -1162,13 +1162,13 @@ def _check_binding_health(root: Path, env: Env) -> dict:
     instance's binding points at a live pair. Having no binding is normal on a
     first turn (before `pair ensure`/`bootstrap`), so it stays non-blocking
     unless multiple active pairs make a choice necessary."""
-    name = "session.binding"
+    name = "pair.binding"
     if not env.author or not env.agent_session_id:
         return {"name": name, "status": "pass",
                 "detail": "no instance identity resolved; binding check skipped"}
     b = read_binding(root, env.author, env.agent_session_id)
     if not b:
-        active_names = [sd.name for sd in active_sessions(root)]
+        active_names = [sd.name for sd in active_pair_dirs(root)]
         if len(active_names) > 1:
             return {
                 "name": name, "status": "warn",
@@ -1195,7 +1195,7 @@ def _check_binding_health(root: Path, env: Env) -> dict:
 
 def _print_env_template() -> None:
     sys.stderr.write(
-        "\nenvironment setup (v0.14):\n"
+        "\nenvironment setup (v0.15):\n"
         "  author auto-detects from the platform signal (CLAUDE_CODE_SESSION_ID\n"
         "  for Claude Code, CODEX_THREAD_ID for Codex) — no RELAY_AUTHOR needed.\n"
         "  peer is derived from the pair. Pick the path that fits your topology:\n\n"
@@ -1226,10 +1226,11 @@ def cmd_preflight(args) -> int:
 
     sync_effective, sync_source = _resolve_sync(env, is_shape_a=is_shape_a)
 
-    # Identity (v0.14): author is auto-detected from the platform signal
-    # (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID), so RELAY_AUTHOR / RELAY_PEER
-    # are no longer required env. Verify author resolved, surface how, and flag
-    # ambiguity; peer is derived from session.json (see identity.peer below).
+    # Identity: author is auto-detected from the platform signal
+    # (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID). RELAY_AUTHOR is optional for
+    # custom agents, and peer is no longer an env input. Verify author
+    # resolved, surface how, and flag ambiguity; peer is derived from
+    # session.json (see identity.peer below).
     out["env"]["author"] = bool(env.author)
     if env.author:
         out["checks"].append({
@@ -1416,7 +1417,7 @@ def cmd_preflight(args) -> int:
 
     if env.shared_root and env.shared_root.is_dir():
         out["checks"].append(_check_binding_health(env.shared_root, env))
-        # Peer derivability (v0.14): only meaningful once this instance is bound
+        # Peer derivability: only meaningful once this instance is bound
         # to an active pair. Never fatal — a missing/odd participants list is a
         # warn so claim/wait surface it before they actually need the peer.
         if env.author and env.agent_session_id:
@@ -1550,20 +1551,19 @@ def cmd_init(args) -> int:
 
     same_host = getattr(args, "same_host", False)
     author = getattr(args, "author", None)
-    peer = getattr(args, "peer", None)
     sync = getattr(args, "sync", None)
 
     # --same-host and the explicit flag set are mutually exclusive.
-    explicit_flags = any(v is not None for v in (author, peer, sync))
+    explicit_flags = any(v is not None for v in (author, sync))
     if same_host and explicit_flags:
         print(
             "relay init: --same-host is mutually exclusive with "
-            "--author/--peer/--sync. Pick one.",
+            "--author/--sync. Pick one.",
             file=sys.stderr,
         )
         return 2
 
-    # v0.14: author auto-detects from the platform signal (CLAUDE_CODE_SESSION_ID
+    # Author auto-detects from the platform signal (CLAUDE_CODE_SESSION_ID
     # / CODEX_THREAD_ID) and peer is derived from the pair — so the common cases
     # need NO identity env and NO .envrc at all.
     if same_host:
@@ -1580,13 +1580,12 @@ def cmd_init(args) -> int:
     envrc_just_created = False
     if explicit_flags and project_root:
         # Explicit path: render a minimal per-host .envrc for the rsync transport
-        # owner and/or a custom (non claude/codex) agent. --author / --peer are
-        # OPTIONAL now (claude/codex auto-detect); only a custom agent needs
-        # --author, and runtime peer is derived from the pair, never from env.
+        # owner and/or a custom (non claude/codex) agent. Only a custom agent
+        # needs --author; runtime peer is derived from the pair, never from env.
         # Finding 8: identity/sync values land verbatim in a sourceable shell
         # file; constrain to the slug grammar so shell metacharacters can't
         # inject into a file the user is about to `source`.
-        for label, value in (("--author", author), ("--peer", peer)):
+        for label, value in (("--author", author),):
             if value is not None and not SLUG_RE.match(value):
                 print(
                     f"relay init: {label}={value!r} is not a valid identity slug. "
@@ -1596,13 +1595,6 @@ def cmd_init(args) -> int:
                     file=sys.stderr,
                 )
                 return 2
-        if author and peer and author == peer:
-            print(
-                f"relay init: --author and --peer cannot be the same identity "
-                f"({author!r}).",
-                file=sys.stderr,
-            )
-            return 2
         sync_value = sync if sync is not None else "none"
         if sync_value not in SYNC_VALUES:
             print(f"relay init: --sync={sync_value!r} invalid; expected one of "
@@ -1653,13 +1645,13 @@ def _render_envrc_body(author: Optional[str], sync: str) -> str:
     """Render a minimal per-host .envrc body for the rsync transport owner
     and/or a custom (non claude/codex) agent.
 
-    v0.14: author auto-detects from the platform signal and runtime peer is
+    v0.15: author auto-detects from the platform signal and runtime peer is
     derived from the pair, so RELAY_AUTHOR is rendered ONLY when a custom
     --author was given (an override), and RELAY_PEER is never written.
     """
     cmd = f"--author {author} --sync {sync}" if author else f"--sync {sync}"
     body = [
-        f"# Per-host relay config generated by `relay init {cmd}` (v0.14).",
+        f"# Per-host relay config generated by `relay init {cmd}` (v0.15).",
         "# Gitignored. Edit freely; re-run init to regenerate from scratch.",
         "#",
         "# author auto-detects from the platform signal (CLAUDE_CODE_SESSION_ID",
@@ -1727,23 +1719,23 @@ def cmd_bootstrap(args) -> int:
     session_slug = f"{date_prefix}-{args.topic}"
     session_dir = env.shared_root / session_slug
     if session_dir.exists():
-        print(f"relay bootstrap: session dir already exists: {session_dir}", file=sys.stderr)
+        print(f"relay bootstrap: pair dir already exists: {session_dir}", file=sys.stderr)
         return 2
 
-    current_active = active_sessions(env.shared_root)
+    current_active = active_pair_dirs(env.shared_root)
     if current_active and not getattr(args, "force", False):
         names = ", ".join(s.name for s in current_active)
         print(
-            "relay bootstrap: active session already exists; close it or use "
-            f"--force to create a parallel session: {names}",
+            "relay bootstrap: active pair already exists; close it or use "
+            f"--force to create a parallel pair: {names}",
             file=sys.stderr,
         )
         return 2
 
     # Identity is required to create a pair, and the peer must be known up front
     # (a pair has exactly two participants). Validate BEFORE mkdir so a bad
-    # identity never leaves a half-created session dir. RELAY_PEER is not
-    # consulted (v0.14): claude<->codex auto-derive; other agents pass --peer.
+    # identity never leaves a half-created pair dir. RELAY_PEER is not
+    # consulted: claude<->codex auto-derive; other agents pass --peer.
     author = env.author
     if not author:
         print("relay bootstrap: could not determine author identity "
@@ -1781,7 +1773,7 @@ def cmd_bootstrap(args) -> int:
     join_pair(env, env.shared_root, session_slug)  # creator is the pair's first instance
 
     readme = (
-        f"# relay session: {session_slug}\n\n"
+        f"# relay pair: {session_slug}\n\n"
         f"Project: {proj}\n"
         f"Title: {session_json['title']}\n"
         f"Created: {session_json['created_at']}\n"
@@ -1790,7 +1782,7 @@ def cmd_bootstrap(args) -> int:
     )
     atomic_write_text(session_dir / "README.md", readme, mode=0o644)
 
-    print(f"created session: {session_dir}")
+    print(f"created pair: {session_dir}")
     print(f"  project:      {proj}")
     print(f"  session_id:   {session_slug}")
     print(f"  participants: {', '.join(participants) or '(none)'}")
@@ -1800,8 +1792,8 @@ def cmd_bootstrap(args) -> int:
 def cmd_status(args) -> int:
     env = load_env()
     pair_id = getattr(args, "pair_id", None)
-    session = (resolve_session(env, pair_id, project=getattr(args, "project", None))
-               if pair_id else resolve_active_session(env, getattr(args, "project", None)))
+    session = (resolve_pair(env, pair_id, project=getattr(args, "project", None))
+               if pair_id else resolve_active_pair(env, getattr(args, "project", None)))
     _gc_heartbeat_orphans(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
@@ -1986,7 +1978,7 @@ def cmd_claim(args) -> int:
         )
         return 2
     try:
-        session = resolve_active_session(
+        session = resolve_active_pair(
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
@@ -2214,9 +2206,9 @@ def cmd_publish(args) -> int:
     if not session_is_active(session):
         if not getattr(args, "force", False):
             print(
-                f"relay publish: refusing to publish into inactive session: {session} "
-                "— session is closed/terminal; `relay bootstrap --topic <slug>` to "
-                "start a new session, or pass `--force --force-reason <text> "
+                f"relay publish: refusing to publish into inactive pair: {session} "
+                "— pair is closed/terminal; `relay bootstrap --topic <slug>` to "
+                "start a new pair, or pass `--force --force-reason <text> "
                 "--status <closed|cancelled|failed|timed_out>` to record a terminal note.",
                 file=sys.stderr,
             )
@@ -2575,10 +2567,10 @@ def cmd_issue_add(args) -> int:
             return 2
 
     env = load_env()
-    # Best-effort session context — issues can be filed with no active session.
+    # Best-effort pair context — issues can be filed with no active pair.
     session_id = None
     try:
-        session_id = resolve_active_session(env).name
+        session_id = resolve_active_pair(env).name
     except SystemExit:
         session_id = None
 
@@ -2711,7 +2703,7 @@ def cmd_issue_resolve(args) -> int:
 def cmd_close(args) -> int:
     env = load_env()
     try:
-        session = resolve_active_session(
+        session = resolve_active_pair(
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
@@ -2729,7 +2721,7 @@ def cmd_close(args) -> int:
             except SystemExit:
                 print(f"relay close: {msg}", file=sys.stderr)
                 return 2
-            for sd in iter_session_dirs(root):
+            for sd in iter_pair_dirs(root):
                 if (sd / "CLOSED").exists():
                     print(
                         f"relay close: already closed (sentinel at {sd / 'CLOSED'})",
@@ -2768,9 +2760,9 @@ def cmd_close(args) -> int:
     return 0
 
 
-def _session_list_payload(root: Path) -> list[dict]:
+def _pair_list_payload(root: Path) -> list[dict]:
     items: list[dict] = []
-    for sd in iter_session_dirs(root):
+    for sd in iter_pair_dirs(root):
         try:
             sj = json.loads((sd / "session.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -2805,7 +2797,7 @@ def cmd_pairs_list(args) -> int:
         return 2
     payload = {
         "shared_root": str(root),
-        "pairs": _session_list_payload(root),
+        "pairs": _pair_list_payload(root),
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -3455,7 +3447,7 @@ def cmd_heartbeat_stop(args) -> int:
         session = draft_path.parent.parent
     else:
         try:
-            session = resolve_active_session(
+            session = resolve_active_pair(
                 env,
                 getattr(args, "project", None),
                 getattr(args, "pair_id", None),
@@ -3607,7 +3599,7 @@ def cmd_heartbeat_tick(args) -> int:
               "(no platform signal and RELAY_AUTHOR unset)", file=sys.stderr)
         return 2
     try:
-        session = resolve_active_session(
+        session = resolve_active_pair(
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
@@ -3697,7 +3689,7 @@ def cmd_doctor(args) -> int:
     actions: list[str] = report["actions"]
     findings = 0
 
-    for sd in iter_session_dirs(env.shared_root):
+    for sd in iter_pair_dirs(env.shared_root):
         entry = {
             "session_id": sd.name,
             "is_active": session_is_active(sd),
@@ -3881,7 +3873,7 @@ def cmd_wait(args) -> int:
         return 2
 
     try:
-        session = resolve_active_session(
+        session = resolve_active_pair(
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
@@ -3948,7 +3940,7 @@ def cmd_wait(args) -> int:
     stale_threshold = max(_wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 3600), 60)
     nominal_deadline = None if timeout is None else time.monotonic() + timeout
     # Peer for the stale-heartbeat check comes from session.json participants
-    # (v0.14: never RELAY_PEER). Fixed for the duration of this wait.
+    # (never RELAY_PEER). Fixed for the duration of this wait.
     wait_peer = resolve_peer(session, env.author or "") or ""
 
     # Optional readiness sentinel for tests / supervisors that need to know
@@ -4413,7 +4405,7 @@ def cmd_pair_ensure(args) -> int:
             "action": "degraded",
             "detail": "agent session id unresolved (no platform id / tty / atuin); "
                       "pass --pair-id <slug> or export RELAY_AGENT_SESSION_ID",
-            "pairs": [s.name for s in active_sessions(root)],
+            "pairs": [s.name for s in active_pair_dirs(root)],
         }, rc=3)
     # 1. already bound to a live pair -> use it (fast path)
     b = read_binding(root, env.author, env.agent_session_id)
@@ -4425,7 +4417,7 @@ def cmd_pair_ensure(args) -> int:
                                        "instance_id": env.instance_id}, rc=0)
         delete_binding(root, env.author, env.agent_session_id)  # stale -> rediscover
     # 2. discover active pairs
-    actives = active_sessions(root)
+    actives = active_pair_dirs(root)
     if not actives:
         return _ensure_emit(args, {"action": "bootstrap",
             "detail": "no active pair; bootstrap one"}, rc=3)
@@ -4474,28 +4466,25 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--same-host", action="store_true",
                     help="Two claude/codex agents on one machine: prints that no "
                          "identity env is needed (author auto-detects). Mutually "
-                         "exclusive with --author/--peer/--sync.")
+                         "exclusive with --author/--sync.")
     pi.add_argument("--author", default=None,
                     help="Override the auto-detected author for a custom (non "
                          "claude/codex) agent; renders RELAY_AUTHOR into "
                          ".envrc.<hostname>. Not needed for claude/codex.")
-    pi.add_argument("--peer", default=None,
-                    help="(Reserved) peer identity; runtime peer is derived from "
-                         "the pair. Accepted for validation/compat only.")
     pi.add_argument("--sync", default=None, choices=["none", "rsync"],
                     help="Sync capability for this side. Use --sync rsync on the "
                          "transport-owning side to render a minimal rsync .envrc.")
     pi.set_defaults(func=cmd_init)
 
-    pb = sub.add_parser("bootstrap", help="Create a new session under .shared/.")
-    pb.add_argument("--topic", required=True, help="Session topic slug.")
+    pb = sub.add_parser("bootstrap", help="Create a new pair under .shared/.")
+    pb.add_argument("--topic", required=True, help="Pair topic slug.")
     pb.add_argument("--title", default=None, help="Human-readable title.")
     pb.add_argument("--peer", default=None,
                     help="Name the other participant. Optional for a "
                          "claude<->codex pair (auto-derived); required for any "
                          "other agent identity.")
     pb.add_argument("--force", action="store_true",
-                    help="Allow creating a parallel active session.")
+                    help="Allow creating a parallel active pair.")
     pb.set_defaults(func=cmd_bootstrap)
 
     ps = sub.add_parser("status", help="Show the bound pair's status.")
@@ -4594,7 +4583,7 @@ def build_parser() -> argparse.ArgumentParser:
     ppub.add_argument("--status", default=None, choices=sorted(STATUSES - {"draft"}),
                        help="Publish with this status (default: ready).")
     ppub.add_argument("--force", action="store_true",
-                      help="Allow terminal publication into an inactive session.")
+                      help="Allow terminal publication into an inactive pair.")
     ppub.add_argument("--force-reason", default=None)
     ppub.set_defaults(func=cmd_publish)
 

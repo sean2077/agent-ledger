@@ -124,7 +124,7 @@ def test_issue_add_reporter_unknown_without_author(monkeypatch, tmp_path, capsys
     relay.cmd_issue_add(_add(title="anon"))
     fm, _ = relay.parse_frontmatter(Path(capsys.readouterr().out.strip()).read_text())
     assert fm["reporter"] == "unknown"
-    assert fm["session"] is None  # no active session resolvable
+    assert fm["session"] is None  # no active pair resolvable
 
 
 # ---------------------------------------------------------------------------

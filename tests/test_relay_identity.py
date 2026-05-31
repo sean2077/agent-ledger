@@ -1,4 +1,4 @@
-"""v0.14 identity layer: resolve_identity() author auto-detection + diagnostics,
+"""Current identity layer: resolve_identity() author auto-detection + diagnostics,
 resolve_peer() session-derived peer (fail-closed), default_peer(), and the
 integration points that no longer require RELAY_AUTHOR / RELAY_PEER (bootstrap,
 claim, preflight, whoami)."""

@@ -100,7 +100,6 @@ def test_load_env_populates_instance_fields(monkeypatch, tmp_path):
     _clear_relay_env(monkeypatch)
     _clear_id_env(monkeypatch)
     monkeypatch.setenv("RELAY_AUTHOR", "claude")
-    monkeypatch.setenv("RELAY_PEER", "codex")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(tmp_path / ".shared"))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "ce0cfda4-36fb")
     env = relay.load_env()
@@ -113,7 +112,6 @@ def test_whoami_json_reflects_identity(monkeypatch, capsys):
     _clear_relay_env(monkeypatch)
     _clear_id_env(monkeypatch)
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
-    monkeypatch.setenv("RELAY_PEER", "claude")
     monkeypatch.setenv("CODEX_THREAD_ID", "019e7408-6a3a-76d0")
     rc = relay.cmd_whoami(type("A", (), {"json": True})())
     out = json.loads(capsys.readouterr().out)
@@ -130,7 +128,6 @@ def test_main_injects_agent_session_id(monkeypatch, capsys):
     _clear_relay_env(monkeypatch)
     _clear_id_env(monkeypatch)  # records RELAY_AGENT_SESSION_ID pre-state -> restored on teardown
     monkeypatch.setenv("RELAY_AUTHOR", "claude")
-    monkeypatch.setenv("RELAY_PEER", "codex")
     rc = relay.main(["whoami", "--json", "--agent-session-id", "sess-XYZ"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
