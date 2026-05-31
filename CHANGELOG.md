@@ -4,6 +4,72 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.15.0 — 2026-05-31
+
+Claim-time liveness and command-surface cleanup.
+
+### New
+
+- `relay claim` now auto-starts a renewal-file heartbeat for the claimed draft.
+  If heartbeat startup fails, claim rolls the draft back so no published turn can
+  leave an uncovered in-flight draft by accident. `--no-heartbeat` and
+  `RELAY_CLAIM_NO_HEARTBEAT=1` remain escape hatches for tests and advanced use.
+- `relay heartbeat start` now defaults to `--owner-kind renewal-file`; the
+  `agent`, `tool-process`, `pidfile`, and `none` modes are still available for
+  advanced or legacy callers.
+
+### Fixed
+
+- A second claim while an author heartbeat is already running now fails closed
+  and rolls the new draft back instead of keeping a draft with no heartbeat
+  sidecar. The rc=3 path also removes any newly seeded renewal token before it
+  returns, so rollback does not leave an orphan local liveness file.
+- The protocol docs and docs-consistency tests no longer refer to retired
+  `relay sessions list`, `--session-id`, public `relay next-seq`, or
+  `.active-session` close semantics as live surfaces.
+
+### Breaking changes
+
+- The public `relay next-seq` command is removed. Sequence allocation is internal
+  to `relay claim`, which reserves draft names atomically.
+- The internal/listing function name follows the public surface:
+  `cmd_sessions_list` is now `cmd_pairs_list`.
+
+## 0.14.0 — 2026-05-31
+
+Identity simplification and agent-facing documentation refresh.
+
+### New
+
+- Author identity auto-detects from platform signals:
+  `CLAUDE_CODE_SESSION_ID` resolves `claude`, and `CODEX_THREAD_ID` resolves
+  `codex`. `RELAY_AUTHOR` is now only a fallback/override for custom agents or
+  an explicit disambiguator when both platform signals are present.
+- Runtime peer resolution now comes from `session.json` participants via
+  `resolve_peer()`. `RELAY_PEER` is no longer read at runtime.
+- `relay whoami` and `relay preflight` report author source, platform conflicts,
+  dual-platform ambiguity, derived peer state, and binding health.
+- `AGENTS.md` is now the authoritative project onboarding doc, with
+  `CLAUDE.md` symlinked to it.
+
+### Fixed
+
+- Identity-boundary commands fail closed when author or peer cannot be resolved.
+  In particular, `relay claim` refuses malformed pair participants before
+  creating `.draft/`, so it cannot scaffold `author: unknown` or `peer: unknown`
+  artifacts.
+- `relay bootstrap` validates author and peer before creating a pair directory;
+  canonical `claude`/`codex` pairs derive the peer automatically, while custom
+  agents pass `--peer`.
+
+### Breaking changes
+
+- Same-host claude+codex setup is zero-config. `relay init --same-host` now
+  explains that no identity env is needed and no longer writes a per-host
+  same-host envrc.
+- `envrc.same-host.example` is removed. Only the dispatcher template remains,
+  and only the rsync transport owner normally needs a per-host env file.
+
 ## 0.13.0 — 2026-05-29
 
 Multiple concurrent **pairs** per project, keyed by per-instance bindings. The

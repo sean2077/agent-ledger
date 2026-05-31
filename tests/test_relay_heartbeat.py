@@ -480,6 +480,28 @@ def test_heartbeat_start_renewal_file_ignores_caller_path(monkeypatch, tmp_path,
         relay.cmd_heartbeat_stop(_hb_args(draft=str(draft), force=True))
 
 
+def test_heartbeat_start_already_running_removes_seeded_renewal_file(monkeypatch, tmp_path, capsys):
+    """rc=3 must not leave a renewal-file owner token for a draft that never
+    received a heartbeat sidecar."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    env = relay.load_env()
+    renewal = relay._renewal_path_for_draft(draft, session, env)
+    assert renewal is not None
+    assert not renewal.exists()
+    monkeypatch.setattr(relay, "_heartbeat_is_running", lambda _pidfile: (True, 12345))
+    rc = relay.cmd_heartbeat_start(_hb_args(
+        draft=str(draft), owner_kind="renewal-file", interval=1,
+    ))
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "already running" in err
+    assert not renewal.exists()
+    assert not relay._heartbeat_sidecar_path(draft).exists()
+
+
 def test_owner_kind_tmux_pane_no_longer_accepted(monkeypatch, tmp_path, capsys):
     """M5: tmux-pane kind was removed from taxonomy; start should refuse it."""
     session = _bootstrap(monkeypatch, tmp_path)

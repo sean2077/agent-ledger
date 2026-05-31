@@ -313,7 +313,7 @@ def test_publish_rejects_cross_author_env(monkeypatch, tmp_path, capsys):
     })())
     assert rc == 2
     err = capsys.readouterr().err
-    assert "RELAY_AUTHOR" in err
+    assert "'claude'" in err  # the current (publishing) author
     assert "'codex'" in err  # the draft's author
     # Original draft must still be there; no .ready emitted.
     assert draft.exists()
@@ -338,7 +338,7 @@ def test_publish_rejects_missing_author_env(monkeypatch, tmp_path, capsys):
     })())
     assert rc == 2
     err = capsys.readouterr().err
-    assert "RELAY_AUTHOR is not set" in err
+    assert "could not resolve author identity" in err
     assert not (session / draft.name).exists()
     assert draft.exists()
 
@@ -359,7 +359,7 @@ def test_publish_force_terminal_still_requires_author_env(monkeypatch, tmp_path,
     })())
     assert rc == 2
     err = capsys.readouterr().err
-    assert "RELAY_AUTHOR is not set" in err
+    assert "could not resolve author identity" in err
 
 
 def test_draft_set_rejects_cross_author(monkeypatch, tmp_path, capsys):
@@ -383,7 +383,7 @@ def test_draft_set_rejects_cross_author(monkeypatch, tmp_path, capsys):
     })())
     assert rc == 2
     err = capsys.readouterr().err
-    assert "refusing to mutate draft authored by 'codex'" in err
+    assert "refusing to mutate a draft authored by 'codex'" in err
     # The draft body must be untouched (still the scaffold placeholder).
     assert "injected body" not in draft.read_text()
 
@@ -404,7 +404,7 @@ def test_draft_set_rejects_missing_author_env(monkeypatch, tmp_path, capsys):
         "sync_needed": False, "touched_path": [], "corrects": None,
     })())
     assert rc == 2
-    assert "RELAY_AUTHOR is not set" in capsys.readouterr().err
+    assert "could not resolve author identity" in capsys.readouterr().err
 
 
 def test_claim_rejects_corrects_on_non_correcting_kind(monkeypatch, tmp_path, capsys):

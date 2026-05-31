@@ -96,8 +96,9 @@ def test_preflight_fails_when_no_env(monkeypatch, capsys):
     rc = relay.cmd_preflight(args)
     assert rc == 2
     out = capsys.readouterr().out
-    # RELAY_AUTHOR/PEER/SHARED_ROOT are required; RELAY_SYNC defaults to none.
-    assert "env.RELAY_AUTHOR" in out
+    # v0.14: author is auto-detected; with no platform signal and no
+    # RELAY_AUTHOR, identity.author fails. RELAY_SYNC defaults to none.
+    assert "identity.author" in out
     assert "sync=none (source: default)" in out
     assert "fail" in out
 

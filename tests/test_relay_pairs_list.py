@@ -1,4 +1,4 @@
-"""relay sessions list."""
+"""relay pairs list."""
 
 import json
 import os
@@ -74,7 +74,7 @@ def test_pairs_list_shows_active_terminal_closed_separately(monkeypatch, tmp_pat
     closed = _write_session(shared, "20260527-closed", state="closed", closed_sentinel=True)
     relay.join_pair(relay.load_env(), shared, active.name)
 
-    rc = relay.cmd_sessions_list(type("A", (), {"json": True})())
+    rc = relay.cmd_pairs_list(type("A", (), {"json": True})())
     data = json.loads(capsys.readouterr().out)
     by_id = {item["session_id"]: item for item in data["pairs"]}
     assert rc == 0
@@ -86,7 +86,7 @@ def test_pairs_list_shows_active_terminal_closed_separately(monkeypatch, tmp_pat
     assert by_id[active.name]["open_slots"] == 1
 
     second_active = _write_session(shared, "20260527-second-active")
-    rc = relay.cmd_sessions_list(type("A", (), {"json": True})())
+    rc = relay.cmd_pairs_list(type("A", (), {"json": True})())
     data = json.loads(capsys.readouterr().out)
     categories = {item["session_id"]: item["category"] for item in data["pairs"]}
     assert rc == 0

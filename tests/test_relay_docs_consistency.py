@@ -20,7 +20,7 @@ def assert_no_deleted_envrc_template_refs(text: str, label: str) -> None:
         assert needle not in text, (
             f"{label} still references deleted v0.5 path {needle!r}; "
             "update guidance to use `relay init --same-host` or "
-            "`relay init --author/--peer/--sync`"
+            "`relay init --sync rsync`"
         )
 
 
@@ -68,6 +68,18 @@ def test_file_protocol_documents_binding_registry():
     assert "bindings/" in text
     assert "binding-key" in text
     assert "instance" in text
+
+
+def test_file_protocol_uses_pair_vocabulary_not_retired_surface():
+    """v0.14/v0.15 (codex seq 9): the protocol reference must use the pair
+    command surface, not the retired `relay sessions list` / `--session-id`,
+    and must not present `$RELAY_AUTHOR` as the runtime identity (author
+    auto-detects; RELAY_AUTHOR is only a custom-agent override)."""
+    text = (ROOT / "skills/agent-relay/references/file-protocol.md").read_text(encoding="utf-8")
+    assert "relay sessions list" not in text
+    assert "--session-id" not in text
+    assert "$RELAY_AUTHOR" not in text
+    assert "Clear `.shared/.active-session`" not in text
 
 
 def test_force_reason_frontmatter_field_is_documented():
@@ -120,18 +132,20 @@ def test_docs_why_exists_and_carries_caveats():
     assert "optional hooks" in normalized.lower()
 
 
-def test_legacy_role_templates_removed_in_v06():
-    """v0.6: envrc.host.example and envrc.remote.example were deleted.
-    Only envrc.same-host.example and envrc.dispatcher.example remain."""
+def test_legacy_role_templates_removed():
+    """v0.6 deleted envrc.host/remote.example; v0.14 retired the
+    envrc.same-host.example (author auto-detects, same-host needs no env).
+    Only the dispatcher template remains."""
     templates_dir = ROOT / "skills/agent-relay/templates"
-    assert (templates_dir / "envrc.same-host.example").is_file()
     assert (templates_dir / "envrc.dispatcher.example").is_file()
+    assert not (templates_dir / "envrc.same-host.example").exists()
     assert not (templates_dir / "envrc.host.example").exists()
     assert not (templates_dir / "envrc.remote.example").exists()
-    # Same-host template MUST be RELAY_SYNC-first, no RELAY_ROLE.
-    same_host = (templates_dir / "envrc.same-host.example").read_text(encoding="utf-8")
-    assert "RELAY_SYNC=none" in same_host
-    assert "RELAY_ROLE" not in same_host
+    # The dispatcher must not carry the retired RELAY_ROLE or the v0.13
+    # per-terminal RELAY_AUTHOR-override guidance.
+    dispatcher = (templates_dir / "envrc.dispatcher.example").read_text(encoding="utf-8")
+    assert "RELAY_ROLE" not in dispatcher
+    assert "export RELAY_AUTHOR=claude" not in dispatcher
 
 
 def test_dispatcher_template_does_not_reference_deleted_v05_templates():
@@ -147,12 +161,18 @@ def test_dispatcher_template_does_not_reference_deleted_v05_templates():
     assert_no_deleted_envrc_template_refs(template, "envrc.dispatcher.example")
 
 
-def test_committed_envrc_does_not_reference_deleted_v05_templates():
-    """F2/F3: committed .envrc guidance must not point at deleted templates."""
-    text = (ROOT / ".envrc").read_text(encoding="utf-8")
-    assert_no_deleted_envrc_template_refs(text, ".envrc")
+def test_dispatcher_template_carries_v014_setup_guidance():
+    """v0.14: the committed dispatcher template (the source of truth — the root
+    `.envrc` is a per-user gitignored copy) must point at the current setup
+    commands and drop the retired per-terminal RELAY_AUTHOR / --author/--peer
+    flow. This is the committed artifact; the gitignored root .envrc is not."""
+    text = (ROOT / "skills/agent-relay/templates/envrc.dispatcher.example").read_text(encoding="utf-8")
+    assert_no_deleted_envrc_template_refs(text, "envrc.dispatcher.example")
     assert "relay init --same-host" in text
-    assert "relay init --author <name> --peer <name> --sync <none|rsync>" in text
+    assert "relay init --sync rsync" in text
+    # Retired guidance must be gone.
+    assert "export RELAY_AUTHOR=claude" not in text
+    assert "--author <name> --peer <name>" not in text
 
 
 def test_first_brief_template_removed_from_surface():

@@ -9,13 +9,15 @@
 #   1) direnv installed:  `direnv allow` once; auto-loads on cd.
 #   2) no direnv:         `source .envrc` manually.
 #
-# Setup:
-#   # same-host: two agents on one machine (default identity codex; the
-#   # other terminal exports RELAY_AUTHOR=claude before sourcing)
+# v0.14: author auto-detects from the platform signal (CLAUDE_CODE_SESSION_ID
+# for Claude Code, CODEX_THREAD_ID for Codex) and peer is derived from the
+# pair, so the common cases need NO per-host file at all:
+#
+#   # same-host: two agents on one machine — nothing to configure
 #   relay init --same-host
 #
-#   # explicit per-side (any topology, including two-machine with rsync):
-#   relay init --author <name> --peer <name> --sync <none|rsync>
+#   # rsync transport owner (two machines) — render a minimal .envrc.<host>
+#   relay init --sync rsync   # then fill RELAY_REMOTE_SSH / RELAY_REMOTE_PATH
 #
 #   source .envrc      # or: direnv allow
 
@@ -31,8 +33,6 @@ fi
 if [ -f "$LOCAL_ENVRC" ]; then
   # shellcheck disable=SC1090
   source "$LOCAL_ENVRC"
-else
-  echo "warning: no $LOCAL_ENVRC found." >&2
-  echo "  Run \`relay init --same-host\` (two agents on one machine)" >&2
-  echo "  or   \`relay init --author <name> --peer <name> --sync <none|rsync>\`" >&2
 fi
+# No per-host file is normal in v0.14 (author auto-detects); only the rsync
+# transport owner needs one. Run `relay init --sync rsync` to create it.

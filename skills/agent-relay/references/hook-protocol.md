@@ -137,7 +137,7 @@ if cache.fingerprint == fingerprint:
     log "dedup-quiet"; exit 0 silent     # codex-review: exit 0 + no stdout
 update cache
 
-if latest_published.peer == $RELAY_AUTHOR:
+if latest_published.peer == <resolved author>:
     emit { "decision": "block",
            "reason": "[relay-state] peer published seq=N kind=K addressed=me\n[relay-action] read .shared/<session>/<path>" }
 elif my_drafts:
@@ -235,7 +235,7 @@ map lacks managed-entry keys.
 | Var | Default | Effect |
 |---|---|---|
 | `RELAY_SHARED_ROOT` | `cwd/.shared` | Where to look for `_relay/.sentinel` |
-| `RELAY_AUTHOR` | (none) | Whose drafts to surface in Stop |
+| `RELAY_AUTHOR` | (auto-detected) | Override the platform-detected author (custom agents only); whose drafts to surface in Stop |
 | `RELAY_BIN` | (search chain) | Pin the `relay` binary explicitly (tests) |
 | `RELAY_HOOK_FORCE` | `0` | `1` skips the sentinel check (debug / tests) |
 | `RELAY_HOOK_QUIET` | `1` | Reserved for future verbosity tuning |

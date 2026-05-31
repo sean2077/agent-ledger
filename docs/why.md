@@ -92,8 +92,9 @@ vs shape B).
 - **Same-host.** One machine, one checkout, two terminals. Both agents
   see the exact same files via the same kernel. `RELAY_SYNC=none` on
   both sides; no rsync involved. This is the default recommendation
-  and what `relay init --same-host` sets up. Identity per terminal
-  is picked from a pre-source `export RELAY_AUTHOR=...`.
+  and what `relay init --same-host` sets up. Identity needs no env: each
+  terminal's author auto-detects from its platform signal
+  (`CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`).
 - **Two-machine.** Two boxes. One side runs Codex CLI, the other runs
   Claude Code. The ledger has to be reachable from both. Combine with
   one of the two filesystem shapes below.

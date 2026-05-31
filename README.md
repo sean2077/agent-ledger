@@ -3,7 +3,7 @@
 `agent-relay` connects interactive Claude Code and Codex CLI sessions through
 an append-only shared file ledger so they can cross-review work without
 writing API glue. The protocol is markdown + sidecars, so other agents can
-participate too. Current: **v0.13.0** (pre-1.0).
+participate too. Current: **v0.15.0** (pre-1.0).
 
 See [`docs/why.md`](docs/why.md) for the longer take on what this is, what it
 isn't, and what running it through interactive Claude Code + Codex actually
@@ -15,8 +15,8 @@ The package lives in `skills/agent-relay/`:
 - `SKILL.md` — workflow guide for Claude Code / Codex
 - `bin/relay` — single-file Python CLI (3.10+, stdlib only)
 - `references/` — protocol spec and rsync recipes
-- `templates/` — env templates (`envrc.same-host.example` and
-  `envrc.dispatcher.example`)
+- `templates/` — `envrc.dispatcher.example` (optional per-host env; only the
+  rsync transport owner needs a per-host file)
 
 ## Install
 
@@ -32,49 +32,42 @@ the same bits onto the other host and symlink the skill into its
 
 ## Configure
 
-The repo ships a committed dispatcher `.envrc` that sources
-`.envrc.$(hostname -s)`. Each machine (or each terminal, for same-host
-setups) maintains its own per-host file (gitignored). Pick one path:
+`author` auto-detects from the platform signal (`CLAUDE_CODE_SESSION_ID` for
+Claude Code, `CODEX_THREAD_ID` for Codex) and `peer` is derived from the pair,
+so **the common cases need no identity env at all**.
 
 ### Same-host (two agents on one machine)
 
 ```bash
-relay init --same-host
-source .envrc                       # codex terminal (default identity)
-# in the OTHER terminal:
-export RELAY_AUTHOR=claude
-source .envrc                       # claude terminal
+relay init --same-host      # confirms setup; writes no .envrc
 ```
 
-The same-host template reads `RELAY_AUTHOR` from the calling shell
-(defaulting to `codex`) and derives `RELAY_PEER` from it — one file
-serves both terminals, no editing between launches.
+Nothing to configure: each terminal's platform signal names its author, and
+peer is derived from the pair. Just run the relay skill in each agent;
+`relay bootstrap --topic <slug>` starts the pair.
 
-### Explicit per-side flags (any topology)
+### Two machines (rsync transport)
+
+On the side that owns the rsync transport:
 
 ```bash
-# on the side that owns rsync transport (or any side in a same-machine setup)
-relay init --author codex --peer claude --sync rsync
-$EDITOR ".envrc.$(hostname -s)"     # fill RELAY_REMOTE_SSH/PATH
-source .envrc
-
-# on the other side
-relay init --author claude --peer codex --sync none
-source .envrc
+relay init --sync rsync
+$EDITOR ".envrc.$(hostname -s)"     # fill RELAY_REMOTE_SSH / RELAY_REMOTE_PATH
+source .envrc                       # or: direnv allow
 ```
 
-This path renders `.envrc.<hostname>` inline from the flags (no template
-copy). Use it whenever same-host isn't enough — two machines with rsync,
-or any scenario where you want to pin the identity / sync pair
-explicitly. Mutually exclusive with `--same-host`.
+The other side needs nothing (it defaults to `RELAY_SYNC=none`; author still
+auto-detects). A **custom (non-claude/codex) agent** that has no platform
+signal pins its identity with `relay init --author <name>` (an override).
 
 ### Notes
 
-- `relay init` is idempotent. Re-running won't overwrite a customized
-  `.envrc.<hostname>` or rewrite `.shared/_relay/.sentinel`. It also
-  creates `.shared/` the first time. When `RELAY_SHARED_ROOT` is unset,
-  relay commands default to `$git_toplevel/.shared` (equivalent to
-  `$PWD/.shared` when run from the project root).
-- `RELAY_SYNC=rsync` is for the side that owns the rsync transport.
-  When `RELAY_SYNC` is unset, relay commands default to `none`.
-- Works with or without direnv.
+- `relay init` is idempotent and creates `.shared/` the first time. When
+  `RELAY_SHARED_ROOT` is unset, relay commands default to
+  `$git_toplevel/.shared` (equivalent to `$PWD/.shared` from the project root).
+- `RELAY_SYNC=rsync` is for the side that owns the rsync transport; unset
+  defaults to `none`.
+- `RELAY_AUTHOR` / `RELAY_PEER` are **no longer required** — `RELAY_AUTHOR` is
+  only an override for a custom agent; `RELAY_PEER` is not read at runtime
+  (peer comes from the pair's `session.json`).
+- `direnv` is optional, and only useful for the rsync owner's `.envrc`.

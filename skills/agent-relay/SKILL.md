@@ -75,7 +75,7 @@ Before any other action:
 
 `init` is safe to run every turn — it's a no-op when state is already healthy, and it self-heals first-run setup (missing `.shared/` or sentinel) without prompting. If `RELAY_SHARED_ROOT` is unset, relay commands default to `<git_toplevel>/.shared`; outside a git repo they fail clearly.
 
-For the first time on a machine, the user picks one of two setup paths: `relay init --same-host` (two terminals on one box) or `relay init --author <name> --peer <name> --sync <none|rsync>` (any other topology). The skill prelude runs the no-arg form; if init prints a setup hint, surface it to the user — that's the only path the prelude can't auto-resolve.
+First time on a machine: `author` auto-detects from the platform signal (`CLAUDE_CODE_SESSION_ID` → claude, `CODEX_THREAD_ID` → codex), so same-host claude+codex needs **no setup** — `relay init --same-host` just confirms it. Only the rsync transport owner runs `relay init --sync rsync` (then fills `RELAY_REMOTE_SSH`/`PATH`); a custom non-claude/codex agent pins its identity with `relay init --author <name>`. The skill prelude runs the no-arg form; if init prints a setup hint, surface it to the user.
 
 Interpret the preflight exit code as three levels:
 
@@ -141,7 +141,7 @@ This is the core 95% case. Take one full turn in the relay.
 2. **Turn check — what's next**. Of the latest published artifact:
    - If there are no published artifacts yet, this session is freshly bootstrapped. Suggest bootstrap intent or ask the user what to write first; **do not silently claim**.
    - If the latest artifact's `status` is terminal (`closed | cancelled | failed | timed_out`), the session is effectively over. Report and stop.
-   - If its `peer` field equals `$RELAY_AUTHOR` (it's addressed to you), **continue** to step 3.
+   - If its `peer` field equals **your resolved author** (auto-detected; `relay whoami` shows it), it's addressed to you — **continue** to step 3.
    - **If its `peer` is someone else** (you are the latest publisher; peer hasn't responded yet), jump directly to **step 10** — the same auto-loop / break check that runs after a fresh publish. For the break-check, the "just-published" artifact is the latest published. This is what closes the loop across tool turns: whether the publish happened in this turn or a prior turn, you flow through the same wait/surface decision.
 
 3. **Read the peer's latest message**: use your Read tool on that latest `.md`. Pay attention to its `prompt_for_next` block — that is your task.
@@ -152,11 +152,7 @@ This is the core 95% case. Take one full turn in the relay.
    ```
    `kind` is one of: `plan | review | fix | note | question | decision | correction | addendum`. The CLI creates a hidden `.draft/NNN-<you>-<kind>.md` with frontmatter scaffold; body is a placeholder.
 
-   **Then immediately start a renewal-file heartbeat** (default; required for Stage 3 crash detection to work):
-   ```bash
-   "$RELAY" heartbeat start --draft "$DRAFT" --owner-kind renewal-file
-   ```
-   Every subsequent relay subcommand you run during this turn (status, claim, publish, wait, close) auto-touches the local renewal file. As long as you keep running relay subcommands, peer sees you alive. If your turn spans >10 minutes without any relay call (e.g. one giant Edit), call `"$RELAY" heartbeat tick` manually to keep the renewal fresh. `relay publish` auto-stops the heartbeat on success.
+   **`claim` auto-starts a renewal-file heartbeat for the draft** — no separate `heartbeat start` step. (If it can't start one it rolls the draft back and errors, so a claimed draft always has liveness coverage; `--no-heartbeat` opts out for tests/advanced use.) Every subsequent relay subcommand you run during this turn (status, publish, wait, close) auto-touches the local renewal file, so the peer sees you alive. If your turn spans >10 minutes without any relay call (e.g. one giant Edit), run `"$RELAY" heartbeat tick` to keep the renewal fresh. `relay publish` auto-stops the heartbeat on success.
 6. **Fill the draft**: use your Edit tool on `$DRAFT`. Replace the placeholder body with your substantive content. **Critical**: replace the `prompt_for_next: |` block — the scaffold has `TODO: ...` and `publish` will reject anything still containing `TODO:`. See "Writing prompt_for_next" below.
 7. **Set `sync_needed: true`** in frontmatter if you modified any non-`.shared/` files. List them under `touched_paths`.
 8. **Publish**:

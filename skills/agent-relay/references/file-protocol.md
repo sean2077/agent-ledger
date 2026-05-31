@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.13.0; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.15.0; session schema v3.
 
 ## 1. Directory layout
 
@@ -167,7 +167,7 @@ session is active ⟺
 
 `relay status` evaluates this; `relay close` independently can move session to closed via state transition or sentinel.
 
-If more than one session is active, `relay status`, `relay claim`, and `relay close` without `--session-id` refuse. `relay sessions list` is the discovery fallback and must not fail merely because zero or multiple sessions are active.
+If more than one pair is active, `relay status`, `relay claim`, and `relay close` without `--pair-id` (and without a resolvable instance binding) refuse. `relay pairs list` is the discovery fallback and must not fail merely because zero or multiple pairs are active.
 
 ## 6. Append-only invariant
 
@@ -205,7 +205,7 @@ If you need to mark something as closed/cancelled/failed/timed_out, write a *new
 
 ### 7.1 Sequence allocation
 
-`relay next-seq` is advisory only. It returns `max(seqs in session + .draft) + 1`, or `001` if empty.
+Sequence allocation is internal: `relay claim` derives the next NNN as `max(seqs in session + .draft) + 1` (or `001` if empty) and reserves it atomically. There is no public "reserve a seq ahead of time" command — pre-reserving would race the append-only allocator.
 
 `relay claim`:
 
@@ -241,7 +241,7 @@ Exclusive `O_CREAT|O_EXCL` final-path reservation is the only concurrency primit
 - Body (everything after the frontmatter close `---`) is empty or whitespace-only.
 
 - `corrects` is set on a kind that may not carry it. Only `correction` (required) and `addendum` (optional) may set `corrects`; any other kind with a non-null `corrects` is rejected. A non-null `corrects` must be a positive int strictly less than the artifact's own `seq` (no self/future references).
-- The active `RELAY_AUTHOR` is unset, or does not equal the draft's `author`. Publish is the authorship boundary and fails closed when identity is missing or mismatched.
+- The resolved author (auto-detected from the platform signal, or `RELAY_AUTHOR` for a custom agent) is unresolved, or does not equal the draft's `author`. Publish is the authorship boundary and fails closed when identity is missing or mismatched.
 
 On success:
 
@@ -264,12 +264,12 @@ On success:
    ```toml
    reason = "..."
    outcome = "approve | needs-change | blocked | <free-form>"
-   closed_by = "<RELAY_AUTHOR>"
+   closed_by = "<resolved author>"
    closed_at = "2026-05-27T18:00:00+08:00"
    ```
 
 3. Update `session.json`: `state = "closed"`, `closed_at = <now>`, `close_reason = <reason>`.
-4. Clear `.shared/.active-session` if it points at the closed session.
+4. Drop the closing instance's binding; peer-side stale bindings self-heal on next resolve.
 5. **Do not modify any `NNN-*.md` file.** Append-only.
 
 If user wants a final synthesis on record, they should `relay claim --kind decision` first, fill body and `prompt_for_next`, `relay publish`, then `relay close`.
@@ -352,9 +352,10 @@ later.
   "not found". Unreadable/corrupt `*.md` files are surfaced by `list`
   (stderr warning + `unreadable` array in `--json`, exit 1), never
   silently dropped.
-- **Frontmatter**: `id`, `created`, `reporter` (`$RELAY_AUTHOR` or
-  `unknown`), `project` (sanitized, best-effort), `session` (active
-  session slug if resolvable, else null), `severity` (`minor`/`major`),
+- **Frontmatter**: `id`, `created`, `reporter` (the resolved author —
+  auto-detected from the platform signal, or `RELAY_AUTHOR` for a custom
+  agent; `unknown` if unresolved), `project` (sanitized, best-effort),
+  `pair` (active pair slug if resolvable, else null), `severity` (`minor`/`major`),
   `area` (`cli`/`hooks`/`docs`/`protocol`/`tests`/`build`/`other`),
   `title`, `status` (`open`/`resolved`), `resolved_at`, `resolution`.
 - **Mutability**: unlike published session artifacts, issues are a
