@@ -355,9 +355,9 @@ A binding whose pair is gone/inactive is dropped (self-healed) on resolve. `rela
 
 **Same-agent limitation.** Because artifacts route by `author` (the `peer` field), two instances of the SAME agent (claude+claude) cannot be addressed within one pair. `join` / `ensure` therefore refuse a pair that already holds a live same-author instance. Real same-agent pairing would require an artifact-routing change (e.g. a `peer_instance` field) and is out of scope.
 
-`preflight` reports binding health under the check name `pair.binding`: bound→active pair = pass; no binding = pass (or **warn** if >1 active pair forces a choice); binding→inactive pair = **warn** (recoverable). A pre-v0.13 `.active-session` file left on disk is inert; `relay doctor` surfaces it as informational.
+`preflight` reports binding health under the check name `pair.binding`: bound→active pair = pass; no binding = pass (or **warn** if >1 active pair forces a choice); binding→inactive pair = **warn** (recoverable); unsupported binding or session schema = **warn** with `unsupported_schema` (not recoverable by cleanup). A pre-v0.13 `.active-session` file left on disk is inert; `relay doctor` surfaces it as informational.
 
-`relay pairs list` lists every pair with its category (`active`/`terminal`/`closed`/`inactive`), bound instances, and open slots.
+`relay pairs list` lists every pair with its category (`active`/`terminal`/`closed`/`inactive`/`unsupported_schema`/`invalid_schema`), bound instances, and open slots.
 
 ## 14. Issue ledger (out-of-band feedback, v0.10)
 
@@ -438,6 +438,14 @@ The following are the **frozen contract surfaces**. A conforming reader at any
      un-migrated ledger is opened by a reader that needs the new shape.
 - Silent breaking changes are forbidden post-1.0. The pre-1.0 "hard-remove
   deprecated, no compat shim" hygiene (see `CHANGELOG.md`) **ends at 1.0**.
+
+Readers enforce the schema contract at read time. Missing or non-integer
+`schema_version` is `invalid_schema`; a session or binding schema greater than
+the compiled-in supported version is `unsupported_schema` and operational
+commands hard-refuse with an upgrade message; a lower schema also refuses until
+an explicit adapter or migration exists. Read-only commands (`preflight`,
+`whoami`, `pairs list`, and `doctor`) may report these diagnostics, but must not
+mutate unsupported records, even when `doctor --fix` is requested.
 
 ### 15.3 Forward-read guarantee (what the gate tests)
 

@@ -99,6 +99,8 @@ Other `warn`s still bump exit to 1 (e.g. `fs.posix_mode` "mode 0xxx exceeds targ
 
 `fail` examples that MUST block: missing env vars (other than `RELAY_SHARED_ROOT`, which defaults to the current git project's `.shared`), `project.consistency` mismatch, `tmp_rename` or `fsync_readback` failures (atomic write unreliable). The `mount.sentinel` failure mode is now self-healed by `init` — if preflight still flags it after `init` ran clean, the filesystem itself is broken. (Binding health is reported under `pair.binding`; a stale or missing binding is a **warn**, never a fail — resolve it with `relay pair ensure` below.)
 
+If any read-only surface (`preflight`, `whoami`, `pairs list`, or `doctor`) reports `unsupported_schema`, this relay version cannot safely interpret that session or binding record. Do not run mutating commands against that record; upgrade relay first, or report the blocker if upgrade is outside your authority. `doctor --fix` still leaves unsupported-schema records untouched.
+
 ## Resolve your pair (bind once; then it's automatic)
 
 A project can run several **pairs** (collaboration sessions) at once. Each agent instance binds to exactly one pair; after that every `relay` command resolves to it automatically — no `--pair-id` needed. Run this once per turn, right after preflight:
@@ -354,6 +356,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
 - **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` explicitly or by default). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
 - **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, incomplete publish triads, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts and incomplete publish triads older than the threshold. Doctor never signals a live PID.
+- **`unsupported_schema` appears in `preflight`, `whoami`, `pairs list`, or `doctor`**: an older relay is looking at a newer or intentionally unsupported ledger/binding schema. Treat this as a compatibility blocker for that record; do not claim, publish, close, archive, or auto-rebind it until relay is upgraded.
 - **`.shared/` is cluttered with old/closed pairs**: `relay pairs archive --terminated` moves every closed/terminal pair into `.shared/_archive/` so the top level stays clean. Archive one with `relay pairs archive <slug>` (it refuses an active pair — `relay close` it first, or pass `--force` to shelve a live one). `relay pairs list --archived` lists what's archived; `relay pairs restore <slug>` brings one back. **User-initiated maintenance only — never run it inside the auto-loop.**
 
 ## Filing issues (feedback ledger)

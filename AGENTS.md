@@ -76,11 +76,11 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | Command | Purpose |
 |---|---|
 | `relay init [--same-host] [--sync rsync] [--author X]` | Idempotent first-run setup (shared root + sentinel). Same-host claude+codex is **zero-config**; only the rsync owner needs flags. |
-| `relay preflight` | Health gate: identity, mount, project, FS atomicity probes. Exit 0 ok / 1 blocking-warn / 2 fail. Run every turn. |
-| `relay whoami` | This instance's resolved identity (author + source), session id, bound pair, derived peer, diagnostics. |
+| `relay preflight` | Health gate: identity, mount, project, FS atomicity probes, and schema compatibility diagnostics (`unsupported_schema` is reported, not fixed). Exit 0 ok / 1 blocking-warn / 2 fail. Run every turn. |
+| `relay whoami` | This instance's resolved identity (author + source), session id, bound pair, derived peer, diagnostics, and schema compatibility diagnostics. |
 | `relay bootstrap --topic <slug> [--peer <name>]` | Create + bind a new pair. claude/codex auto-derive the peer; custom agents pass `--peer`. |
 | `relay pair ensure \| join <slug> \| leave` | Resolve / pick / drop this instance's pair binding. |
-| `relay pairs list [--archived]` | Discovery: all pairs (or, with `--archived`, the archived ones), bound instances, open slots. |
+| `relay pairs list [--archived]` | Discovery: all pairs (or, with `--archived`, the archived ones), bound instances, open slots, and `unsupported_schema` categories. |
 | `relay pairs archive <slug> [--force] \| --terminated` | Move terminated pair dir(s) into `.shared/_archive/` to declutter the top level. `--force` shelves an active pair (drops its bindings); `--terminated` sweeps all closed/terminal pairs. |
 | `relay pairs restore <slug>` | Move an archived pair back to `.shared/` (state unchanged — closed stays closed, shelved-active stays active; never auto-rebinds). |
 | `relay status [--json] [--require-binding]` | The bound pair's published artifacts + next seq. JSON includes `bound_pair` (this instance's binding, or null). `--require-binding` = strict resolution for passive automation: no sole-active fallback; unbound → exit 0 with a non-actionable payload. |
@@ -91,7 +91,7 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay close --reason … --outcome …` | Write `CLOSED` sentinel; mark `session.json` closed. |
 | `relay sync push\|pull [--dry-run]` | rsync wrapper — only the `RELAY_SYNC=rsync` side may run it. |
 | `relay heartbeat start\|stop\|tick` | Liveness daemon for a draft (see §7). |
-| `relay doctor [--fix]` | Read-only ledger diagnosis; `--fix` cleans owner-safe junk, including old incomplete publish triads (never signals a live PID). |
+| `relay doctor [--fix]` | Read-only ledger diagnosis; `--fix` cleans owner-safe junk, including old incomplete publish triads (never signals a live PID and never mutates unsupported-schema records). |
 | `relay hooks install\|uninstall\|doctor\|status` | Manage the optional autopilot hooks (§7). |
 | `relay issue add\|list\|show\|resolve` | Out-of-band feedback ledger for the *tool itself* (machine-local, never synced). |
 
