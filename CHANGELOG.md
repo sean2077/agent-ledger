@@ -52,6 +52,9 @@ Claim-time liveness and command-surface cleanup.
 
 Identity simplification and agent-facing documentation refresh.
 
+Note: 0.14.0 is a logical changelog milestone; it shipped inside the v0.15.0
+tag (commit `72a5cbc`) and has no standalone `v0.14.0` git tag.
+
 ### New
 
 - Author identity auto-detects from platform signals:
