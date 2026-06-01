@@ -4,6 +4,16 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.15.3 — 2026-06-01
+
+Per-instance bootstrap guard.
+
+### Fixed
+
+- `relay bootstrap` now refuses only when the current agent instance is already
+  bound to an active pair. Active pairs owned by other instances no longer
+  force `--force` for a new pair.
+
 ## 0.15.2 — 2026-06-01
 
 Binding-scoped Stop hook and strict automation resolution.

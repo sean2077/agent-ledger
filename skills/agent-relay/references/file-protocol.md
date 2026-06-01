@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.15.2; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.15.3; session schema v3.
 
 ## 1. Directory layout
 

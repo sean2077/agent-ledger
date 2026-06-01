@@ -26,6 +26,7 @@ def _setup_shared(monkeypatch, tmp_path: Path, *, with_sentinel: bool = True) ->
     monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
     monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "test-codex-window")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     return shared
 
@@ -256,17 +257,45 @@ def test_bootstrap_binds_creator(monkeypatch, tmp_path):
     assert (shared / bindings[0]["pair_slug"] / "session.json").is_file()
 
 
-def test_bootstrap_refuses_when_active_pair_exists(monkeypatch, tmp_path, capsys):
-    """M3 (a): bootstrap refuses to create a parallel active pair by default."""
+def test_bootstrap_allowed_when_only_other_instance_has_active_pair(monkeypatch, tmp_path):
+    """v0.15.3: active pairs owned by other instances do not block bootstrap."""
+    shared = _setup_shared(monkeypatch, tmp_path)
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "current-codex-window")
+    other = _write_session(shared, "20990101-other")
+    relay.write_binding(shared, {
+        "schema_version": 1,
+        "instance_id": "codex:other-co",
+        "author": "codex",
+        "agent_session_id": "other-codex-window",
+        "pair_slug": other.name,
+        "bound_at": "2026-06-01T00:00:00+08:00",
+        "last_seen": "2026-06-01T00:00:00+08:00",
+    })
+
+    rc = relay.cmd_bootstrap(type("A", (), {"topic": "mine", "title": None})())
+
+    assert rc == 0
+    sessions = [p.name for p in shared.iterdir() if p.is_dir() and p.name != "_relay"]
+    assert "20990101-other" in sessions
+    assert any(name.endswith("-mine") for name in sessions)
+    env = relay.load_env()
+    binding = relay.read_binding(shared, env.author, env.agent_session_id)
+    assert binding["pair_slug"].endswith("-mine")
+
+
+def test_bootstrap_refuses_when_this_instance_bound(monkeypatch, tmp_path, capsys):
+    """v0.15.3: bootstrap refuses only when this instance is already bound."""
     _setup_shared(monkeypatch, tmp_path)
     assert relay.cmd_bootstrap(type("A", (), {"topic": "one", "title": None})()) == 0
     rc = relay.cmd_bootstrap(type("A", (), {"topic": "two", "title": None})())
     assert rc == 2
-    assert "active pair already exists" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "this instance is already bound to active pair" in err
+    assert "`relay pair leave` first" in err
 
 
 def test_bootstrap_force_allows_parallel_active_session(monkeypatch, tmp_path):
-    """M3 (a): bootstrap --force overrides the active-pair refusal."""
+    """bootstrap --force overrides the bound-instance refusal."""
     shared = _setup_shared(monkeypatch, tmp_path)
     assert relay.cmd_bootstrap(type("A", (), {"topic": "one", "title": None})()) == 0
     assert relay.cmd_bootstrap(type("A", (), {"topic": "two", "title": None, "force": True})()) == 0

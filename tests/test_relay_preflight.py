@@ -14,6 +14,8 @@ def _isolated_env(monkeypatch, **kwargs):
     for k in list(os.environ):
         if k.startswith("RELAY_"):
             monkeypatch.delenv(k, raising=False)
+    if "RELAY_AUTHOR" in kwargs and "RELAY_AGENT_SESSION_ID" not in kwargs:
+        kwargs["RELAY_AGENT_SESSION_ID"] = "test-agent-window"
     for k, v in kwargs.items():
         monkeypatch.setenv(k, v)
 

@@ -24,6 +24,7 @@ def _bootstrap(monkeypatch, tmp_path: Path):
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("RELAY_SYNC", "none")
     monkeypatch.setenv("RELAY_AUTHOR", "claude")
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "test-claude-window")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
     return relay.resolve_active_pair(relay.load_env()), shared

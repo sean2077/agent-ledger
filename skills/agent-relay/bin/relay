@@ -51,7 +51,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.15.2"
+__version__ = "0.15.3"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -1737,12 +1737,12 @@ def cmd_bootstrap(args) -> int:
         print(f"relay bootstrap: pair dir already exists: {session_dir}", file=sys.stderr)
         return 2
 
-    current_active = active_pair_dirs(env.shared_root)
-    if current_active and not getattr(args, "force", False):
-        names = ", ".join(s.name for s in current_active)
+    my_active = resolve_active_pair(env, require_binding=True)
+    if my_active is not None and not getattr(args, "force", False):
         print(
-            "relay bootstrap: active pair already exists; close it or use "
-            f"--force to create a parallel pair: {names}",
+            "relay bootstrap: this instance is already bound to active pair "
+            f"{my_active.name}; use --force to start a parallel pair, or run "
+            "`relay pair leave` first",
             file=sys.stderr,
         )
         return 2
