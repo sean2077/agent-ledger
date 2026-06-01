@@ -74,3 +74,28 @@ signal pins its identity with `relay init --author <name>` (an override).
 - `RELAY_AUTHOR` is only an override for a custom agent. `RELAY_PEER` is retired
   and not read at runtime; peer comes from the pair's `session.json`.
 - `direnv` is optional, and only useful for the rsync owner's `.envrc`.
+
+## Privacy & trust surface
+
+`agent-relay` is a local file protocol by default. The shared ledger lives under
+`.shared/`, and `relay` creates directories with mode `0700` and files with mode
+`0600`; `relay preflight` warns if `.shared/` is wider than `0700`. The ledger
+contains the artifacts the agents publish plus metadata such as `touched_paths`
+path references. In a same-host setup, those files do not leave the machine.
+
+Sync is opt-in. Only the side configured with `RELAY_SYNC=rsync` can run
+`relay sync`; the unset/default mode is `none`. `relay sync` uses your own SSH
+target (`RELAY_REMOTE_SSH` / `RELAY_REMOTE_PATH`) and defaults to non-mirroring
+behavior: `--delete` is off unless you explicitly ask to mirror deletions.
+
+The tool-feedback issue ledger is separate and machine-local. `relay issue`
+writes under `~/.agent-ledger/relay-issues/` by default (overridable with
+`RELAY_ISSUES_DIR`), not under `.shared/`, and `relay sync` never moves those
+issue files.
+
+Details live in the protocol references: file modes in
+[`file-protocol.md` §12](skills/agent-relay/references/file-protocol.md#12-encoding),
+the issue ledger in
+[`file-protocol.md` §14](skills/agent-relay/references/file-protocol.md#14-issue-ledger-out-of-band-feedback-v010),
+and sync behavior in
+[`rsync-recipes.md`](skills/agent-relay/references/rsync-recipes.md).

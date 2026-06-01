@@ -129,6 +129,9 @@ case.
 Only the rsync owner needs an explicit `RELAY_SYNC=rsync`. All other
 sides default to `RELAY_SYNC=none`.
 
+For the quickstart-level privacy and trust summary, see
+[`README.md`](../README.md#privacy--trust-surface).
+
 ## Why a file ledger beats copy-paste
 
 The ledger isn't just a glorified chat log. The protocol enforces enough

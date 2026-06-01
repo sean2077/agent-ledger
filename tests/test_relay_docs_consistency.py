@@ -100,6 +100,32 @@ def test_readme_leads_with_claude_codex_hook():
     assert "without writing API glue" in normalized
 
 
+def test_readme_documents_privacy_trust_surface():
+    """README quickstart keeps the user-visible privacy/trust summary anchored
+    to the protocol references."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "## Privacy & trust surface" in readme
+    section = readme.split("## Privacy & trust surface", 1)[1]
+    for needle in (
+        "`.shared/`",
+        "`0700`",
+        "`0600`",
+        "`relay preflight` warns",
+        "`touched_paths`",
+        "`RELAY_SYNC=rsync`",
+        "`relay sync`",
+        "`--delete` is off",
+        "`RELAY_REMOTE_SSH`",
+        "`~/.agent-ledger/relay-issues/`",
+        "`RELAY_ISSUES_DIR`",
+        "not under `.shared/`",
+        "`relay sync` never moves",
+        "file-protocol.md",
+        "rsync-recipes.md",
+    ):
+        assert needle in section
+
+
 def test_skill_preamble_leads_with_claude_codex_hook():
     """D6: SKILL.md preamble names both Claude Code and Codex CLI."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
