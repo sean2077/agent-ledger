@@ -25,6 +25,9 @@ the protocol stabilizes.
   same-author unbound window from writing into the lone active pair by fallback.
   This closes the remaining cross-talk write-boundary gap after the Stop-hook
   strict-status fix.
+- `relay publish` now verifies that the draft author is one of the pair's two
+  participants and that the draft peer matches the participant-derived route
+  before any final-path reservation, including forced terminal publishes.
 - Issue-ledger triage for the RC closed four already-resolved findings and left
   one timed-out resume edge deferred to post-1.0 maintenance, keeping the 1.0
   freeze gate explicit instead of silently carrying stale tool-feedback items.

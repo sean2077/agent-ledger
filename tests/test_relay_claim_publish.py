@@ -110,6 +110,112 @@ def test_claim_allows_explicit_pair_id_for_unbound_instance(monkeypatch, tmp_pat
     assert draft.parent == session / ".draft"
 
 
+def test_publish_refuses_manual_draft_from_nonparticipant(
+    monkeypatch, tmp_path, capsys
+):
+    """Publish is a write boundary too: a hand-placed third-party draft must
+    not bypass claim's participant-derived peer gate."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _manual_draft(session, author="gpt55", peer="claude")
+    monkeypatch.setenv("RELAY_AUTHOR", "gpt55")
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "gpt-window")
+
+    rc = relay.cmd_publish(_publish_args(draft))
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "cannot derive a peer" in captured.err
+    assert draft.exists()
+    assert not (session / "001-gpt55-note.md").exists()
+    assert not (session / "001-gpt55-note.md.sha256").exists()
+    assert not (session / "001-gpt55-note.ready").exists()
+
+
+def test_publish_refuses_participant_draft_with_wrong_peer(
+    monkeypatch, tmp_path, capsys
+):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _manual_draft(session, author="codex", peer="gpt55")
+
+    rc = relay.cmd_publish(_publish_args(draft))
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "does not match" in captured.err
+    assert draft.exists()
+    assert not (session / "001-codex-note.md").exists()
+
+
+def test_publish_refuses_malformed_participants(monkeypatch, tmp_path, capsys):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    sj_path = session / "session.json"
+    sj = json.loads(sj_path.read_text())
+    sj["participants"] = ["codex"]
+    sj_path.write_text(json.dumps(sj))
+    draft = _manual_draft(session, author="codex", peer="claude")
+
+    rc = relay.cmd_publish(_publish_args(draft))
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "cannot derive a peer" in captured.err
+    assert draft.exists()
+    assert not (session / "001-codex-note.md").exists()
+
+
+def test_publish_membership_gate_applies_to_force(
+    monkeypatch, tmp_path, capsys
+):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    (session / "CLOSED").write_text('reason = "already done"\n')
+    draft = _manual_draft(session, author="gpt55", peer="claude")
+    monkeypatch.setenv("RELAY_AUTHOR", "gpt55")
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "gpt-window")
+
+    rc = relay.cmd_publish(
+        _publish_args(
+            draft,
+            status="closed",
+            force=True,
+            force_reason="terminal note after close",
+        )
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "cannot derive a peer" in captured.err
+    assert draft.exists()
+    assert not (session / "001-gpt55-note.md").exists()
+
+
+def test_publish_membership_gate_allows_normal_claim_publish(
+    monkeypatch, tmp_path, capsys
+):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    assert relay.cmd_claim(type("A", (), {
+        "kind": "note",
+        "in_reply_to": None,
+        "corrects": None,
+        "project": None,
+        "pair_id": None,
+    })()) == 0
+    draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(draft)
+
+    rc = relay.cmd_publish(_publish_args(draft))
+    pub = Path(capsys.readouterr().out.strip())
+
+    assert rc == 0
+    assert pub.exists()
+    assert (session / "001-codex-note.md.sha256").exists()
+    assert (session / "001-codex-note.ready").exists()
+
+
 def test_claim_unknown_kind_rejected(monkeypatch, tmp_path, capsys):
     _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()
@@ -232,6 +338,49 @@ def _fill_draft(draft_path: Path, *, prompt: str = "do real things\n", body: str
     fm["prompt_for_next"] = prompt
     text = relay.dump_frontmatter(fm, f"\n{body}\n")
     draft_path.write_text(text)
+
+
+def _manual_draft(
+    session: Path,
+    *,
+    seq: int = 1,
+    author: str = "gpt55",
+    peer: str = "claude",
+    kind: str = "note",
+) -> Path:
+    draft = session / ".draft" / f"{seq:03d}-{author}-{kind}.md"
+    fm = {
+        "seq": seq,
+        "author": author,
+        "peer": peer,
+        "kind": kind,
+        "status": "draft",
+        "created": None,
+        "in_reply_to": None,
+        "prompt_for_next": "review this manual draft\n",
+        "sync_needed": False,
+        "touched_paths": [],
+        "corrects": None,
+    }
+    draft.write_text(relay.dump_frontmatter(fm, "\nmanual body.\n"))
+    return draft
+
+
+def _publish_args(
+    draft: Path,
+    *,
+    status: str | None = None,
+    force: bool = False,
+    force_reason: str | None = None,
+):
+    return type("A", (), {
+        "draft_path": str(draft),
+        "status": status,
+        "force": force,
+        "force_reason": force_reason,
+        "project": None,
+        "session_id": None,
+    })()
 
 
 def _write_artifact(session: Path, *, seq: int = 1, author: str = "claude",

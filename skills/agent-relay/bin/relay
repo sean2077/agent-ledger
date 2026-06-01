@@ -2580,6 +2580,28 @@ def cmd_publish(args) -> int:
             file=sys.stderr,
         )
         return 2
+    try:
+        expected_peer = resolve_peer(session, fm["author"])
+    except SchemaVersionError as exc:
+        print(f"relay publish: {exc}", file=sys.stderr)
+        return 2
+    if not expected_peer:
+        print(
+            f"relay publish: cannot derive a peer for {fm['author']!r} from "
+            f"{session.name} participants (malformed, or not a 2-party pair "
+            f"containing {fm['author']!r}); refusing to publish a draft outside "
+            "the pair's participants.",
+            file=sys.stderr,
+        )
+        return 2
+    if fm.get("peer") != expected_peer:
+        print(
+            f"relay publish: draft peer {fm.get('peer')!r} does not match "
+            f"{fm['author']!r}'s participant-derived peer {expected_peer!r} "
+            f"in {session.name}; re-claim the draft.",
+            file=sys.stderr,
+        )
+        return 2
     _gc_heartbeat_orphans(session, _env_pub.author or "")
     _gc_renewal_orphans(session, _env_pub)
     _maybe_tick_renewal(session, _env_pub)
