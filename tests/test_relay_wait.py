@@ -59,7 +59,8 @@ def _bootstrap(monkeypatch, tmp_path: Path, *, author="claude", peer="codex"):
 
 def _publish_artifact(session: Path, *, seq: int, author: str, peer: str,
                        kind: str = "review", status: str = "ready",
-                       prompt: str = "do real things\n", body: str = "ok body"):
+                       prompt: str = "do real things\n", body: str = "ok body",
+                       with_sha: bool = True, with_ready: bool = True):
     """Manually publish a ready artifact to the session.
 
     Bypasses cmd_claim/cmd_publish so tests can craft arbitrary author/peer
@@ -82,9 +83,11 @@ def _publish_artifact(session: Path, *, seq: int, author: str, peer: str,
     md = session / name
     text = relay.dump_frontmatter(fm, f"\n{body}\n")
     md.write_text(text)
-    sha = relay.sha256_of_file(md)
-    (session / f"{name}.sha256").write_text(f"{sha}  {name}\n")
-    (session / f"{seq:03d}-{author}-{kind}.ready").touch()
+    if with_sha:
+        sha = relay.sha256_of_file(md)
+        (session / f"{name}.sha256").write_text(f"{sha}  {name}\n")
+    if with_ready:
+        (session / f"{seq:03d}-{author}-{kind}.ready").touch()
     return md
 
 
@@ -121,6 +124,24 @@ def test_wait_returns_10_on_timeout(monkeypatch, tmp_path, capsys):
     assert rc == 10
     out = capsys.readouterr().out
     assert out == ""
+
+
+def test_wait_ignores_incomplete_triad_at_peer_location(monkeypatch, tmp_path, capsys):
+    """A peer .md in the published location is not visible until its triad is complete."""
+    session = _bootstrap(monkeypatch, tmp_path, author="codex", peer="claude")
+    _publish_artifact(
+        session,
+        seq=1,
+        author="claude",
+        peer="codex",
+        kind="note",
+        with_sha=True,
+        with_ready=False,
+    )
+    capsys.readouterr()  # drain bootstrap chatter
+    rc = relay.cmd_wait(_wait_args(timeout=0, poll=1))
+    assert rc == 10
+    assert capsys.readouterr().out == ""
 
 
 def test_wait_returns_12_when_session_closes_mid_wait(monkeypatch, tmp_path, capsys):

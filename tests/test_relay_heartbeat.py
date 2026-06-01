@@ -450,6 +450,25 @@ def test_heartbeat_start_refuses_draft_author_mismatch(monkeypatch, tmp_path, ca
     assert "author" in err.lower()
 
 
+def test_heartbeat_start_refuses_missing_author_env(monkeypatch, tmp_path, capsys):
+    """heartbeat start is an ownership boundary and fails closed without author identity."""
+    session = _bootstrap(monkeypatch, tmp_path, author="claude", peer="codex")
+    capsys.readouterr()
+    draft = _claim_draft(session)
+    capsys.readouterr()
+    monkeypatch.delenv("RELAY_AUTHOR", raising=False)
+
+    rc = relay.cmd_heartbeat_start(_hb_args(
+        draft=str(draft), owner_kind="none", interval=1,
+    ))
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "could not resolve author identity" in err
+    assert not relay._heartbeat_sidecar_path(draft).exists()
+    assert not relay._heartbeat_pidfile_path(session, "claude").exists()
+
+
 def test_heartbeat_start_renewal_file_ignores_caller_path(monkeypatch, tmp_path, capsys):
     """M1: even if args carry an owner_renewal_file, start derives the scoped path."""
     session = _bootstrap(monkeypatch, tmp_path)

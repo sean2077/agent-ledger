@@ -173,6 +173,33 @@ def _fill_draft(draft_path: Path, *, prompt: str = "do real things\n", body: str
     draft_path.write_text(text)
 
 
+def _write_artifact(session: Path, *, seq: int = 1, author: str = "claude",
+                    peer: str = "codex", kind: str = "note",
+                    with_sha: bool = True, with_ready: bool = True) -> Path:
+    fm = {
+        "seq": seq,
+        "author": author,
+        "peer": peer,
+        "kind": kind,
+        "status": "ready",
+        "created": relay.now_iso(),
+        "in_reply_to": None,
+        "prompt_for_next": "respond\n",
+        "sync_needed": False,
+        "touched_paths": [],
+        "corrects": None,
+    }
+    name = f"{seq:03d}-{author}-{kind}.md"
+    md = session / name
+    md.write_text(relay.dump_frontmatter(fm, "\nbody.\n"))
+    if with_sha:
+        digest = relay.sha256_of_file(md)
+        (session / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+    if with_ready:
+        (session / f"{seq:03d}-{author}-{kind}.ready").touch()
+    return md
+
+
 def test_publish_happy_path(monkeypatch, tmp_path, capsys):
     session = _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()
@@ -246,6 +273,39 @@ def test_list_published_rejects_tampered_sha256(monkeypatch, tmp_path, capsys):
     assert pub not in listed, f"tampered artifact must not be returned: {listed}"
 
 
+def test_list_published_excludes_md_without_ready(monkeypatch, tmp_path, capsys):
+    """Incomplete publish triads are invisible until the final .ready sentinel."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    md = _write_artifact(session, with_sha=True, with_ready=False)
+    assert md.exists()
+    assert relay.list_published(session) == []
+
+
+def test_list_published_excludes_md_without_sha256(monkeypatch, tmp_path, capsys):
+    """A ready sentinel alone is not enough; readers also require sha256."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    md = _write_artifact(session, with_sha=False, with_ready=True)
+    assert md.exists()
+    assert relay.list_published(session) == []
+
+
+def test_status_hides_incomplete_triad(monkeypatch, tmp_path, capsys):
+    """relay status funnels through list_published and hides partial publishes."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    _write_artifact(session, with_sha=True, with_ready=False)
+    rc = relay.cmd_status(type("A", (), {
+        "project": None, "pair_id": None, "require_binding": False,
+        "last": 0, "json": True,
+    })())
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert data["published"] == []
+    assert data["next_seq"] == 2  # claim allocation still avoids partial seqs.
+
+
 def test_list_published_accepts_intact(monkeypatch, tmp_path, capsys):
     session = _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()
@@ -255,6 +315,62 @@ def test_list_published_accepts_intact(monkeypatch, tmp_path, capsys):
     relay.cmd_publish(type("A", (), {"draft_path": str(draft), "status": None})())
     listed = relay.list_published(session)
     assert len(listed) == 1
+
+
+def test_publish_two_drafts_same_seq_one_bumps(monkeypatch, tmp_path, capsys):
+    """A stale loser draft with the same seq publishes by bumping, not clobbering."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    relay.cmd_claim(type("A", (), {"kind": "plan", "in_reply_to": None, "project": None})())
+    first_draft = Path(capsys.readouterr().out.strip())
+    _fill_draft(first_draft, body="first body")
+    assert relay.cmd_publish(type("A", (), {
+        "draft_path": str(first_draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })()) == 0
+    first_pub = Path(capsys.readouterr().out.strip())
+
+    # Simulate the losing publisher still holding a same-seq draft after the
+    # winner promoted seq 001. On publish it must reserve seq 002 instead.
+    second_draft = session / ".draft" / "001-codex-plan.md"
+    fm = {
+        "seq": 1,
+        "author": "codex",
+        "peer": "claude",
+        "kind": "plan",
+        "status": "draft",
+        "created": relay.now_iso(),
+        "in_reply_to": None,
+        "prompt_for_next": "review the bumped artifact\n",
+        "sync_needed": False,
+        "touched_paths": [],
+        "corrects": None,
+    }
+    second_draft.write_text(relay.dump_frontmatter(fm, "\nsecond body\n"))
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(second_draft), "status": None,
+        "force": False, "force_reason": None,
+        "project": None, "session_id": None,
+    })())
+    captured = capsys.readouterr()
+    second_pub = Path(captured.out.strip())
+
+    assert rc == 0
+    assert first_pub.name == "001-codex-plan.md"
+    assert second_pub.name == "002-codex-plan.md"
+    assert "seq 001 taken by concurrent publisher" in captured.err
+    for pub in (first_pub, second_pub):
+        assert (session / f"{pub.name}.sha256").exists()
+        assert (session / f"{pub.name[:-3]}.ready").exists()
+    assert [p.name for p in relay.list_published(session)] == [
+        "001-codex-plan.md",
+        "002-codex-plan.md",
+    ]
+    fm2, body2 = relay.parse_frontmatter(second_pub.read_text())
+    assert fm2["seq"] == 2
+    assert "second body" in body2
 
 
 def test_publish_rejects_seq_mismatch(monkeypatch, tmp_path, capsys):
