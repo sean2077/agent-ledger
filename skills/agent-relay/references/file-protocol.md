@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.16.0; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.17.0; session schema v3.
 > The candidate 1.0 frozen-contract and compatibility policy is in §15.
 
 ## 1. Directory layout

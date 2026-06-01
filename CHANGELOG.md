@@ -4,6 +4,29 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.17.0 — 2026-06-01
+
+Candidate 1.0 contract freeze and compatibility guardrails.
+
+### New
+
+- `references/file-protocol.md` now has a candidate 1.0 frozen-contract section
+  that defines which on-disk artifacts are compatibility commitments, how future
+  relay versions must read older ledgers, and how schema/contract changes should
+  be validated before a 1.0 release.
+- The fail-closed regression matrix now covers the missing GAP-1/GAP-2 paths and
+  the additional sub-gap around incomplete publish triads, keeping malformed or
+  partial artifacts out of status, wait, publish, and repair-sensitive flows.
+- A committed canonical 1.0 ledger fixture locks representative legacy bytes,
+  including active artifacts, sidecars, bindings, and archived pairs, so future
+  readers can prove forward compatibility against frozen historical layouts.
+
+### Fixed
+
+- Forward-read tests now exercise the canonical fixture through status, wait,
+  doctor, pairs-list, archive exclusion, and frozen-byte hash guards instead of
+  relying only on current-version generated test ledgers.
+
 ## 0.16.0 — 2026-06-01
 
 Pair archival: declutter `.shared/` by moving terminated pairs aside.
