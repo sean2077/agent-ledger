@@ -4,6 +4,32 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.18.0 — 2026-06-01
+
+Recovery diagnostics, schema read gates, and quickstart trust-surface docs for
+the 1.0 convergence path.
+
+### New
+
+- `relay doctor` now diagnoses incomplete published triads and orphan publish
+  sidecars. `doctor --fix --older-than <duration>` removes only old,
+  owner-safe remnants and preserves fresh heartbeat-covered in-flight publish
+  state.
+- Session and binding records now pass through read-time schema gates:
+  `read_session_json` and `read_binding` validate `schema_version`,
+  operational commands refuse unsupported future records cleanly, read-only
+  surfaces report `unsupported_schema` without mutating those records, and a
+  future-schema binding is never deleted by fallback recovery.
+- `README.md` now includes a quickstart-visible "Privacy & trust surface"
+  section covering ledger file modes, opt-in non-deleting sync behavior, and
+  the local-only issue ledger.
+
+### Fixed
+
+- Active-pair discovery now skips unrelated future-schema or corrupt bystander
+  pairs, while explicit `--pair-id` targets and bound future-schema pairs still
+  fail closed.
+
 ## 0.17.0 — 2026-06-01
 
 Candidate 1.0 contract freeze and compatibility guardrails.
