@@ -1,6 +1,7 @@
 # agent-relay file protocol
 
 > Source spec for the `relay` CLI implementation. v0.16.0; session schema v3.
+> The candidate 1.0 frozen-contract and compatibility policy is in §15.
 
 ## 1. Directory layout
 
@@ -389,3 +390,57 @@ Commands: `relay issue add --title T [--severity S] [--area A]
 [--body TEXT | --body-file PATH|-]`, `relay issue list [--status
 open|resolved|all] [--area A] [--json]`, `relay issue show <id|prefix>
 [--json]`, `relay issue resolve <id|prefix> [--note "fixed in <sha>"]`.
+
+## 15. Frozen contract & compatibility policy (1.0)
+
+> Normative for 1.0. This section governs every section above: it names the
+> on-disk surfaces that 1.0 **freezes** and the only ways they may change after
+> 1.0. Until the 1.0 tag this is the *candidate* contract; at 1.0 it becomes
+> *binding*.
+
+### 15.1 What 1.0 freezes
+
+The following are the **frozen contract surfaces**. A conforming reader at any
+1.x version MUST be able to read state written by 1.0:
+
+| Surface | Frozen shape | Spec |
+|---|---|---|
+| Pair directory layout | `.shared/<pair-slug>/`, `.draft/`, top-level `_relay/` + `_archive/` | §1, §11 |
+| Artifact filename | `NNN-<author>-<kind>.md` (3-digit zero-padded seq) | §2 |
+| `session.json` | schema **v3**: required keys + `participants` (exactly two) | §3 |
+| Frontmatter | required fields, `kind` vocabulary, `status` vocabulary + terminal set | §4, §4.1-§4.3 |
+| Publish triad | `<base>.md` + `<base>.md.sha256` + `<base>.ready`; consumable only as a complete, hash-matching triad | §8, §10 |
+| Sequence semantics | monotonic per pair; collisions rejected, never squashed | §7.1 |
+| Append-only | published `.md` never mutated; corrections forward-only via new artifact | §6 |
+| Binding registry | `_relay/bindings/<author>-<sha256(full-id)[:24]>.json`, `schema_version: 1` | §13 |
+| Two-participant invariant | a pair has exactly two participants; routing is `author -> peer` | §3, §5, §13, §15.3 |
+
+### 15.2 How the contract may change after 1.0
+
+- **Additive, backward-compatible** changes are allowed within 1.x **without** a
+  schema bump: new optional frontmatter fields, new `kind` values, new reserved
+  top-level `_`-prefixed dirs, new sidecar kinds, provided a 1.0 reader that
+  ignores the unknown still behaves correctly. New required fields are NOT
+  additive.
+- **Breaking** changes (removing/renaming a required field, changing a value's
+  meaning, altering the triad, changing the binding-key derivation, changing the
+  `session.json` shape incompatibly) require **either**:
+  1. a **schema bump**: increment `session.json.schema_version` (and/or the
+     binding `schema_version`) with the new reader accepting both old and new,
+     **or**
+  2. an **explicit migration**: a documented, idempotent `relay` step that
+     rewrites old state to the new shape, fronted by a clear refusal when an
+     un-migrated ledger is opened by a reader that needs the new shape.
+- Silent breaking changes are forbidden post-1.0. The pre-1.0 "hard-remove
+  deprecated, no compat shim" hygiene (see `CHANGELOG.md`) **ends at 1.0**.
+
+### 15.3 Forward-read guarantee (what the gate tests)
+
+The compatibility promise is concretely: **a newer `relay` reads a 1.0 ledger.**
+The 1.0 gate ships **one canonical 1.0 fixture**: a frozen pair tree containing a
+`session.json` v3 file, a published-artifact triad chain, a binding file, and an
+archived pair. A forward-read test asserts `relay status`, `relay wait`, and
+`relay doctor` parse it and report a recoverable state. Multi-version
+*historical* corpora (v0.9/v0.13/v0.15/v0.16) are explicitly **out of the 1.0
+gate** (1.x compatibility enhancement): pre-1.0 made no compatibility promise,
+so only the 1.0-forward direction is contractual.
