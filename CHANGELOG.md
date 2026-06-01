@@ -4,6 +4,31 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.19.0 — 2026-06-01
+
+1.0 RC metadata for the freeze-readiness soak.
+
+### New
+
+- Added first-run onboarding smoke coverage that exercises the real `relay`
+  subprocess from a clean environment, proving setup, bootstrap, status, claim,
+  draft-fill, publish, and peer wait recovery hints work outside the in-process
+  test harness.
+- The 1.0 RC gate is now satisfied across the seven freeze checkpoints:
+  contract section, canonical fixture, schema read gates, incomplete triad
+  recovery, quickstart privacy/trust docs, issue-ledger triage, and onboarding
+  smoke.
+
+### Fixed
+
+- `relay claim` now resolves pairs with strict binding scope, preventing a
+  same-author unbound window from writing into the lone active pair by fallback.
+  This closes the remaining cross-talk write-boundary gap after the Stop-hook
+  strict-status fix.
+- Issue-ledger triage for the RC closed four already-resolved findings and left
+  one timed-out resume edge deferred to post-1.0 maintenance, keeping the 1.0
+  freeze gate explicit instead of silently carrying stale tool-feedback items.
+
 ## 0.18.0 — 2026-06-01
 
 Recovery diagnostics, schema read gates, and quickstart trust-surface docs for
