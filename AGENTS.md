@@ -81,11 +81,11 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay bootstrap --topic <slug> [--peer <name>]` | Create + bind a new pair. claude/codex auto-derive the peer; custom agents pass `--peer`. |
 | `relay pair ensure \| join <slug> \| leave` | Resolve / pick / drop this instance's pair binding. |
 | `relay pairs list` | Discovery: all pairs, bound instances, open slots. |
-| `relay status [--json]` | The bound pair's published artifacts + next seq. |
+| `relay status [--json] [--require-binding]` | The bound pair's published artifacts + next seq. JSON includes `bound_pair` (this instance's binding, or null). `--require-binding` = strict resolution for passive automation: no sole-active fallback; unbound → exit 0 with a non-actionable payload. |
 | `relay claim --kind <k> [--in-reply-to N]` | Scaffold a hidden `.draft/NNN-<author>-<kind>.md`. Fails closed if author/peer unresolved. |
 | `relay draft set <draft> --body-file … --prompt-for-next-file …` | Fill a draft atomically (preferred over hand-editing the file). |
 | `relay publish <draft>` | Validate + atomically promote a draft (writes `.sha256` + `.ready`). The authorship boundary. |
-| `relay wait` | Block until the peer publishes an artifact addressed to you. Exit 0 new / 10 timeout / 11 peer-stale / 12 terminal / 130 SIGINT. |
+| `relay wait [--require-binding]` | Block until the peer publishes an artifact addressed to you. Exit 0 new / 10 timeout / 11 peer-stale / 12 terminal / 130 SIGINT. `--require-binding` refuses (non-zero) when unbound instead of waiting on a sole-active pair. |
 | `relay close --reason … --outcome …` | Write `CLOSED` sentinel; mark `session.json` closed. |
 | `relay sync push\|pull [--dry-run]` | rsync wrapper — only the `RELAY_SYNC=rsync` side may run it. |
 | `relay heartbeat start\|stop\|tick` | Liveness daemon for a draft (see §7). |
@@ -143,9 +143,16 @@ the rsync side. (The pre-v0.14 per-terminal `export RELAY_AUTHOR` dance and the
 6. **Auto-loop:** unless a rule-based break fires, `relay wait` for the peer and
    repeat. Break triggers (surface to the user): `kind: decision`, a terminal
    status, a `prompt_for_next` line **starting with** `@user:`, or the
-   consecutive-round cap (`RELAY_AUTO_ROUND_CAP`, default 5). The goal is an
-   un-interrupted multi-round cross-review that still hands back on real
-   decisions and stays interruptible (Ctrl-C any time).
+   consecutive-round cap (`RELAY_AUTO_ROUND_CAP`, default 5). The gap between
+   your publish and the peer's reply is **wait time, not user time** — never end
+   a turn just to ask "should I wait?"/"continue?"; that bare gate is the
+   interruption the loop exists to remove. **Prefer waiting in the background**
+   where the runtime allows it (Claude Code: Bash `run_in_background` — the user
+   stays interactive and the harness re-invokes you when the wait exits). Codex
+   CLI has no backgroundable task (its exec PTY is torn down at turn end), so it
+   leans on the Stop-hook auto-continue or a foreground `relay wait` instead of
+   breaking out. The goal is an un-interrupted multi-round cross-review that
+   still hands back on real decisions and stays interruptible (Ctrl-C any time).
 
 **Hard rules:** never edit a `.md` that has a `.ready` sidecar (append a
 `kind: correction` instead); never hand-write `.sha256`/`.ready`; never bypass
@@ -167,8 +174,12 @@ the rsync side. (The pre-v0.14 per-terminal `export RELAY_AUTHOR` dance and the
   wires SessionStart (early hint), PreToolUse (denies edits to `.ready`
   artifacts), and Stop (auto-continues the turn when the peer published). Install
   on **both** sides for a smooth bidirectional loop that needs no manual
-  re-invocation. Every hook decision is appended to
-  `.shared/_relay/hook-trail.log`. Spec: `references/hook-protocol.md`.
+  re-invocation. **The Stop surface is binding-scoped:** it resolves only *this
+  session's* bound pair (`relay status --require-binding`) and stays silent when
+  the session is bound to no pair — an unbound window doing unrelated work is
+  never pulled into the lone active pair (issue 20260601T182646-2920d5b9). Every
+  hook decision is appended to `.shared/_relay/hook-trail.log`. Spec:
+  `references/hook-protocol.md`.
 
 ## 8. Testing & dev conventions
 

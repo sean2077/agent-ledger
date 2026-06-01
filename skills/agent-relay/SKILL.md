@@ -20,7 +20,7 @@ If the user has run `relay hooks install --target both`, three hooks fire automa
 
 - **SessionStart** — early hint + stale-state doctor (does **not** replace `init+preflight`; that stays required every turn).
 - **PreToolUse** — denies `Edit / Write / MultiEdit / apply_patch` aimed at any `.ready` artifact under `.shared/<session>/`. This enforces **hard rule 1** as a real guardrail on both platforms via `hookSpecificOutput.permissionDecision: "deny"`.
-- **Stop** — non-blocking peer-status surface. If peer published an artifact addressed to you, or you have an unpublished draft, the hook returns `decision: "block"` with a structured `[relay-state]` / `[relay-action]` reason so you continue without burning a user turn. Otherwise it exits silently. Deduplicates via `.shared/_relay/hook-state/<host>.json`.
+- **Stop** — non-blocking peer-status surface, **scoped to the pair this session is bound to**. It resolves strictly via `relay status --require-binding`: if this session is bound to no pair it exits silently (an unbound window doing unrelated work is never pulled into the lone active pair). When bound: if peer published an artifact addressed to you, or you have an unpublished draft, the hook returns `decision: "block"` with a structured `[relay-state]` / `[relay-action]` reason so you continue without burning a user turn. Otherwise it exits silently. Deduplicates via `.shared/_relay/hook-state/<host>.json`.
 
 How to tell whether hooks are active:
 
@@ -177,10 +177,19 @@ This is the core 95% case. Take one full turn in the relay.
     - your `prompt_for_next` has a **line whose trimmed text starts with `@user:`** (case-sensitive). The marker must be at line-start to count — a `@user:` mentioned mid-sentence (e.g. instructing the peer "do not escalate to `@user:` unless…") is **not** an escalation and must NOT trigger a surface. This line-start rule is deliberate: substring matching false-positived on artifacts that merely referenced the marker, which undercut the un-interrupted auto-loop.
     - in-memory consecutive-auto-round counter ≥ `RELAY_AUTO_ROUND_CAP` (default 5)
 
-    **Otherwise — enter auto-loop:**
+    **Otherwise — you wait; you do NOT surface.** Surfacing to the user happens
+    *only* on the four break rules above. Once a pair is live, the gap between
+    your publish and the peer's reply is **wait time, not user time** — do not
+    end your turn to ask "should I wait for the peer?", "want me to continue?",
+    or "tell me how you'd like to proceed." That bare gate is exactly the
+    interruption the auto-loop exists to remove. If no break rule fired, the
+    next action is mechanical:
     1. Increment the in-memory round counter.
-    2. Run `"$RELAY" wait` exactly once. Single blocking Bash tool call, no progress chatter from you before or after.
-    3. Interpret exit code:
+    2. Run `"$RELAY" wait` exactly once — **prefer the background form** so the
+       user stays interactive (see "How to wait" below). No progress chatter
+       before or after.
+    3. Interpret its exit code (identical whether the wait ran foreground or
+       background):
        - `0` — new artifact path is on stdout. Jump back to step 1.
        - `10` — timeout (`RELAY_WAIT_TIMEOUT`, default 3600s). Surface to user: "peer hasn't responded in N seconds." Offer (a) keep waiting, (b) go check the other agent, (c) stop.
        - `11` — peer heartbeat stale (Stage 2+ only; never in Stage 1). Surface: "peer may have crashed mid-turn."
@@ -190,9 +199,34 @@ This is the core 95% case. Take one full turn in the relay.
 
     **Hard rule**: do NOT decide "this isn't important enough to surface." If a `kind: question` benefits from user attention, encode the escalation as a line that **starts with** `@user:` (e.g. a line reading `@user: which auth backend do you want?`). The round-cap is the catch-all backstop so the loop cannot run forever silently.
 
-    **When hooks are installed**: the Stop hook will auto-continue the turn via `decision: "block"` whenever peer published an artifact addressed to you, so the auto-loop above happens implicitly between turns; you can rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
+    **How to wait — prefer background, never break out to ask.** The exit-code
+    handling above is identical across runtimes; only *how you hold the wait*
+    differs:
 
-    **Optional advanced: parallel wait mode.** The default remains the blocking `"$RELAY" wait` call above. If your runtime can keep a shell session running in the background, you may start `"$RELAY" wait` there and do read-only preparation while it waits. Do not edit files, claim drafts, publish, sync, or close while the wait is pending. Stop the read-only prep as soon as the wait returns, then interpret its exit code exactly as in the default path.
+    - **Claude Code (and any runtime with backgroundable shell tasks): run
+      `"$RELAY" wait` in the background.** Invoke it with the Bash tool's
+      `run_in_background: true`, emit one status line ("published seq N →
+      `<peer>`; waiting in the background — keep chatting, I'll pick up when
+      they reply"), and end your turn. The user stays fully interactive and the
+      harness re-invokes you when the wait process exits; then interpret its
+      exit code exactly as above. This is the default on Claude Code — a
+      blocking foreground wait needlessly freezes the user out for up to an
+      hour. **While a background wait is pending, do not start another relay round**
+      (claim / publish / sync / close) — the pending wait owns the next
+      transition; read-only work and unrelated user requests are fine.
+    - **Codex CLI (no backgroundable task): lean on the Stop hook, or wait in
+      the foreground.** Codex tears down its exec PTY at turn end, so it has
+      **no `run_in_background` equivalent** — a detached wait can neither
+      survive the turn nor notify on completion. With hooks installed, publish
+      and let the Stop hook's `decision: "block"` carry the loop (it
+      auto-continues whenever the peer has already published). When the peer has
+      not yet published, run `"$RELAY" wait` in the **foreground**: it blocks
+      this turn (Ctrl-C to break; `RELAY_WAIT_TIMEOUT` bounds it), but blocking
+      on the peer is the correct move. **Breaking out to ask the user "should I
+      wait?" is never the Codex fallback** — that is the very stall this rule
+      exists to prevent.
+
+    **When hooks are installed**: the Stop hook auto-continues the turn via `decision: "block"` whenever the peer published an artifact addressed to you, so the loop above happens implicitly between turns; rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
 
 11. **User gate** (when step 10 chose to surface). Reset the in-memory round counter to 0, then output:
     - One-line summary: what was published, where, sync state.

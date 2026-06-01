@@ -131,7 +131,9 @@ applies regardless of state-change.
 Then:
 
 ```python
-status = relay status --json
+status = relay status --require-binding --agent-session-id <id> --json
+if status.bound_pair is None:            # this session joined no pair
+    log "clean-exit-unbound"; exit 0 silent   # never pull an unbound window in
 fingerprint = compute_fingerprint(status)
 if cache.fingerprint == fingerprint:
     log "dedup-quiet"; exit 0 silent     # codex-review: exit 0 + no stdout
@@ -146,6 +148,15 @@ elif my_drafts:
 else:
     log "clean-exit"; exit 0
 ```
+
+**Strict binding (issue 20260601T182646-2920d5b9).** The Stop surface resolves
+ONLY this instance's bound pair — it passes `--require-binding`, and a
+`bound_pair: null` payload means this session has no live binding, so it exits
+silent (`clean-exit-unbound`). Without this, an unbound window doing unrelated
+work was pulled into whatever the lone active pair happened to be (the
+sole-active fallback in `resolve_active_pair`), because "addressed to me" is
+judged at platform-author granularity. A session must be `pair join`ed (or be
+the pair's creator) to be surfaced.
 
 **Do not** emit `"continue": false` alongside `"decision": "block"` for Stop.
 Codex hook docs state that `continue: false` from any matching Stop hook
@@ -202,6 +213,8 @@ Decisions seen:
 - `dedup-quiet` (Stop): fingerprint unchanged, silent skip
 - `skip-active` (Stop): `stop_hook_active=true`, silent skip
 - `clean-exit` (Stop): state changed but nothing actionable
+- `clean-exit-unbound` (Stop): this session has no live pair binding (strict
+  `--require-binding` returned `bound_pair: null`); silent skip — never surfaced
 - `slow`: hook took longer than 5s — diagnostic only
 - `error`: defensive exception path; hook never breaks the host
 

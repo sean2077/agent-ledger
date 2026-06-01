@@ -243,12 +243,27 @@ def test_skill_escalation_marker_is_line_start_not_substring():
     assert "body contains literal `@user:`" not in text
 
 
-def test_skill_documents_optional_parallel_wait_mode_as_advanced_only():
-    """Q3: background wait is documented as optional, not the default path."""
+def test_skill_prefers_background_wait_and_forbids_break_out_to_ask():
+    """Reverses the earlier Q3 framing (background wait "optional/advanced",
+    blocking foreground default). Once a pair is live the publish->reply gap is
+    wait time, not user time: SKILL.md step 10 must (a) forbid ending a turn
+    just to ask the user "should I wait?", (b) make background wait the preferred
+    form on runtimes that support it (Claude Code: Bash `run_in_background`), and
+    (c) give Codex — which has no backgroundable shell task — its
+    foreground/Stop-hook equivalent instead of a break-out."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
-    assert "Optional advanced: parallel wait mode" in text
-    assert "The default remains the blocking" in text
-    assert "Do not edit files, claim drafts, publish, sync, or close while the wait is pending" in text
+    # (a) never end a turn merely to ask permission to wait
+    assert "wait time, not user time" in text
+    # (b) background wait is the preferred form, via run_in_background
+    assert "wait` in the background" in text
+    assert "run_in_background" in text
+    # (c) Codex's honest no-background reality is spelled out
+    assert "no `run_in_background` equivalent" in text
+    # the mutating guard during a pending background wait survives (reframed)
+    assert "do not start another relay round" in text
+    # the retired Q3 framing must be gone
+    assert "Optional advanced: parallel wait mode" not in text
+    assert "The default remains the blocking" not in text
 
 
 def test_hook_protocol_timeout_and_path_canonicalization_match_dispatcher():

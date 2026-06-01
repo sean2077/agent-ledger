@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 
-VERSION = "0.15.1"
+VERSION = "0.15.2"
 
 
 def now_iso() -> str:
@@ -433,8 +433,19 @@ def handle_stop(payload: dict, shared_root: Path,
     # provides it on stdin; Claude Code exposes CLAUDE_CODE_SESSION_ID in env.
     agent_session_id = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
     extra = ["--agent-session-id", agent_session_id] if agent_session_id else []
-    status = call_relay_json(relay, "status", *extra)
+    # Strict binding: resolve ONLY this instance's bound pair, never the
+    # sole-active fallback. An unbound session doing unrelated work must not be
+    # pulled into whatever the lone active pair is (issue 20260601T182646).
+    status = call_relay_json(relay, "status", "--require-binding", *extra)
     if status is None:
+        return None
+
+    # No confirmed binding for this (author, agent_session_id) => this session is
+    # not part of any pair. Stay silent (clean-exit) BEFORE touching the dedup
+    # cache, so an unrelated window is never surfaced into a relay.
+    if status.get("bound_pair") is None:
+        append_trail(shared_root, {"event": "Stop", "host": host,
+                                   "decision": "clean-exit-unbound"})
         return None
 
     fingerprint = compute_state_fingerprint(status)

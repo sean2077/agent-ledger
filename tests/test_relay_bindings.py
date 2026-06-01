@@ -2,6 +2,7 @@
 capacity / same-author / stale-reclaim, and throttled last_seen (v0.13 phase 2)."""
 
 import json
+import os
 from pathlib import Path
 
 import relay
@@ -170,3 +171,79 @@ def test_maybe_update_last_seen(tmp_path):
     _bind(root, "claude", "id1", "pairA", last_seen=fresh)
     relay._maybe_update_binding_last_seen(env, root)
     assert relay.read_binding(root, "claude", "id1")["last_seen"] == fresh
+
+
+# --- strict binding resolution (issue 20260601T182646-2920d5b9) -------------
+# require_binding=True is the identity boundary for passive automation (Stop
+# hook): only an explicit --pair-id or a live binding resolves — never the
+# sole-active fallback that pulled unbound sessions into a pair.
+
+def test_resolve_active_pair_strict_none_when_unbound(tmp_path):
+    root = tmp_path / ".shared"
+    root.mkdir()
+    _mk_session(root, "20260601-solo")          # exactly one active pair
+    env = _env("claude", "unbound-id", root)    # this instance has NO binding
+    # non-strict: convenience fallback resolves the sole active pair
+    assert relay.resolve_active_pair(env).name == "20260601-solo"
+    # strict: refuse — return None instead of a pair we never joined
+    assert relay.resolve_active_pair(env, require_binding=True) is None
+
+
+def test_resolve_active_pair_strict_returns_bound_pair(tmp_path):
+    root = tmp_path / ".shared"
+    root.mkdir()
+    _mk_session(root, "20260601-x")
+    env = _env("claude", "id1", root)
+    relay.join_pair(env, root, "20260601-x")
+    assert relay.resolve_active_pair(env, require_binding=True).name == "20260601-x"
+
+
+def test_resolve_active_pair_strict_honors_explicit_pair_id(tmp_path):
+    """An explicit --pair-id is always allowed, even strict + unbound."""
+    root = tmp_path / ".shared"
+    root.mkdir()
+    _mk_session(root, "20260601-x")
+    env = _env("claude", "unbound", root)
+    got = relay.resolve_active_pair(env, None, "20260601-x", require_binding=True)
+    assert got.name == "20260601-x"
+
+
+def test_resolve_active_pair_strict_drops_stale_binding_then_none(tmp_path):
+    """A binding to a now-closed pair self-heals; strict then returns None
+    rather than grabbing some OTHER sole-active pair."""
+    root = tmp_path / ".shared"
+    root.mkdir()
+    _mk_session(root, "20260601-dead", state="closed", closed=True)
+    _mk_session(root, "20260601-live")          # a different, active pair
+    _bind(root, "claude", "id1", "20260601-dead", last_seen=relay.now_iso())
+    env = _env("claude", "id1", root)
+    assert relay.resolve_active_pair(env, require_binding=True) is None
+    # stale binding to the dead pair was dropped (self-heal), NOT repointed
+    assert relay.read_binding(root, "claude", "id1") is None
+
+
+def test_cmd_status_require_binding_unbound_payload(tmp_path, monkeypatch, capsys):
+    """`status --require-binding` while unbound: exit 0 + non-actionable JSON
+    (bound_pair/session null, empty published) — the shape the Stop hook ignores."""
+    root = tmp_path / ".shared"
+    root.mkdir()
+    (root / "_relay").mkdir()
+    (root / "_relay" / ".sentinel").touch()
+    _mk_session(root, "20260601-solo")          # one active pair, but we're unbound
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_SYNC", "none")
+    monkeypatch.setenv("RELAY_AUTHOR", "claude")
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "unbound-window")
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(root))
+    args = type("A", (), {"pair_id": None, "project": None, "last": 0,
+                          "json": True, "require_binding": True})()
+    rc = relay.cmd_status(args)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["bound_pair"] is None
+    assert out["session"] is None
+    assert out["published"] == []
+    assert out["drafts"] == []
+    assert out["is_active"] is False

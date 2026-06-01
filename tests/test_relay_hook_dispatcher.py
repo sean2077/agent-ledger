@@ -58,6 +58,37 @@ def _bootstrap_relay_project(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     return repo, session
 
 
+def _bootstrap_bound(monkeypatch, tmp_path: Path,
+                     author: str = "claude", sid: str = "test") -> tuple[Path, Path]:
+    """Like `_bootstrap_relay_project`, but the creating instance BINDS with a
+    concrete agent_session_id (default 'test', matching the `_*_stop` payloads'
+    session_id).
+
+    Strict-binding Stop resolution (issue 20260601T182646-2920d5b9) only
+    surfaces for the session actually bound to the pair, so Stop tests must bind
+    the session the hook represents. The plain helper leaves the pair UNBOUND
+    (its creator's session id is fallback-degraded under pytest and `join_pair`
+    refuses it) — which is exactly the unbound state `test_14` exercises."""
+    repo = _new_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    shared = repo / ".shared"
+    shared.mkdir(mode=0o700)
+    (shared / "_relay").mkdir()
+    (shared / "_relay" / ".sentinel").touch()
+    for k in list(os.environ):
+        if k.startswith("RELAY_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RELAY_SYNC", "none")
+    monkeypatch.setenv("RELAY_AUTHOR", author)
+    monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
+    # Concrete (override-source) id => not fallback-degraded => join_pair binds.
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", sid)
+    relay.cmd_bootstrap(type("A", (), {"topic": "t", "title": None})())
+    session = relay.resolve_active_pair(relay.load_env())
+    assert relay.read_binding(shared, author, sid), "bootstrap did not bind the creator"
+    return repo, session
+
+
 def _run_hook(stdin_json: dict, env_overrides: dict | None = None,
               cwd: Path | None = None) -> subprocess.CompletedProcess:
     env = os.environ.copy()
@@ -438,7 +469,7 @@ def test_10_pretool_codex_deny_shape_no_continue_false(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_11_stop_peer_addressed_to_me_blocks(monkeypatch, tmp_path):
-    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    repo, session = _bootstrap_bound(monkeypatch, tmp_path)  # bind claude:test (the hook's session)
     # codex publishes artifact addressed to claude (me)
     _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
     os.environ["RELAY_AUTHOR"] = "claude"  # restore me
@@ -459,18 +490,19 @@ def test_11_stop_peer_addressed_to_me_blocks(monkeypatch, tmp_path):
 
 
 def test_11a_stop_peer_addressed_to_me_uses_payload_author_not_relay_author(monkeypatch, tmp_path):
-    """v0.15 cleanup: Stop hooks should work in zero-env same-host setup.
-
-    The hook payload identifies Claude/Codex; RELAY_AUTHOR is no longer needed
-    to decide whether the latest artifact is addressed to this agent.
+    """Stop hooks work in a zero-RELAY_AUTHOR same-host setup: the platform
+    signal (CLAUDE_CODE_SESSION_ID) supplies BOTH the author and the binding
+    identity, so RELAY_AUTHOR is not required. With strict binding the stopping
+    session must be bound (claude:test here) for the surface to fire.
     """
-    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    repo, session = _bootstrap_bound(monkeypatch, tmp_path)  # bind claude:test
     _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
     payload = _claude_stop(repo)
     r = _run_hook(payload, env_overrides={
         "RELAY_SHARED_ROOT": str(repo / ".shared"),
         "RELAY_AUTHOR": None,
-        "CLAUDE_CODE_SESSION_ID": None,
+        # realistic same-host claude signal; equals the bound session id 'test'
+        "CLAUDE_CODE_SESSION_ID": "test",
         "CODEX_THREAD_ID": None,
     })
     assert r.returncode == 0
@@ -481,7 +513,7 @@ def test_11a_stop_peer_addressed_to_me_uses_payload_author_not_relay_author(monk
 
 def test_11b_stop_draft_block_shape_clean(monkeypatch, tmp_path):
     """Stop block-draft variant must also avoid continue/stopReason."""
-    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    repo, session = _bootstrap_bound(monkeypatch, tmp_path)  # bind claude:test
     # I'm claude; create a draft for me but no peer publish addressed to me
     draft_dir = session / ".draft"
     draft_dir.mkdir(exist_ok=True)
@@ -505,7 +537,7 @@ def test_11b_stop_draft_block_shape_clean(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_12_stop_dedup_silent_on_unchanged_fingerprint(monkeypatch, tmp_path):
-    repo, session = _bootstrap_relay_project(monkeypatch, tmp_path)
+    repo, session = _bootstrap_bound(monkeypatch, tmp_path)  # bind claude:test
     _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
     os.environ["RELAY_AUTHOR"] = "claude"
     payload = _claude_stop(repo)
@@ -542,6 +574,31 @@ def test_13_stop_hook_active_skip_no_block(monkeypatch, tmp_path):
         r = _run_hook(payload, env_overrides=overrides)
         assert r.returncode == 0
         assert r.stdout == "", f"stop_hook_active must skip; got {r.stdout!r}"
+
+
+# ---------------------------------------------------------------------------
+# 14. Stop strict-binding — an UNBOUND session is never pulled into a pair
+#     (regression for issue 20260601T182646-2920d5b9)
+# ---------------------------------------------------------------------------
+
+def test_14_stop_unbound_session_stays_silent(monkeypatch, tmp_path):
+    """A session NOT bound to any pair must never be surfaced into the sole
+    active pair. Bind claude:test + publish a codex artifact addressed to
+    claude, then fire Stop from a DIFFERENT, unbound claude session id. Strict
+    binding => clean-exit (silent), no block."""
+    repo, session = _bootstrap_bound(monkeypatch, tmp_path)  # binds claude:test
+    _publish_artifact(session, 1, "codex", "claude", "review", os.environ)
+    os.environ["RELAY_AUTHOR"] = "claude"
+    payload = _claude_stop(repo, session_id="other-unbound-window")
+    r = _run_hook(payload, env_overrides={
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+    })
+    assert r.returncode == 0
+    assert r.stdout == "", (
+        "unbound session must NOT be pulled into the sole active pair; "
+        f"got stdout={r.stdout!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

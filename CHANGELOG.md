@@ -4,6 +4,27 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.15.2 — 2026-06-01
+
+Binding-scoped Stop hook and strict automation resolution.
+
+### New
+
+- `relay status --require-binding` now resolves only an explicit `--pair-id` or
+  this instance's live binding. Unbound strict status returns exit 0 with a
+  non-actionable JSON payload instead of using the sole-active-pair fallback.
+- `relay status --json` now includes `bound_pair`, matching `relay whoami`
+  provenance so automation can distinguish a real binding from convenience
+  resolution.
+- `relay wait --require-binding` now refuses to wait when unbound, keeping
+  passive automation out of unrelated active pairs.
+
+### Fixed
+
+- The Stop hook now calls strict status with the hook session id and stays
+  silent when the session has no live binding, preventing an unbound same-author
+  window from being pulled into the lone active relay pair.
+
 ## 0.15.1 — 2026-06-01
 
 Relay CLI lookup guidance and hook parity fix.

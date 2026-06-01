@@ -51,7 +51,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.15.1"
+__version__ = "0.15.2"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -960,7 +960,8 @@ def resolve_pair(env: Env, session_id: str | None = None, *,
 
 
 def resolve_active_pair(env: Env, project: str | None = None,
-                           pair_id: str | None = None) -> Path:
+                           pair_id: str | None = None, *,
+                           require_binding: bool = False) -> "Path | None":
     """Resolve which pair a command operates on.
 
     Order (v0.13): explicit --pair-id > this instance's binding (if it still
@@ -968,6 +969,13 @@ def resolve_active_pair(env: Env, project: str | None = None,
     candidates. Per-instance bindings replace the old single global
     `.active-session` marker, so parallel pairs on one host each resolve to
     their own pair. A stale binding (its pair gone/inactive) is self-healed.
+
+    require_binding=True (passive automation, e.g. the Stop hook) DISABLES the
+    sole-active fallback: only an explicit --pair-id or a live binding for this
+    (author, agent_session_id) resolves; otherwise return None. This is the
+    identity boundary — handing an unbound instance the lone active pair it
+    never joined is the cross-talk bug (issue 20260601T182646-2920d5b9). Bare
+    interactive `relay status` keeps the fallback (require_binding=False).
     """
     root = session_root(env)
     if not root.is_dir():
@@ -986,6 +994,13 @@ def resolve_active_pair(env: Env, project: str | None = None,
             if cand and (cand / "session.json").exists() and session_is_active(cand):
                 return cand
             delete_binding(root, env.author, env.agent_session_id)
+
+    if require_binding:
+        # Strict: no explicit --pair-id and no confirmed binding ⇒ refuse the
+        # sole-active fallback rather than guess. The caller emits a
+        # non-actionable result; this is the boundary that keeps an unbound
+        # session out of a pair it never joined.
+        return None
 
     # session_is_active() honors state, CLOSED sentinel, AND latest artifact
     # status (so stale-active pairs with terminal latest artifacts are excluded).
@@ -1792,8 +1807,32 @@ def cmd_bootstrap(args) -> int:
 def cmd_status(args) -> int:
     env = load_env()
     pair_id = getattr(args, "pair_id", None)
-    session = (resolve_pair(env, pair_id, project=getattr(args, "project", None))
-               if pair_id else resolve_active_pair(env, getattr(args, "project", None)))
+    require_binding = bool(getattr(args, "require_binding", False))
+    if pair_id:
+        session = resolve_pair(env, pair_id, project=getattr(args, "project", None))
+    else:
+        session = resolve_active_pair(env, getattr(args, "project", None),
+                                      require_binding=require_binding)
+    if session is None:
+        # Strict --require-binding, no --pair-id, no live binding: this instance
+        # is not bound to any pair. Emit a non-actionable payload at exit 0 so
+        # passive automation (the Stop hook) can cheaply ignore it instead of
+        # being handed a pair it never joined (issue 20260601T182646-2920d5b9).
+        empty = {
+            "session": None,
+            "session_dir": None,
+            "is_active": False,
+            "next_seq": None,
+            "published": [],
+            "drafts": [],
+            "closed_sentinel": False,
+            "bound_pair": None,
+        }
+        if getattr(args, "json", False):
+            print(json.dumps(empty, indent=2, ensure_ascii=False))
+        else:
+            print("not bound to any pair (--require-binding); nothing to report")
+        return 0
     _gc_heartbeat_orphans(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
@@ -1832,6 +1871,15 @@ def cmd_status(args) -> int:
 
     is_active = session_is_active(session)
 
+    # Binding provenance (consistent with `whoami`): which pair THIS instance is
+    # bound to, independent of how `session` was resolved (--pair-id can differ
+    # from the binding). null when unbound. Lets any reader tell a real binding
+    # from a sole-active resolution.
+    bound_pair = None
+    if env.author and env.agent_session_id and env.shared_root:
+        b = read_binding(env.shared_root, env.author, env.agent_session_id)
+        bound_pair = b.get("pair_slug") if b else None
+
     payload = {
         "session": sj,
         "session_dir": str(session),
@@ -1840,6 +1888,7 @@ def cmd_status(args) -> int:
         "published": artifacts,
         "drafts": drafts,
         "closed_sentinel": (session / "CLOSED").exists(),
+        "bound_pair": bound_pair,
     }
 
     if args.json:
@@ -3872,11 +3921,13 @@ def cmd_wait(args) -> int:
               "(no platform signal and RELAY_AUTHOR unset)", file=sys.stderr)
         return 2
 
+    require_binding = bool(getattr(args, "require_binding", False))
     try:
         session = resolve_active_pair(
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
+            require_binding=require_binding,
         )
     except SystemExit as exc:
         msg = str(exc)
@@ -3886,6 +3937,14 @@ def cmd_wait(args) -> int:
         elif "multiple active pairs" in msg:
             hint = " — run `relay pair ensure` / `relay pair join <slug>`, or pass `--pair-id <id>`."
         print(f"relay wait: {msg}{hint}", file=sys.stderr)
+        return 2
+    if session is None:
+        # Strict --require-binding and no live binding: nothing to wait on.
+        # Refuse rather than block on a sole-active pair this instance never
+        # joined (same identity boundary as `status --require-binding`).
+        print("relay wait: not bound to any pair (--require-binding); nothing "
+              "to wait for — run `relay pair ensure` / `relay pair join <slug>`, "
+              "or pass `--pair-id`.", file=sys.stderr)
         return 2
     _gc_heartbeat_orphans(session, env.author)
     _gc_renewal_orphans(session, env)
@@ -4495,6 +4554,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Override agent session id for instance resolution (used by hooks).")
     ps.add_argument("--last", type=int, default=0,
                      help="Show only last N published artifacts (0 = all).")
+    ps.add_argument("--require-binding", action="store_true",
+                    help="Strict resolution for passive automation: resolve only "
+                         "via explicit --pair-id or a live binding, never the "
+                         "sole-active fallback. Unbound => exit 0 with a "
+                         "non-actionable payload (bound_pair: null).")
     ps.add_argument("--json", action="store_true")
     ps.set_defaults(func=cmd_status)
 
@@ -4656,6 +4720,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "A stale peer renewal-file heartbeat still exits with 11.")
     pw.add_argument("--poll", type=int, default=None,
                     help="Override RELAY_WAIT_POLL_INTERVAL (default 2s).")
+    pw.add_argument("--require-binding", action="store_true",
+                    help="Strict resolution (see `status --require-binding`): "
+                         "refuse to wait on a sole-active pair when unbound.")
     pw.set_defaults(func=cmd_wait)
 
     phb = sub.add_parser("heartbeat", help="Owner-tied liveness daemon for a draft.")

@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.15.1; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.15.2; session schema v3.
 
 ## 1. Directory layout
 
@@ -319,6 +319,22 @@ Each instance records which pair it is in as one file under `.shared/_relay/bind
 explicit --pair-id > this instance's binding (if it still names an active pair)
   > the sole active pair > else refuse, listing candidates ("multiple active pairs").
 ```
+
+**Strict mode (`require_binding=True`).** Passive automation that resolves *on
+behalf of one instance* — the Stop hook — calls `relay status --require-binding`
+(and `relay wait --require-binding`). Strict mode keeps the first two steps but
+DISABLES the sole-active fallback: with no `--pair-id` and no live binding it
+yields no pair — `status` emits a non-actionable payload (`bound_pair: null`,
+`session: null`, empty `published`/`drafts`, `is_active: false`) at exit 0;
+`wait` refuses with a non-zero exit. This is the identity boundary that stops an
+unbound session from being pulled into the lone active pair (issue
+20260601T182646-2920d5b9). Bare interactive `relay status` keeps the fallback.
+
+`relay status --json` always includes **`bound_pair`** — the pair slug this
+instance is bound to (`null` when unbound), consistent with `relay whoami`. It
+reflects the binding regardless of how `session` was resolved (an explicit
+`--pair-id` can differ from the binding), so a reader can distinguish a real
+binding from a convenience resolution.
 
 A binding whose pair is gone/inactive is dropped (self-healed) on resolve. `relay bootstrap` binds its creator; `relay close` and terminal `relay publish --status ...` drop the closing instance's binding. `relay pair join <slug>` / `relay pair leave` bind/unbind explicitly; `relay pair ensure` is the smart resolver (use binding → auto-join the sole compatible pair → else report `choose` / `bootstrap` / `full`).
 
