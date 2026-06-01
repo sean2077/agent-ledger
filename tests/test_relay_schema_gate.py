@@ -52,6 +52,13 @@ def _write_pair(shared: Path, slug: str = "20260601-schema", *, schema_version=3
     return session
 
 
+def _write_malformed_pair(shared: Path, slug: str = "20260601-malformed"):
+    session = shared / slug
+    session.mkdir()
+    (session / "session.json").write_text("{ not json", encoding="utf-8")
+    return session
+
+
 def _status_args(slug: str):
     return type("A", (), {
         "project": None,
@@ -154,6 +161,31 @@ def test_pairs_list_reports_future_session_schema(monkeypatch, tmp_path, capsys)
     assert item["session_id"] == session.name
     assert item["category"] == "unsupported_schema"
     assert item["schema_error"]["record_type"] == "session"
+
+
+def test_discovery_skips_unreadable_bystander_pairs_when_unbound(
+    monkeypatch, tmp_path
+):
+    shared = _bootstrap_env(monkeypatch, tmp_path)
+    valid = _write_pair(shared, "20260601-valid")
+    future = _write_pair(
+        shared,
+        "20260601-future",
+        schema_version=relay.SCHEMA_VERSION + 1,
+    )
+    malformed = _write_malformed_pair(shared)
+    env = relay.load_env()
+
+    assert [sd.name for sd in relay.active_pair_dirs(shared)] == [valid.name]
+    assert relay.resolve_active_pair(env) == valid
+
+    with pytest.raises(SystemExit) as exc:
+        relay.resolve_pair(env, future.name)
+
+    assert "session schema_version" in str(exc.value)
+    assert "newer than this relay supports" in str(exc.value)
+    assert (future / "session.json").exists()
+    assert (malformed / "session.json").exists()
 
 
 def test_preflight_reports_future_session_schema_without_mutation(

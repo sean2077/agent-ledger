@@ -1065,7 +1065,24 @@ def iter_pair_dirs(root: Path) -> list[Path]:
 
 
 def active_pair_dirs(root: Path) -> list[Path]:
-    return [sd for sd in iter_pair_dirs(root) if session_is_active(sd)]
+    sessions: list[Path] = []
+    for sd in iter_pair_dirs(root):
+        try:
+            if session_is_active(sd):
+                sessions.append(sd)
+        except SchemaVersionError:
+            continue
+    return sessions
+
+
+def pair_schema_errors(root: Path) -> list[SchemaVersionError]:
+    errors: list[SchemaVersionError] = []
+    for sd in iter_pair_dirs(root):
+        try:
+            read_session_json(sd)
+        except SchemaVersionError as exc:
+            errors.append(exc)
+    return errors
 
 
 def archive_root(root: Path) -> Path:
@@ -1384,10 +1401,7 @@ def session_is_active(session: Path) -> bool:
     sj = session / "session.json"
     if not sj.exists():
         return False
-    try:
-        data = read_session_json(session)
-    except json.JSONDecodeError:
-        return False
+    data = read_session_json(session)
     if data.get("state") != "active":
         return False
     if (session / "CLOSED").exists():
@@ -1709,6 +1723,12 @@ def cmd_preflight(args) -> int:
 
     if env.shared_root and env.shared_root.is_dir():
         out["checks"].append(_check_binding_health(env.shared_root, env))
+        for exc in pair_schema_errors(env.shared_root):
+            out["checks"].append({
+                "name": "pair.schema",
+                "status": "warn",
+                "detail": f"{exc.code}: {exc}",
+            })
         # Peer derivability: only meaningful once this instance is bound
         # to an active pair. Never fatal — a missing/odd participants list is a
         # warn so claim/wait surface it before they actually need the peer.
