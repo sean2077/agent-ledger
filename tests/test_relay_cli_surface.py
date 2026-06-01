@@ -30,6 +30,8 @@ def _clean_env() -> dict[str, str]:
     ["publish", "--help"],
     ["close", "--help"],
     ["pairs", "--help"],
+    ["pairs", "archive", "--help"],
+    ["pairs", "restore", "--help"],
     ["pair", "--help"],
     ["sync", "--help"],
     ["doctor", "--help"],

@@ -80,7 +80,9 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay whoami` | This instance's resolved identity (author + source), session id, bound pair, derived peer, diagnostics. |
 | `relay bootstrap --topic <slug> [--peer <name>]` | Create + bind a new pair. claude/codex auto-derive the peer; custom agents pass `--peer`. |
 | `relay pair ensure \| join <slug> \| leave` | Resolve / pick / drop this instance's pair binding. |
-| `relay pairs list` | Discovery: all pairs, bound instances, open slots. |
+| `relay pairs list [--archived]` | Discovery: all pairs (or, with `--archived`, the archived ones), bound instances, open slots. |
+| `relay pairs archive <slug> [--force] \| --terminated` | Move terminated pair dir(s) into `.shared/_archive/` to declutter the top level. `--force` shelves an active pair (drops its bindings); `--terminated` sweeps all closed/terminal pairs. |
+| `relay pairs restore <slug>` | Move an archived pair back to `.shared/` (state unchanged — closed stays closed, shelved-active stays active; never auto-rebinds). |
 | `relay status [--json] [--require-binding]` | The bound pair's published artifacts + next seq. JSON includes `bound_pair` (this instance's binding, or null). `--require-binding` = strict resolution for passive automation: no sole-active fallback; unbound → exit 0 with a non-actionable payload. |
 | `relay claim --kind <k> [--in-reply-to N]` | Scaffold a hidden `.draft/NNN-<author>-<kind>.md`. Fails closed if author/peer unresolved. |
 | `relay draft set <draft> --body-file … --prompt-for-next-file …` | Fill a draft atomically (preferred over hand-editing the file). |

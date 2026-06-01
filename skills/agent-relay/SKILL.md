@@ -354,6 +354,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
 - **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` explicitly or by default). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
 - **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts older than the threshold. Doctor never signals a live PID.
+- **`.shared/` is cluttered with old/closed pairs**: `relay pairs archive --terminated` moves every closed/terminal pair into `.shared/_archive/` so the top level stays clean. Archive one with `relay pairs archive <slug>` (it refuses an active pair — `relay close` it first, or pass `--force` to shelve a live one). `relay pairs list --archived` lists what's archived; `relay pairs restore <slug>` brings one back. **User-initiated maintenance only — never run it inside the auto-loop.**
 
 ## Filing issues (feedback ledger)
 

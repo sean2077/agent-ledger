@@ -4,6 +4,32 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Pre-1.0; expect occasional breaking changes between minor versions until
 the protocol stabilizes.
 
+## 0.16.0 — 2026-06-01
+
+Pair archival: declutter `.shared/` by moving terminated pairs aside.
+
+### New
+
+- `relay pairs archive <slug>` moves a terminated pair dir from `.shared/<slug>/`
+  to `.shared/_archive/<slug>/`. `--terminated` sweeps every closed/terminal pair
+  in one shot (continue-and-report; any failure exits non-zero, re-running is
+  idempotent). `--force` also archives an active pair (shelve), dropping every
+  binding that pointed at it — bindings are removed only *after* the atomic move
+  succeeds, so a crash mid-archive never strands an active pair with no binding.
+- `relay pairs restore <slug>` moves an archived pair back to `.shared/`. The
+  pair keeps its on-disk state (closed stays closed, a shelved-active pair stays
+  active) and is never auto-rebound — re-enter it with `relay pair join <slug>`.
+- `relay pairs list --archived` lists pairs under `.shared/_archive/`.
+- New reserved top-level dir `.shared/_archive/` (created `0700` on first
+  archive). `iter_pair_dirs` skips it, so archived pairs are invisible to
+  `status`, `wait`, `doctor`, `pairs list`, and active-pair resolution. It is
+  distinct from the pre-existing pair-internal `archive/` reserved name.
+- `archive` / `restore` (and `--pair-id`) validate the full pair slug
+  (`YYYYMMDD-topic`) before composing a path, rejecting `/`, `..`, absolute
+  paths, and the `_archive/<slug>` backdoor. Moves use `os.rename` (atomic,
+  same-mount) and fail closed on a cross-device `EXDEV` rather than risk a
+  partial copy.
+
 ## 0.15.3 — 2026-06-01
 
 Per-instance bootstrap guard.

@@ -10,7 +10,8 @@ Commands:
   whoami       print this instance's identity (author + agent session id) + binding
   bootstrap    create a new pair directory under .shared/ (binds the creator)
   status       list the bound pair's artifacts + readiness + active rule
-  pairs        subcommands: list (all pairs + bound instances / open slots)
+  pairs        subcommands: list (+ --archived), archive, restore
+               (declutter .shared/ by moving terminated pairs into _archive/)
   pair         subcommands: join, leave, ensure (bind this instance to a pair)
   claim        scaffold a new draft under .draft/
   publish      validate draft, atomically promote to published + sha256 + ready
@@ -30,6 +31,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -51,7 +53,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "0.15.3"
+__version__ = "0.16.0"
 SCHEMA_VERSION = 3
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
@@ -62,6 +64,14 @@ STATUSES = {"draft", "ready", "closed", "cancelled", "failed", "timed_out"}
 TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
 PLACEHOLDER_MARKER = "TODO:"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+# Full pair slug = bootstrap's date prefix + a topic matching SLUG_RE. archive /
+# restore compose a directory path from a user-supplied slug, so they validate
+# against this stricter form (rejecting '/', '..', absolute paths, and the
+# `_archive/<slug>` backdoor) before touching the filesystem.
+PAIR_SLUG_RE = re.compile(r"^\d{8}-[a-z0-9][a-z0-9-]{0,47}$")
+# Reserved top-level dir holding pairs moved aside by `relay pairs archive`.
+# Sibling of `_relay`; iter_pair_dirs skips it so archived pairs leave every scan.
+ARCHIVE_DIRNAME = "_archive"
 NON_BLOCKING_PREFLIGHT_WARNS = {"fs.mtime_monotonic", "identity.peer"}
 OWNER_KINDS = {"agent", "tool-process", "pidfile", "renewal-file", "none"}
 
@@ -680,6 +690,10 @@ def join_pair(env: "Env", root: Path, pair_slug: str) -> int:
               "command, or export RELAY_AGENT_SESSION_ID to a stable per-window "
               "value.", file=sys.stderr)
         return 2
+    if not PAIR_SLUG_RE.match(pair_slug):
+        print(f"relay: invalid pair slug {pair_slug!r} (expected YYYYMMDD-topic)",
+              file=sys.stderr)
+        return 2
     session = root / pair_slug
     if not (session / "session.json").exists():
         print(f"relay: no pair {pair_slug!r} under {root}", file=sys.stderr)
@@ -931,7 +945,7 @@ def iter_pair_dirs(root: Path) -> list[Path]:
         return []
     sessions: list[Path] = []
     for sd in sorted(root.iterdir()):
-        if not sd.is_dir() or sd.name.startswith(".") or sd.name == "_relay":
+        if not sd.is_dir() or sd.name.startswith(".") or sd.name in ("_relay", ARCHIVE_DIRNAME):
             continue
         if (sd / "session.json").exists():
             sessions.append(sd)
@@ -942,12 +956,63 @@ def active_pair_dirs(root: Path) -> list[Path]:
     return [sd for sd in iter_pair_dirs(root) if session_is_active(sd)]
 
 
+def archive_root(root: Path) -> Path:
+    """Top-level archive area `.shared/_archive/` (sibling of `_relay`). Archived
+    pair dirs live one level under it; iter_pair_dirs skips the name, so they
+    disappear from every pair scan (status / wait / doctor / pairs list /
+    active-pair resolution)."""
+    return root / ARCHIVE_DIRNAME
+
+
+def _require_valid_pair_slug(slug: str, cmd: str) -> str:
+    """Fail closed unless `slug` is a well-formed full pair slug.
+
+    archive / restore compose a directory path from a user-supplied slug; a value
+    containing '/', '..', an absolute path, or the `_archive/<slug>` backdoor must
+    be refused before any path is built — never silently resolve to the wrong
+    tree. Returns the slug on success; raises SystemExit otherwise."""
+    if not PAIR_SLUG_RE.match(slug):
+        raise SystemExit(
+            f"relay {cmd}: invalid pair slug {slug!r} — expected the bootstrap form "
+            "YYYYMMDD-topic (lowercase ascii/digits/'-'). Run `relay pairs list`."
+        )
+    return slug
+
+
+def _move_pair_dir(src: Path, dst: Path) -> None:
+    """Atomically move a pair directory src -> dst, fail closed.
+
+    Caller pre-checks: src exists, dst does NOT, slug valid. `_archive` is inside
+    the same `.shared` mount as live pairs, so this is a same-device rename
+    (atomic). We deliberately do NOT fall back to a cross-device copy+rmtree
+    (shutil.move): a partial destination would break the "source stays intact on
+    failure" recovery model — EXDEV fails closed instead. fsync BOTH parents so
+    the created dir entry (dst.parent) and the removed one (src.parent) are
+    durable on the sshfs mount."""
+    if dst.exists():
+        raise FileExistsError(dst)
+    try:
+        os.rename(src, dst)
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise OSError(
+                errno.EXDEV,
+                f"refuse to move {src.name!r} across devices; {ARCHIVE_DIRNAME} "
+                "must sit inside the same .shared mount as live pairs "
+                "(check RELAY_SHARED_ROOT / the mount point)",
+            )
+        raise
+    _fsync_dir(src.parent)
+    _fsync_dir(dst.parent)
+
+
 def resolve_pair(env: Env, session_id: str | None = None, *,
                     project: str | None = None, require_active: bool = False) -> Path:
     root = session_root(env)
     if not root.is_dir():
         raise SystemExit(f"no shared root: {root}")
     if session_id:
+        _require_valid_pair_slug(session_id, "pair --pair-id")
         candidate = root / session_id
         if not (candidate / "session.json").exists():
             raise SystemExit(f"no pair {session_id!r} under {root}")
@@ -2809,9 +2874,13 @@ def cmd_close(args) -> int:
     return 0
 
 
-def _pair_list_payload(root: Path) -> list[dict]:
+def _pair_list_payload(root: Path, *, scan_root: Path | None = None) -> list[dict]:
+    # scan_root lets `pairs list --archived` enumerate `.shared/_archive/` while
+    # bindings still resolve against the live root (archived pairs hold none) and
+    # next_seq stays based on the scanned dir itself.
+    scan_root = scan_root or root
     items: list[dict] = []
-    for sd in iter_pair_dirs(root):
+    for sd in iter_pair_dirs(scan_root):
         try:
             sj = json.loads((sd / "session.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -2833,6 +2902,7 @@ def _pair_list_payload(root: Path) -> list[dict]:
             "next_seq": latest_seq(sd) + 1,
             "latest": latest,
             "path": str(sd),
+            "archived": scan_root != root,
         })
     return items
 
@@ -2844,14 +2914,18 @@ def cmd_pairs_list(args) -> int:
     except SystemExit as exc:
         print(f"relay pairs list: {exc}", file=sys.stderr)
         return 2
+    archived = bool(getattr(args, "archived", False))
+    scan_root = archive_root(root) if archived else root
     payload = {
         "shared_root": str(root),
-        "pairs": _pair_list_payload(root),
+        "archived": archived,
+        "pairs": _pair_list_payload(root, scan_root=scan_root),
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
-    print(f"pairs under {root}:")
+    label = f"archived pairs under {scan_root}" if archived else f"pairs under {root}"
+    print(f"{label}:")
     if not payload["pairs"]:
         print("  (none)")
         return 0
@@ -2865,6 +2939,146 @@ def cmd_pairs_list(args) -> int:
             f"  {item['session_id']}  {item['category']}"
             f" slots={item['open_slots']}/2 bound=[{bound}]{latest_desc}"
         )
+    return 0
+
+
+def cmd_pairs_archive(args) -> int:
+    """Move terminated (or, with --force, active) pair dir(s) into `_archive/`.
+
+    Keeps `.shared/` top level uncluttered. `--terminated` sweeps every
+    closed/terminal pair (continue-and-report; any failure => exit 2; re-running
+    is idempotent since archived pairs leave iter_pair_dirs). The move is atomic
+    and bindings are dropped only AFTER a successful move (see _move_pair_dir)."""
+    env = load_env()
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        print(f"relay pairs archive: {exc}", file=sys.stderr)
+        return 2
+    if not root.is_dir():
+        print(f"relay pairs archive: no shared root: {root} — run `relay init` first.",
+              file=sys.stderr)
+        return 2
+
+    slug = getattr(args, "slug", None)
+    terminated = bool(getattr(args, "terminated", False))
+    force = bool(getattr(args, "force", False))
+
+    if terminated and slug:
+        print("relay pairs archive: pass either <slug> or --terminated, not both — "
+              "run `relay pairs archive --terminated` to sweep all terminated pairs.",
+              file=sys.stderr)
+        return 2
+    if not terminated and not slug:
+        print("relay pairs archive: <slug> required (or --terminated to sweep) — "
+              "run `relay pairs list` to see slugs.", file=sys.stderr)
+        return 2
+
+    arc = archive_root(root)
+    if terminated:
+        # --terminated is name-honest: only closed/terminal pairs. inactive/invalid
+        # are left for `relay doctor` to inspect, not silently quarantined here.
+        targets = [sd for sd in iter_pair_dirs(root)
+                   if session_category(sd) in ("closed", "terminal")]
+        if not targets:
+            print("no terminated pairs to archive")
+            return 0
+    else:
+        if not PAIR_SLUG_RE.match(slug):
+            print(f"relay pairs archive: invalid pair slug {slug!r} — expected "
+                  f"YYYYMMDD-topic; run `relay pairs list`.", file=sys.stderr)
+            return 2
+        sd = root / slug
+        if not (sd / "session.json").exists():
+            if (arc / slug / "session.json").exists():
+                print(f"relay pairs archive: {slug!r} is already archived (at "
+                      f"{arc / slug}) — run `relay pairs restore {slug}` to bring it "
+                      f"back.", file=sys.stderr)
+                return 2
+            print(f"relay pairs archive: no pair {slug!r} under {root} — "
+                  f"run `relay pairs list` to see slugs.", file=sys.stderr)
+            return 2
+        if session_is_active(sd) and not force:
+            print(f"relay pairs archive: {slug!r} is an active pair; run "
+                  f"`relay close --pair-id {slug} --reason ...` first, or pass "
+                  f"--force to shelve it.", file=sys.stderr)
+            return 2
+        if session_is_active(sd) and force:
+            draft = sd / ".draft"
+            if draft.is_dir() and any(draft.glob("*.heartbeat")):
+                print(f"note: {slug!r} has a live heartbeat sidecar; its daemon will "
+                      f"self-expire after the move (no PID is signalled).")
+        targets = [sd]
+
+    arc.mkdir(mode=0o700, exist_ok=True)
+
+    archived: list[str] = []
+    failed: list[tuple[str, str]] = []
+    for sd in targets:
+        dst = arc / sd.name
+        if dst.exists():
+            failed.append((sd.name, f"destination already exists at {dst}"))
+            continue
+        try:
+            _move_pair_dir(sd, dst)            # atomic rename + fsync BOTH parents
+        except (OSError, FileExistsError) as exc:
+            failed.append((sd.name, str(exc)))
+            continue
+        # Drop bindings only AFTER a successful move (codex review must-fix 2): if
+        # the process dies between move and here, the binding points at a now-gone
+        # root/<slug> and resolve_active_pair self-heals it as stale — strictly
+        # safer than dropping first and then failing the move.
+        for b in binding_for_pair(root, sd.name):
+            delete_binding(root, b.get("author", ""), b.get("agent_session_id", ""))
+        archived.append(sd.name)
+
+    for name in archived:
+        print(f"archived: {name} -> {arc / name}")
+    for name, why in failed:
+        print(f"relay pairs archive: failed to archive {name!r}: {why}",
+              file=sys.stderr)
+    return 2 if failed else 0
+
+
+def cmd_pairs_restore(args) -> int:
+    """Move an archived pair dir back from `_archive/` to the top level.
+
+    The pair returns exactly as archived: session.json is untouched (closed stays
+    closed; a --force-shelved active pair stays active but unbound) and NO binding
+    is recreated — re-enter it with `relay pair join <slug>`."""
+    env = load_env()
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        print(f"relay pairs restore: {exc}", file=sys.stderr)
+        return 2
+    slug = args.slug
+    if not PAIR_SLUG_RE.match(slug):
+        print(f"relay pairs restore: invalid pair slug {slug!r} — expected "
+              f"YYYYMMDD-topic; run `relay pairs list --archived`.", file=sys.stderr)
+        return 2
+    arc = archive_root(root)
+    src = arc / slug
+    if not (src / "session.json").exists():
+        if (root / slug / "session.json").exists():
+            print(f"relay pairs restore: {slug!r} is already live at {root / slug} — "
+                  f"nothing to restore.", file=sys.stderr)
+            return 2
+        print(f"relay pairs restore: no archived pair {slug!r} under {arc} — run "
+              f"`relay pairs list --archived` to see archived slugs.", file=sys.stderr)
+        return 2
+    dst = root / slug
+    if dst.exists():
+        print(f"relay pairs restore: cannot restore {slug!r}; a top-level entry "
+              f"already exists at {dst} — rename or remove it first.", file=sys.stderr)
+        return 2
+    try:
+        _move_pair_dir(src, dst)
+    except (OSError, FileExistsError) as exc:
+        print(f"relay pairs restore: failed to restore {slug!r}: {exc} — "
+              f"check {src} and {dst}.", file=sys.stderr)
+        return 2
+    print(f"restored: {slug} -> {dst}")
     return 0
 
 
@@ -4658,11 +4872,26 @@ def build_parser() -> argparse.ArgumentParser:
     pcl.add_argument("--pair-id", default=None)
     pcl.set_defaults(func=cmd_close)
 
-    ppairs = sub.add_parser("pairs", help="Pair discovery (list all pairs + bindings).")
+    ppairs = sub.add_parser("pairs",
+        help="Pair discovery + archive maintenance (list / archive / restore).")
     pps = ppairs.add_subparsers(dest="pairs_cmd", required=True)
     ppl = pps.add_parser("list", help="List all pairs, their bound instances, and open slots.")
     ppl.add_argument("--json", action="store_true")
+    ppl.add_argument("--archived", action="store_true",
+        help="List archived pairs (under .shared/_archive/) instead of live ones.")
     ppl.set_defaults(func=cmd_pairs_list)
+    ppa = pps.add_parser("archive",
+        help="Move a terminated pair dir into .shared/_archive/ to declutter .shared/.")
+    ppa.add_argument("slug", nargs="?", help="Pair slug (YYYYMMDD-topic) to archive.")
+    ppa.add_argument("--terminated", action="store_true",
+        help="Archive ALL closed/terminal pairs in one sweep.")
+    ppa.add_argument("--force", action="store_true",
+        help="Also archive an ACTIVE pair (shelve it); drops any binding to it.")
+    ppa.set_defaults(func=cmd_pairs_archive)
+    ppr = pps.add_parser("restore",
+        help="Move an archived pair back from .shared/_archive/ to .shared/.")
+    ppr.add_argument("slug", help="Archived pair slug (YYYYMMDD-topic) to restore.")
+    ppr.set_defaults(func=cmd_pairs_restore)
 
     ppair = sub.add_parser("pair",
         help="Bind this instance to a pair (join), drop the binding (leave), or "

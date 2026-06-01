@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.15.3; session schema v3.
+> Source spec for the `relay` CLI implementation. v0.16.0; session schema v3.
 
 ## 1. Directory layout
 
@@ -10,6 +10,8 @@
     .sentinel                          # bootstrap creates on the mount; presence proves mount alive
     bindings/                          # per-instance pair bindings (v0.13); see §13
       claude-<digest>.json             # one file per instance -> its current pair
+  _archive/                            # `relay pairs archive` moves terminated pair dirs here (v0.16)
+    <pair-slug>/                       # same on-disk layout as a live pair; skipped by every pair scan
   <pair-slug>/                         # YYYYMMDD-<topic>  (a "pair" = up to 2 instances)
     session.json                       # minimal pair metadata, see §3
     CLOSED                             # written by `relay close`; contains close meta
@@ -23,7 +25,7 @@
     002-claude-review.md.sha256
     002-claude-review.ready
     ...
-    archive/                           # future supersede support; current CLI does not write here
+    archive/                           # pair-INTERNAL; future supersede support (current CLI never writes it). Not the top-level _archive/ above.
 ```
 
 **Slug rules**:
@@ -288,14 +290,19 @@ Consumers (peer's `relay status`, peer reading) should treat artifacts without a
 
 ## 11. Reserved file names
 
-Inside a pair directory, these names are reserved by the protocol:
+**Inside a pair directory**, these names are reserved by the protocol:
 
 - `session.json`
 - `CLOSED`
 - `README.md`
 - `.draft/`
-- `archive/`
+- `archive/` — pair-INTERNAL, reserved for future supersede support; the current CLI never writes it
 - `*.sha256`, `*.ready`
+
+**Directly under `.shared/`** (top level), these directory names are reserved and skipped when enumerating pairs:
+
+- `_relay/` — binding registry + mount sentinel (§13)
+- `_archive/` — whole pair dirs moved aside by `relay pairs archive` (v0.16). Distinct from the pair-internal `archive/` above; the leading underscore marks it a relay-managed top-level area, not a pair.
 
 User must not write files matching these names by hand outside the CLI flow.
 
