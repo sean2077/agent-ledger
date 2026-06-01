@@ -1,0 +1,14 @@
+{
+  "schema_version": 3,
+  "project": "agent-ledger",
+  "session_id": "20260201-frozen-pair",
+  "title": "Canonical 1.0 forward-read fixture",
+  "state": "active",
+  "created_at": "2026-02-01T10:00:00+08:00",
+  "closed_at": null,
+  "close_reason": null,
+  "participants": [
+    "claude",
+    "codex"
+  ]
+}

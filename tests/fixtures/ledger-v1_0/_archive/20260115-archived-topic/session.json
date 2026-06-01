@@ -1,0 +1,14 @@
+{
+  "schema_version": 3,
+  "project": "agent-ledger",
+  "session_id": "20260115-archived-topic",
+  "title": "Archived fixture pair",
+  "state": "closed",
+  "created_at": "2026-01-15T09:00:00+08:00",
+  "closed_at": "2026-01-15T09:30:00+08:00",
+  "close_reason": "fixture archived",
+  "participants": [
+    "claude",
+    "codex"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "instance_id": "claude:fixture",
+  "author": "claude",
+  "agent_session_id": "fixture-claude-session",
+  "pair_slug": "20260201-frozen-pair",
+  "bound_at": "2026-02-01T10:00:00+08:00",
+  "last_seen": "2026-02-01T10:00:00+08:00"
+}
