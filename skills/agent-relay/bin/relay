@@ -2121,11 +2121,25 @@ def cmd_status(args) -> int:
     env = load_env()
     pair_id = getattr(args, "pair_id", None)
     require_binding = bool(getattr(args, "require_binding", False))
-    if pair_id:
-        session = resolve_pair(env, pair_id, project=getattr(args, "project", None))
-    else:
-        session = resolve_active_pair(env, getattr(args, "project", None),
-                                      require_binding=require_binding)
+    try:
+        if pair_id:
+            session = resolve_pair(env, pair_id, project=getattr(args, "project", None))
+        else:
+            session = resolve_active_pair(env, getattr(args, "project", None),
+                                          require_binding=require_binding)
+    except SystemExit as exc:
+        msg = str(exc)
+        if msg.startswith("relay: "):
+            raise
+        hint = ""
+        if "no active pair" in msg:
+            hint = " — run `relay bootstrap --topic <slug>` to start a new pair."
+        elif "multiple active pairs" in msg:
+            hint = " — run `relay pair ensure` / `relay pair join <slug>`, or pass `--pair-id <id>`."
+        elif "not active" in msg:
+            hint = " — run `relay pairs list` to inspect existing pairs, or `relay bootstrap --topic <slug>` to start a new one."
+        print(f"relay status: {msg}{hint}", file=sys.stderr)
+        return 2
     if session is None:
         # Strict --require-binding, no --pair-id, no live binding: this instance
         # is not bound to any pair. Emit a non-actionable payload at exit 0 so
@@ -2358,7 +2372,8 @@ def cmd_claim(args) -> int:
     if session is None:
         print(
             "relay claim: no bound pair for this instance — run `relay pair "
-            "ensure` / `relay pair join <slug>`, or pass `--pair-id <id>`.",
+            "ensure` / `relay pair join <slug>`, run `relay bootstrap --topic "
+            "<slug>` to start a new pair, or pass `--pair-id <id>`.",
             file=sys.stderr,
         )
         return 2
