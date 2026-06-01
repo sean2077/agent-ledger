@@ -1133,6 +1133,73 @@ def list_published(session: Path) -> list[Path]:
     return out
 
 
+def _published_triad_findings(session: Path) -> list[dict]:
+    """Return published-position files that are not valid readable triads."""
+    findings: list[dict] = []
+    bases: set[str] = set()
+
+    for md in sorted(session.glob("[0-9][0-9][0-9]-*.md")):
+        base = md.name[:-3]  # drop .md -> NNN-author-kind
+        bases.add(base)
+        paths = published_paths(session, base)
+        problems: list[str] = []
+
+        if not paths["sha256"].exists():
+            problems.append("missing_sha256")
+        else:
+            try:
+                expected = paths["sha256"].read_text().split()[0].strip()
+                actual = sha256_of_file(md)
+            except OSError:
+                problems.append("sha256_unreadable")
+            except IndexError:
+                problems.append("sha256_empty")
+            else:
+                if expected.lower() != actual.lower():
+                    problems.append("sha256_mismatch")
+
+        if not paths["ready"].exists():
+            problems.append("missing_ready")
+
+        if problems:
+            findings.append(_triad_finding(session, base, problems))
+
+    sidecar_bases: dict[str, set[str]] = {}
+    for sha in sorted(session.glob("[0-9][0-9][0-9]-*.md.sha256")):
+        base = sha.name[:-len(".md.sha256")]
+        if base not in bases and not (session / f"{base}.md").exists():
+            sidecar_bases.setdefault(base, set()).add("orphan_sha256")
+    for ready in sorted(session.glob("[0-9][0-9][0-9]-*.ready")):
+        base = ready.name[:-len(".ready")]
+        if base not in bases and not (session / f"{base}.md").exists():
+            sidecar_bases.setdefault(base, set()).add("orphan_ready")
+    for base in sorted(sidecar_bases):
+        findings.append(_triad_finding(session, base, sorted(sidecar_bases[base])))
+
+    return findings
+
+
+def _triad_finding(session: Path, base: str, problems: list[str]) -> dict:
+    paths = published_paths(session, base)
+    existing_paths = [p for p in paths.values() if p.exists()]
+    mtimes: list[float] = []
+    for p in existing_paths:
+        try:
+            mtimes.append(p.stat().st_mtime)
+        except OSError:
+            pass
+    age_seconds = int(time.time() - max(mtimes)) if mtimes else None
+    draft_path = session / ".draft" / f"{base}.md"
+    return {
+        "base": base,
+        "name": f"{base}.md",
+        "problems": problems,
+        "age_seconds": age_seconds,
+        "paths": {k: str(v) for k, v in paths.items() if v.exists()},
+        "matching_draft": draft_path.name if draft_path.exists() else None,
+    }
+
+
 def latest_seq(session: Path) -> int:
     """Max seq across published artifacts AND in-flight drafts.
 
@@ -3912,7 +3979,7 @@ def _parse_duration(s: str) -> Optional[int]:
 
 
 def cmd_doctor(args) -> int:
-    """Report stale relay state; optionally clean owner-safe junk + abandoned drafts.
+    """Report stale relay state; optionally clean owner-safe recoverable files.
 
     Exit codes:
       0 — no findings
@@ -3959,6 +4026,7 @@ def cmd_doctor(args) -> int:
             "drafts": [],
             "heartbeat_pidfile": None,
             "heartbeat_sidecars": [],
+            "incomplete_triads": [],
         }
         # Drafts
         draft_dir = sd / ".draft"
@@ -3997,6 +4065,9 @@ def cmd_doctor(args) -> int:
                         {"name": sc.name, "age_seconds": age}
                     )
                     findings += 1
+        triad_findings = _published_triad_findings(sd)
+        entry["incomplete_triads"] = triad_findings
+        findings += len(triad_findings)
         # Draft GC (only with --fix + --older-than).
         # Two safety constraints (codex cross-review 2026-05-29):
         #   (a) Never delete a draft whose sibling .heartbeat sidecar is
@@ -4042,6 +4113,59 @@ def cmd_doctor(args) -> int:
                         actions.append(
                             f"failed to remove heartbeat sidecar {sidecar}: {exc}"
                         )
+        # Published triad GC (only with --fix + --older-than).
+        # A valid publish writes md -> sha256 -> ready, then removes the draft.
+        # The owner-safe predicate mirrors draft GC: old published-position
+        # leftovers can be deleted only when the matching draft is absent or its
+        # heartbeat is stale. A fresh matching draft heartbeat means publish may
+        # still be in the md/sha/ready window, so doctor must report but not fix.
+        if args.fix and older_than_secs is not None and triad_findings:
+            hb_fresh_threshold = max(
+                _wait_int_env("RELAY_RENEWAL_STALE_THRESHOLD", 3600), 60
+            )
+            for triad in triad_findings:
+                age = triad.get("age_seconds")
+                if age is None or age < older_than_secs:
+                    continue
+                draft = sd / ".draft" / triad["name"]
+                if draft.exists():
+                    sidecar = _heartbeat_sidecar_path(draft)
+                    if sidecar.exists():
+                        try:
+                            hb_age = time.time() - sidecar.stat().st_mtime
+                        except OSError:
+                            hb_age = float("inf")
+                        if hb_age < hb_fresh_threshold:
+                            actions.append(
+                                f"skipped incomplete triad {triad['base']}: "
+                                f"matching draft heartbeat is fresh "
+                                f"({int(hb_age)}s < {hb_fresh_threshold}s)"
+                            )
+                            continue
+                paths = published_paths(sd, triad["base"])
+                removed: list[str] = []
+                failed = False
+                for p in (paths["md"], paths["sha256"], paths["ready"]):
+                    if not p.exists():
+                        continue
+                    try:
+                        p.unlink()
+                        removed.append(p.name)
+                    except OSError as exc:
+                        actions.append(
+                            f"failed to delete incomplete triad file {p}: {exc}"
+                        )
+                        failed = True
+                if removed:
+                    actions.append(
+                        f"deleted incomplete published triad {triad['base']}: "
+                        + ", ".join(removed)
+                    )
+                    _fsync_dir(sd)
+                elif not failed:
+                    actions.append(
+                        f"skipped incomplete triad {triad['base']}: no files remained"
+                    )
         report["sessions"].append(entry)
 
     # Stale binding GC (v0.13). Bindings carry no PID — delete_binding removes
@@ -4091,6 +4215,8 @@ def _print_doctor_text(report: dict, *, fix: bool) -> None:
             parts.append("heartbeat_pidfile=" + ("alive" if hp["alive"] else "dead"))
         if s["heartbeat_sidecars"]:
             parts.append(f"heartbeat_sidecars={len(s['heartbeat_sidecars'])}")
+        if s["incomplete_triads"]:
+            parts.append(f"incomplete_triads={len(s['incomplete_triads'])}")
         detail = f" ({', '.join(parts)})" if parts else ""
         print(f"  - {s['session_id']} {marker}{detail}")
         if s["drafts"]:
@@ -4105,6 +4231,13 @@ def _print_doctor_text(report: dict, *, fix: bool) -> None:
             print("    heartbeat sidecars:")
             for sc in s["heartbeat_sidecars"]:
                 print(f"      {sc['name']} age={sc['age_seconds']}s")
+        if s["incomplete_triads"]:
+            print("    incomplete published triads:")
+            for triad in s["incomplete_triads"]:
+                problems = ",".join(triad["problems"])
+                age = triad["age_seconds"]
+                age_text = f"{age}s" if age is not None else "unknown"
+                print(f"      {triad['base']} problems={problems} age={age_text}")
     if report.get("stale_bindings"):
         print("\nstale bindings:")
         for ib in report["stale_bindings"]:
@@ -4125,6 +4258,7 @@ def _doctor_session_has_findings(session: dict) -> bool:
         session.get("drafts")
         or session.get("heartbeat_pidfile")
         or session.get("heartbeat_sidecars")
+        or session.get("incomplete_triads")
     )
 
 
@@ -4929,10 +5063,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Machine-readable report.")
     pdoc.add_argument("--fix", action="store_true",
                       help="Clean owner-safe junk (dead pidfiles). With --older-than, "
-                           "also delete abandoned drafts older than the threshold.")
+                           "also delete abandoned drafts and incomplete published "
+                           "triads older than the threshold.")
     pdoc.add_argument("--older-than", default=None,
                       help="Duration ('1h', '30m', '1d'). Required with --fix only "
-                           "to delete drafts; ignored otherwise.")
+                           "to delete drafts or incomplete triads; ignored otherwise.")
     pdoc.set_defaults(func=cmd_doctor)
 
     pw = sub.add_parser("wait",

@@ -36,6 +36,47 @@ def _doctor_args(**kw):
     return type("A", (), base)()
 
 
+def _publish_artifact(
+    session: Path,
+    *,
+    seq: int = 1,
+    author: str = "claude",
+    peer: str = "codex",
+    kind: str = "plan",
+    with_sha: bool = True,
+    with_ready: bool = True,
+    sha_text: str | None = None,
+):
+    fm = {
+        "seq": seq,
+        "author": author,
+        "peer": peer,
+        "kind": kind,
+        "status": "ready",
+        "created": relay.now_iso(),
+        "in_reply_to": None,
+        "prompt_for_next": "next\n",
+        "sync_needed": False,
+        "touched_paths": [],
+        "corrects": None,
+    }
+    name = f"{seq:03d}-{author}-{kind}.md"
+    md = session / name
+    md.write_text(relay.dump_frontmatter(fm, "\nbody\n"))
+    if with_sha:
+        digest = sha_text if sha_text is not None else relay.sha256_of_file(md)
+        (session / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+    if with_ready:
+        (session / f"{seq:03d}-{author}-{kind}.ready").touch()
+    return md
+
+
+def _backdate(*paths: Path, seconds: int = 7200):
+    old = time.time() - seconds
+    for path in paths:
+        os.utime(path, (old, old))
+
+
 def test_doctor_clean_session_reports_no_findings(monkeypatch, tmp_path, capsys):
     _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()
@@ -196,6 +237,106 @@ def test_doctor_json_output_is_valid(monkeypatch, tmp_path, capsys):
     assert data["sessions"][0]["session_id"].endswith("-t")
     assert data["sessions"][0]["drafts"][0]["name"] == "001-claude-plan.md"
     assert data["actions"] == []  # no --fix
+
+
+def test_doctor_reports_incomplete_published_triad(monkeypatch, tmp_path, capsys):
+    session, _ = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    md = _publish_artifact(session, with_ready=False)
+    sha = session / f"{md.name}.sha256"
+    _backdate(md, sha)
+
+    rc = relay.cmd_doctor(_doctor_args())
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "incomplete published triads" in out
+    assert "001-claude-plan" in out
+    assert "missing_ready" in out
+    assert md.exists() and sha.exists()
+
+
+def test_doctor_fix_deletes_old_incomplete_published_triad(monkeypatch, tmp_path, capsys):
+    session, _ = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    md = _publish_artifact(session, with_ready=False)
+    sha = session / f"{md.name}.sha256"
+    _backdate(md, sha)
+
+    rc = relay.cmd_doctor(_doctor_args(fix=True, older_than="1h"))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert not md.exists()
+    assert not sha.exists()
+    assert "deleted incomplete published triad 001-claude-plan" in out
+
+
+def test_doctor_fix_preserves_incomplete_triad_with_fresh_draft_heartbeat(
+    monkeypatch, tmp_path, capsys
+):
+    session, _ = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    md = _publish_artifact(session, with_ready=False)
+    sha = session / f"{md.name}.sha256"
+    _backdate(md, sha)
+
+    draft_dir = session / ".draft"
+    draft_dir.mkdir(exist_ok=True)
+    draft = draft_dir / md.name
+    draft.write_text("draft body\n")
+    _backdate(draft)
+    sidecar = relay._heartbeat_sidecar_path(draft)
+    sidecar.write_text(json.dumps({
+        "heartbeat_pid": 999999, "owner_pid": None,
+        "owner_kind": "renewal-file", "owner_pidfile": None,
+        "owner_renewal_file": None,
+        "author": "claude", "draft": draft.name,
+    }) + "\n")
+
+    rc = relay.cmd_doctor(_doctor_args(fix=True, older_than="1h"))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert md.exists()
+    assert sha.exists()
+    assert draft.exists()
+    assert sidecar.exists()
+    assert "skipped incomplete triad 001-claude-plan" in out
+    assert "matching draft heartbeat is fresh" in out
+
+
+def test_doctor_reports_sha_mismatch_in_published_triad(monkeypatch, tmp_path, capsys):
+    session, _ = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    _publish_artifact(session, sha_text="0" * 64)
+
+    rc = relay.cmd_doctor(_doctor_args(json=True))
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    triads = report["sessions"][0]["incomplete_triads"]
+    assert triads[0]["base"] == "001-claude-plan"
+    assert triads[0]["problems"] == ["sha256_mismatch"]
+
+
+def test_doctor_reports_and_fixes_orphan_publish_sidecars(monkeypatch, tmp_path, capsys):
+    session, _ = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    sha = session / "001-claude-plan.md.sha256"
+    ready = session / "001-claude-plan.ready"
+    sha.write_text("0" * 64 + "  001-claude-plan.md\n")
+    ready.touch()
+    _backdate(sha, ready)
+
+    rc = relay.cmd_doctor(_doctor_args(json=True))
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    triad = report["sessions"][0]["incomplete_triads"][0]
+    assert triad["base"] == "001-claude-plan"
+    assert triad["problems"] == ["orphan_ready", "orphan_sha256"]
+
+    relay.cmd_doctor(_doctor_args(fix=True, older_than="1h"))
+    out = capsys.readouterr().out
+    assert not sha.exists()
+    assert not ready.exists()
+    assert "deleted incomplete published triad 001-claude-plan" in out
 
 
 def test_doctor_fix_removes_dead_pidfile(monkeypatch, tmp_path, capsys):

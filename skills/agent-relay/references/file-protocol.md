@@ -285,7 +285,12 @@ A `published` artifact is **consumable** only when:
 - `NNN-*.md.sha256` exists and matches `sha256sum NNN-*.md`
 - `NNN-*.ready` exists (zero bytes is fine)
 
-Consumers (peer's `relay status`, peer reading) should treat artifacts without all three as "in progress / not visible". `relay status` filters out incomplete triads.
+Consumers (peer's `relay status`, peer reading) should treat artifacts without
+all three as "in progress / not visible". `relay status` filters out incomplete
+triads. `relay doctor` reports incomplete triads and orphan publish sidecars;
+`relay doctor --fix --older-than <duration>` may remove only old, owner-safe
+published-position leftovers, and it must preserve any triad whose matching
+draft has a fresh heartbeat.
 
 `.draft/*.md` deliberately has no sidecar — visibility is by absence of sidecar.
 

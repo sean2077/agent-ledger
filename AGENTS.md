@@ -91,7 +91,7 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay close --reason … --outcome …` | Write `CLOSED` sentinel; mark `session.json` closed. |
 | `relay sync push\|pull [--dry-run]` | rsync wrapper — only the `RELAY_SYNC=rsync` side may run it. |
 | `relay heartbeat start\|stop\|tick` | Liveness daemon for a draft (see §7). |
-| `relay doctor [--fix]` | Read-only ledger diagnosis; `--fix` cleans owner-safe junk (never signals a live PID). |
+| `relay doctor [--fix]` | Read-only ledger diagnosis; `--fix` cleans owner-safe junk, including old incomplete publish triads (never signals a live PID). |
 | `relay hooks install\|uninstall\|doctor\|status` | Manage the optional autopilot hooks (§7). |
 | `relay issue add\|list\|show\|resolve` | Out-of-band feedback ledger for the *tool itself* (machine-local, never synced). |
 

@@ -17,9 +17,9 @@ Candidate 1.0 contract freeze and compatibility guardrails.
 - The fail-closed regression matrix now covers the missing GAP-1/GAP-2 paths and
   the additional sub-gap around incomplete publish triads, keeping malformed or
   partial artifacts out of status, wait, publish, and repair-sensitive flows.
-- A committed canonical 1.0 ledger fixture locks representative legacy bytes,
+- A committed canonical 1.0 ledger fixture locks representative canonical 1.0 bytes,
   including active artifacts, sidecars, bindings, and archived pairs, so future
-  readers can prove forward compatibility against frozen historical layouts.
+  readers can prove forward compatibility against the frozen 1.0 layout.
 
 ### Fixed
 

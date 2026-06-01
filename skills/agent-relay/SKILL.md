@@ -342,7 +342,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 3. **Never ls `.draft/` from peer's side.** Drafts are hidden by convention. `relay status` correctly excludes them.
 4. **Never bypass `relay preflight`.** If it fails, the mount is broken or env is wrong; writing anywhere risks data loss.
 5. **Never `relay close` without checking with user.** Close is intended; missed by accident, it's awkward to recover from.
-6. **If `relay claim` or `relay publish` fails after the built-in retries, stop and ask the user.** The CLI internally retries up to 10 times with random jitter; if it still surfaces "could not allocate sequence/published path after 10 attempts", that's evidence of concurrent activity or stale state you don't understand. Run `relay doctor` to inspect (drafts, heartbeat pidfiles) before retrying.
+6. **If `relay claim` or `relay publish` fails after the built-in retries, stop and ask the user.** The CLI internally retries up to 10 times with random jitter; if it still surfaces "could not allocate sequence/published path after 10 attempts", that's evidence of concurrent activity or stale state you don't understand. Run `relay doctor` to inspect (drafts, heartbeat pidfiles, incomplete publish triads) before retrying.
 
 ## When things go wrong
 
@@ -353,7 +353,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay publish` rejects with "body is empty"**: scaffold body is the placeholder comment; replace it with real content.
 - **`relay sync push` aborts with "fuse mount"**: shape A — project root IS the mount, nothing to sync.
 - **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` explicitly or by default). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
-- **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts older than the threshold. Doctor never signals a live PID.
+- **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, incomplete publish triads, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts and incomplete publish triads older than the threshold. Doctor never signals a live PID.
 - **`.shared/` is cluttered with old/closed pairs**: `relay pairs archive --terminated` moves every closed/terminal pair into `.shared/_archive/` so the top level stays clean. Archive one with `relay pairs archive <slug>` (it refuses an active pair — `relay close` it first, or pass `--force` to shelve a live one). `relay pairs list --archived` lists what's archived; `relay pairs restore <slug>` brings one back. **User-initiated maintenance only — never run it inside the auto-loop.**
 
 ## Filing issues (feedback ledger)
