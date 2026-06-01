@@ -1,7 +1,7 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v0.19.0; session schema v3.
-> The candidate 1.0 frozen-contract and compatibility policy is in §15.
+> Source spec for the `relay` CLI implementation. v1.0.0; session schema v3.
+> The binding 1.0 frozen-contract and compatibility policy is in §15.
 
 ## 1. Directory layout
 
@@ -401,10 +401,9 @@ open|resolved|all] [--area A] [--json]`, `relay issue show <id|prefix>
 
 ## 15. Frozen contract & compatibility policy (1.0)
 
-> Normative for 1.0. This section governs every section above: it names the
-> on-disk surfaces that 1.0 **freezes** and the only ways they may change after
-> 1.0. Until the 1.0 tag this is the *candidate* contract; at 1.0 it becomes
-> *binding*.
+> Normative for 1.0 and later. This section governs every section above: it
+> names the on-disk surfaces that 1.0 **freezes** and the only ways they may
+> change after 1.0. At the 1.0.0 tag this contract is **binding**.
 
 ### 15.1 What 1.0 freezes
 

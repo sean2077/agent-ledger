@@ -1,8 +1,31 @@
 # Changelog
 
 All notable changes to `agent-ledger` / `agent-relay` are tracked here.
-Pre-1.0; expect occasional breaking changes between minor versions until
-the protocol stabilizes.
+Starting at 1.0.0, compatibility follows the frozen contract in
+`skills/agent-relay/references/file-protocol.md` §15.
+
+## 1.0.0 — 2026-06-02
+
+The 1.0 protocol contract is frozen and binding.
+
+### New
+
+- `references/file-protocol.md` §15 is now the binding compatibility contract:
+  the frozen on-disk surfaces define what 1.x readers must continue to read
+  from 1.0 ledgers.
+- The post-1.0 compatibility policy is in force. Breaking protocol changes now
+  require a schema bump with readers for old and new records, or an explicit,
+  documented, idempotent migration with clear refusal before migration.
+- The pre-1.0 hard-remove window is closed. Deprecated behavior may no longer
+  be removed silently without the §15 schema or migration path.
+
+### Verified
+
+- The v0.19 RC soak found and fixed the final publish-time participant-routing
+  blocker before the freeze.
+- The canonical 1.0 fixture, schema gates, incomplete-triad recovery,
+  binding-scoped write boundaries, onboarding smoke, privacy/trust docs, and
+  issue-ledger triage all passed the freeze-readiness review.
 
 ## 0.19.0 — 2026-06-01
 
