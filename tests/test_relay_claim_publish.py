@@ -25,6 +25,7 @@ def _bootstrap(monkeypatch, tmp_path: Path, topic="t"):
     monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
     monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "test-codex-window")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": topic, "title": None})())
     return relay.resolve_active_pair(relay.load_env())
@@ -47,6 +48,66 @@ def test_claim_creates_draft_with_scaffold(monkeypatch, tmp_path, capsys):
     assert fm["status"] == "draft"
     assert "TODO:" in fm["prompt_for_next"]
     assert body.strip().startswith("# plan by codex")
+
+
+def test_claim_refuses_unbound_sole_active_fallback(monkeypatch, tmp_path, capsys):
+    """Claim is a write boundary: an unbound instance must not fall through to
+    the sole-active convenience resolver and pollute a pair it never joined."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "unbound-window")
+
+    args = type("A", (), {
+        "kind": "plan",
+        "in_reply_to": None,
+        "corrects": None,
+        "project": None,
+        "pair_id": None,
+    })()
+    rc = relay.cmd_claim(args)
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "no bound pair for this instance" in captured.err
+    assert list((session / ".draft").glob("*.md")) == []
+    assert relay.latest_seq(session) == 0
+
+
+def test_claim_allows_bound_instance_without_pair_id(monkeypatch, tmp_path, capsys):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": "plan",
+        "in_reply_to": None,
+        "corrects": None,
+        "project": None,
+        "pair_id": None,
+    })())
+    draft = Path(capsys.readouterr().out.strip())
+
+    assert rc == 0
+    assert draft.exists()
+    assert draft.parent == session / ".draft"
+
+
+def test_claim_allows_explicit_pair_id_for_unbound_instance(monkeypatch, tmp_path, capsys):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "unbound-window")
+
+    rc = relay.cmd_claim(type("A", (), {
+        "kind": "plan",
+        "in_reply_to": None,
+        "corrects": None,
+        "project": None,
+        "pair_id": session.name,
+    })())
+    draft = Path(capsys.readouterr().out.strip())
+
+    assert rc == 0
+    assert draft.exists()
+    assert draft.parent == session / ".draft"
 
 
 def test_claim_unknown_kind_rejected(monkeypatch, tmp_path, capsys):

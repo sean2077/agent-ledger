@@ -335,13 +335,16 @@ explicit --pair-id > this instance's binding (if it still names an active pair)
 
 **Strict mode (`require_binding=True`).** Passive automation that resolves *on
 behalf of one instance* — the Stop hook — calls `relay status --require-binding`
-(and `relay wait --require-binding`). Strict mode keeps the first two steps but
+(and `relay wait --require-binding`). Write-boundary commands such as `relay
+claim` also use strict resolution. Strict mode keeps the first two steps but
 DISABLES the sole-active fallback: with no `--pair-id` and no live binding it
 yields no pair — `status` emits a non-actionable payload (`bound_pair: null`,
 `session: null`, empty `published`/`drafts`, `is_active: false`) at exit 0;
-`wait` refuses with a non-zero exit. This is the identity boundary that stops an
-unbound session from being pulled into the lone active pair (issue
-20260601T182646-2920d5b9). Bare interactive `relay status` keeps the fallback.
+`wait` refuses with a non-zero exit; `claim` refuses before creating `.draft/`
+content. This is the identity boundary that stops an unbound session from being
+pulled or written into the lone active pair (issues
+20260601T182646-2920d5b9 and 20260601T200726-e5da21d8). Bare interactive
+`relay status` keeps the fallback.
 
 `relay status --json` always includes **`bound_pair`** — the pair slug this
 instance is bound to (`null` when unbound), consistent with `relay whoami`. It

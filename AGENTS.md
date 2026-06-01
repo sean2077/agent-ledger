@@ -84,7 +84,7 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay pairs archive <slug> [--force] \| --terminated` | Move terminated pair dir(s) into `.shared/_archive/` to declutter the top level. `--force` shelves an active pair (drops its bindings); `--terminated` sweeps all closed/terminal pairs. |
 | `relay pairs restore <slug>` | Move an archived pair back to `.shared/` (state unchanged — closed stays closed, shelved-active stays active; never auto-rebinds). |
 | `relay status [--json] [--require-binding]` | The bound pair's published artifacts + next seq. JSON includes `bound_pair` (this instance's binding, or null). `--require-binding` = strict resolution for passive automation: no sole-active fallback; unbound → exit 0 with a non-actionable payload. |
-| `relay claim --kind <k> [--in-reply-to N]` | Scaffold a hidden `.draft/NNN-<author>-<kind>.md`. Fails closed if author/peer unresolved. |
+| `relay claim --kind <k> [--in-reply-to N]` | Scaffold a hidden `.draft/NNN-<author>-<kind>.md`. Fails closed if author/peer unresolved, or if this instance is unbound and no explicit `--pair-id` is supplied. |
 | `relay draft set <draft> --body-file … --prompt-for-next-file …` | Fill a draft atomically (preferred over hand-editing the file). |
 | `relay publish <draft>` | Validate + atomically promote a draft (writes `.sha256` + `.ready`). The authorship boundary. |
 | `relay wait [--require-binding]` | Block until the peer publishes an artifact addressed to you. Exit 0 new / 10 timeout / 11 peer-stale / 12 terminal / 130 SIGINT. `--require-binding` refuses (non-zero) when unbound instead of waiting on a sole-active pair. |
@@ -141,7 +141,9 @@ the rsync side. (The pre-v0.14 per-terminal `export RELAY_AUTHOR` dance and the
 3. Read the peer's `.md` (esp. its `prompt_for_next` — that's your task).
 4. Do the work (plan/review/code). Track non-`.shared/` files you touch.
 5. `relay claim --kind <k> --in-reply-to <peer-seq>` → fill via `relay draft
-   set` → `relay publish`.
+   set` → `relay publish`. Claim is a write boundary: it uses this instance's
+   binding, or an explicit `--pair-id`; it never falls through to the sole-active
+   convenience fallback.
 6. **Auto-loop:** unless a rule-based break fires, `relay wait` for the peer and
    repeat. Break triggers (surface to the user): `kind: decision`, a terminal
    status, a `prompt_for_next` line **starting with** `@user:`, or the

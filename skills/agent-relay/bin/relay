@@ -2344,6 +2344,7 @@ def cmd_claim(args) -> int:
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
+            require_binding=True,
         )
     except SystemExit as exc:
         msg = str(exc)
@@ -2353,6 +2354,13 @@ def cmd_claim(args) -> int:
         elif "multiple active pairs" in msg:
             hint = " — run `relay pair ensure` / `relay pair join <slug>`, or pass `--pair-id <id>`."
         print(f"relay claim: {msg}{hint}", file=sys.stderr)
+        return 2
+    if session is None:
+        print(
+            "relay claim: no bound pair for this instance — run `relay pair "
+            "ensure` / `relay pair join <slug>`, or pass `--pair-id <id>`.",
+            file=sys.stderr,
+        )
         return 2
     # Identity boundary (fail-closed, per decision 004): a draft MUST carry a
     # real author AND a real peer derived from the pair — never scaffold a

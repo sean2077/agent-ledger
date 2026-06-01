@@ -160,6 +160,9 @@ This is the core 95% case. Take one full turn in the relay.
    DRAFT=$("$RELAY" claim --kind <kind> --in-reply-to <peer-seq>)
    ```
    `kind` is one of: `plan | review | fix | note | question | decision | correction | addendum`. The CLI creates a hidden `.draft/NNN-<you>-<kind>.md` with frontmatter scaffold; body is a placeholder.
+   `claim` is an authorship/write boundary: it resolves through this instance's
+   live binding, or through an explicit `--pair-id`. An unbound instance without
+   `--pair-id` refuses instead of falling through to the sole-active pair.
 
    **`claim` auto-starts a renewal-file heartbeat for the draft** — no separate `heartbeat start` step. (If it can't start one it rolls the draft back and errors, so a claimed draft always has liveness coverage; `--no-heartbeat` opts out for tests/advanced use.) Every subsequent relay subcommand you run during this turn (status, publish, wait, close) auto-touches the local renewal file, so the peer sees you alive. If your turn spans >10 minutes without any relay call (e.g. one giant Edit), run `"$RELAY" heartbeat tick` to keep the renewal fresh. `relay publish` auto-stops the heartbeat on success.
 6. **Fill the draft**: use your Edit tool on `$DRAFT`. Replace the placeholder body with your substantive content. **Critical**: replace the `prompt_for_next: |` block — the scaffold has `TODO: ...` and `publish` will reject anything still containing `TODO:`. See "Writing prompt_for_next" below.

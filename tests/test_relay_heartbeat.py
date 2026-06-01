@@ -36,6 +36,7 @@ def _bootstrap(monkeypatch, tmp_path, *, author="claude", peer="codex"):
     _isolated_env(monkeypatch,
         RELAY_SYNC="none" if author == "claude" else "rsync",
         RELAY_AUTHOR=author,
+        RELAY_AGENT_SESSION_ID=f"{author}-test-window",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y",
         RELAY_REMOTE_PATH="/r",

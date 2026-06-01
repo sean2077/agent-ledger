@@ -179,7 +179,8 @@ def _publish_artifact(session: Path, seq: int, author: str, peer: str,
     """Create + publish an artifact via the real relay CLI (test the real path)."""
     # Use the test relay module directly
     args = type("A", (), {
-        "kind": kind, "in_reply_to": None, "project": None, "session_id": None,
+        "kind": kind, "in_reply_to": None, "project": None,
+        "pair_id": session.name, "corrects": None,
     })()
     # we want author=<author>, swap env
     os.environ["RELAY_AUTHOR"] = author

@@ -29,6 +29,7 @@ def _bootstrap(monkeypatch, tmp_path, topic="t"):
     monkeypatch.setenv("RELAY_REMOTE_SSH", "x@y")
     monkeypatch.setenv("RELAY_REMOTE_PATH", "/r")
     monkeypatch.setenv("RELAY_AUTHOR", "codex")
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "test-codex-window")
     monkeypatch.setenv("RELAY_SHARED_ROOT", str(shared))
     relay.cmd_bootstrap(type("A", (), {"topic": topic, "title": None})())
     return relay.resolve_active_pair(relay.load_env())
