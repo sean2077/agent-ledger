@@ -55,6 +55,7 @@ RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
 __version__ = "0.17.0"
 SCHEMA_VERSION = 3
+BINDING_SCHEMA_VERSION = 1
 
 KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", "addendum"}
 # Kinds whose semantics allow a `corrects:` back-reference (file-protocol §3).
@@ -74,6 +75,50 @@ PAIR_SLUG_RE = re.compile(r"^\d{8}-[a-z0-9][a-z0-9-]{0,47}$")
 ARCHIVE_DIRNAME = "_archive"
 NON_BLOCKING_PREFLIGHT_WARNS = {"fs.mtime_monotonic", "identity.peer"}
 OWNER_KINDS = {"agent", "tool-process", "pidfile", "renewal-file", "none"}
+
+
+class SchemaVersionError(Exception):
+    """Raised when a ledger record's schema is invalid or unsupported."""
+
+    def __init__(self, record_type: str, path: Path, found, supported: int, reason: str):
+        self.record_type = record_type
+        self.path = Path(path)
+        self.found = found
+        self.supported = supported
+        self.reason = reason
+        super().__init__(self._message())
+
+    @property
+    def code(self) -> str:
+        return "unsupported_schema" if self.reason in {"future", "old"} else "invalid_schema"
+
+    def to_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "record_type": self.record_type,
+            "path": str(self.path),
+            "found": self.found,
+            "supported": self.supported,
+            "reason": self.reason,
+            "message": str(self),
+        }
+
+    def _message(self) -> str:
+        label = f"{self.record_type} schema_version"
+        if self.reason == "future":
+            return (
+                f"{label} {self.found!r} at {self.path} is newer than this relay "
+                f"supports ({self.supported}); upgrade relay before reading this ledger"
+            )
+        if self.reason == "old":
+            return (
+                f"{label} {self.found!r} at {self.path} is older than this relay "
+                f"supports ({self.supported}) and no compatibility adapter is available"
+            )
+        return (
+            f"{label} at {self.path} is missing or non-integer; expected "
+            f"{self.supported}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -601,12 +646,59 @@ def binding_path(root: Path, author: str, agent_session_id: str) -> Path:
     return bindings_dir(root) / f"{binding_key(author, agent_session_id)}.json"
 
 
-def read_binding(root: Path, author: str, agent_session_id: str) -> Optional[dict]:
+def _validate_schema_version(
+    record: dict,
+    *,
+    record_type: str,
+    path: Path,
+    supported: int,
+) -> None:
+    found = record.get("schema_version")
+    if type(found) is not int:
+        raise SchemaVersionError(record_type, path, found, supported, "invalid")
+    if found > supported:
+        raise SchemaVersionError(record_type, path, found, supported, "future")
+    if found < supported:
+        raise SchemaVersionError(record_type, path, found, supported, "old")
+
+
+def read_session_json(session: Path, *, require_supported: bool = True) -> dict:
+    path = session / "session.json"
     try:
-        return json.loads(
-            binding_path(root, author, agent_session_id).read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SchemaVersionError("session", path, None, SCHEMA_VERSION, "invalid") from exc
+    if not isinstance(record, dict):
+        raise SchemaVersionError("session", path, None, SCHEMA_VERSION, "invalid")
+    if require_supported:
+        _validate_schema_version(
+            record, record_type="session", path=path, supported=SCHEMA_VERSION
+        )
+    return record
+
+
+def read_binding(
+    root: Path,
+    author: str,
+    agent_session_id: str,
+    *,
+    require_supported: bool = True,
+) -> Optional[dict]:
+    path = binding_path(root, author, agent_session_id)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(record, dict):
+        return None
+    if require_supported:
+        _validate_schema_version(
+            record,
+            record_type="binding",
+            path=path,
+            supported=BINDING_SCHEMA_VERSION,
+        )
+    return record
 
 
 def write_binding(root: Path, binding: dict) -> None:
@@ -624,14 +716,26 @@ def delete_binding(root: Path, author: str, agent_session_id: str) -> None:
         pass
 
 
-def list_bindings(root: Path) -> list[dict]:
+def list_bindings(root: Path, *, include_schema_errors: bool = False) -> list[dict]:
     d = bindings_dir(root)
     if not d.is_dir():
         return []
     out: list[dict] = []
     for p in sorted(d.glob("*.json")):
         try:
-            out.append(json.loads(p.read_text(encoding="utf-8")))
+            record = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                continue
+            _validate_schema_version(
+                record,
+                record_type="binding",
+                path=p,
+                supported=BINDING_SCHEMA_VERSION,
+            )
+            out.append(record)
+        except SchemaVersionError as exc:
+            if include_schema_errors:
+                out.append({"_schema_error": exc.to_dict(), "_path": str(p)})
         except (OSError, ValueError):
             continue
     return out
@@ -657,9 +761,12 @@ def _binding_is_stale(binding: dict, *, threshold: Optional[int] = None) -> bool
 
 def _write_binding_record(root: Path, env: "Env", pair_slug: str) -> None:
     now = now_iso()
-    prior = read_binding(root, env.author, env.agent_session_id)
+    try:
+        prior = read_binding(root, env.author, env.agent_session_id)
+    except SchemaVersionError as exc:
+        raise SystemExit(f"relay: {exc}") from exc
     write_binding(root, {
-        "schema_version": 1,
+        "schema_version": BINDING_SCHEMA_VERSION,
         "instance_id": env.instance_id,
         "author": env.author,
         "agent_session_id": env.agent_session_id,
@@ -698,7 +805,12 @@ def join_pair(env: "Env", root: Path, pair_slug: str) -> int:
     if not (session / "session.json").exists():
         print(f"relay: no pair {pair_slug!r} under {root}", file=sys.stderr)
         return 2
-    if not session_is_active(session):
+    try:
+        active = session_is_active(session)
+    except SchemaVersionError as exc:
+        print(f"relay: {exc}", file=sys.stderr)
+        return 2
+    if not active:
         print(f"relay: pair {pair_slug!r} is not active", file=sys.stderr)
         return 2
     existing = binding_for_pair(root, pair_slug)
@@ -747,7 +859,7 @@ def _maybe_update_binding_last_seen(env: "Env", root: Path) -> None:
                 pass
         b["last_seen"] = now_iso()
         write_binding(root, b)
-    except OSError:
+    except (OSError, SchemaVersionError):
         pass
 
 
@@ -1016,6 +1128,10 @@ def resolve_pair(env: Env, session_id: str | None = None, *,
         candidate = root / session_id
         if not (candidate / "session.json").exists():
             raise SystemExit(f"no pair {session_id!r} under {root}")
+        try:
+            read_session_json(candidate)
+        except SchemaVersionError as exc:
+            raise SystemExit(f"relay: {exc}") from exc
         if require_active and not session_is_active(candidate):
             raise SystemExit(f"pair is not active: {session_id}")
         return candidate
@@ -1052,12 +1168,19 @@ def resolve_active_pair(env: Env, project: str | None = None,
     # This instance's binding wins (fast path) when it still names an active
     # pair. Otherwise drop the dangling binding and fall through to discovery.
     if env.author and env.agent_session_id:
-        b = read_binding(root, env.author, env.agent_session_id)
+        try:
+            b = read_binding(root, env.author, env.agent_session_id)
+        except SchemaVersionError as exc:
+            raise SystemExit(f"relay: {exc}") from exc
         if b:
             slug = b.get("pair_slug")
             cand = root / slug if slug else None
-            if cand and (cand / "session.json").exists() and session_is_active(cand):
-                return cand
+            if cand and (cand / "session.json").exists():
+                try:
+                    if session_is_active(cand):
+                        return cand
+                except SchemaVersionError as exc:
+                    raise SystemExit(f"relay: {exc}") from exc
             delete_binding(root, env.author, env.agent_session_id)
 
     if require_binding:
@@ -1069,7 +1192,10 @@ def resolve_active_pair(env: Env, project: str | None = None,
 
     # session_is_active() honors state, CLOSED sentinel, AND latest artifact
     # status (so stale-active pairs with terminal latest artifacts are excluded).
-    candidates = active_pair_dirs(root)
+    try:
+        candidates = active_pair_dirs(root)
+    except SchemaVersionError as exc:
+        raise SystemExit(f"relay: {exc}") from exc
     if not candidates:
         raise SystemExit(f"no active pair under {root}")
     if len(candidates) > 1:
@@ -1098,7 +1224,11 @@ def resolve_peer(session_dir: Path, author: str) -> Optional[str]:
     RELAY_PEER is no longer consulted; session.json is the source of
     truth once a pair exists."""
     try:
-        sj = json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
+        sj = read_session_json(session_dir)
+    except SchemaVersionError as exc:
+        if exc.code == "invalid_schema":
+            return None
+        raise
     except (OSError, ValueError):
         return None
     participants = sj.get("participants")
@@ -1255,7 +1385,7 @@ def session_is_active(session: Path) -> bool:
     if not sj.exists():
         return False
     try:
-        data = json.loads(sj.read_text())
+        data = read_session_json(session)
     except json.JSONDecodeError:
         return False
     if data.get("state") != "active":
@@ -1288,13 +1418,18 @@ def latest_artifact_frontmatter(session: Path) -> dict | None:
 
 
 def session_category(session: Path) -> str:
-    if session_is_active(session):
-        return "active"
+    try:
+        if session_is_active(session):
+            return "active"
+    except SchemaVersionError as exc:
+        return exc.code
     if (session / "CLOSED").exists():
         return "closed"
     try:
-        sj = json.loads((session / "session.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        sj = read_session_json(session)
+    except SchemaVersionError as exc:
+        return exc.code
+    except OSError:
         return "invalid"
     if sj.get("state") == "closed":
         return "closed"
@@ -1313,9 +1448,15 @@ def _check_binding_health(root: Path, env: Env) -> dict:
     if not env.author or not env.agent_session_id:
         return {"name": name, "status": "pass",
                 "detail": "no instance identity resolved; binding check skipped"}
-    b = read_binding(root, env.author, env.agent_session_id)
+    try:
+        b = read_binding(root, env.author, env.agent_session_id)
+    except SchemaVersionError as exc:
+        return {"name": name, "status": "warn", "detail": f"{exc.code}: {exc}"}
     if not b:
-        active_names = [sd.name for sd in active_pair_dirs(root)]
+        try:
+            active_names = [sd.name for sd in active_pair_dirs(root)]
+        except SchemaVersionError as exc:
+            return {"name": name, "status": "warn", "detail": f"{exc.code}: {exc}"}
         if len(active_names) > 1:
             return {
                 "name": name, "status": "warn",
@@ -1329,8 +1470,12 @@ def _check_binding_health(root: Path, env: Env) -> dict:
                 "detail": "no binding for this instance (run `relay pair ensure`)"}
     slug = b.get("pair_slug")
     cand = root / slug if slug else None
-    if cand and (cand / "session.json").exists() and session_is_active(cand):
-        return {"name": name, "status": "pass", "detail": f"bound to {slug}"}
+    if cand and (cand / "session.json").exists():
+        try:
+            if session_is_active(cand):
+                return {"name": name, "status": "pass", "detail": f"bound to {slug}"}
+        except SchemaVersionError as exc:
+            return {"name": name, "status": "warn", "detail": f"{exc.code}: {exc}"}
     return {"name": name, "status": "warn",
             "detail": f"bound pair {slug!r} is no longer active; "
                       "run `relay pair ensure` to rebind"}
@@ -1568,18 +1713,34 @@ def cmd_preflight(args) -> int:
         # to an active pair. Never fatal — a missing/odd participants list is a
         # warn so claim/wait surface it before they actually need the peer.
         if env.author and env.agent_session_id:
-            _b = read_binding(env.shared_root, env.author, env.agent_session_id)
-            _slug = _b.get("pair_slug") if _b else None
-            _cand = env.shared_root / _slug if _slug else None
-            if _cand and (_cand / "session.json").exists() and session_is_active(_cand):
-                _peer = resolve_peer(_cand, env.author)
+            try:
+                _b = read_binding(env.shared_root, env.author, env.agent_session_id)
+            except SchemaVersionError as exc:
                 out["checks"].append({
                     "name": "identity.peer",
-                    "status": "pass" if _peer else "warn",
-                    "detail": (f"derived {_peer} from {_slug}" if _peer
-                               else f"could not derive a peer from {_slug} "
-                                    "participants (malformed or not a 2-party pair)"),
+                    "status": "warn",
+                    "detail": f"{exc.code}: {exc}",
                 })
+                _b = None
+            _slug = _b.get("pair_slug") if _b else None
+            _cand = env.shared_root / _slug if _slug else None
+            if _cand and (_cand / "session.json").exists():
+                try:
+                    active = session_is_active(_cand)
+                    _peer = resolve_peer(_cand, env.author) if active else None
+                    out["checks"].append({
+                        "name": "identity.peer",
+                        "status": "pass" if _peer else "warn",
+                        "detail": (f"derived {_peer} from {_slug}" if _peer
+                                   else f"could not derive a peer from {_slug} "
+                                        "participants (malformed or not a 2-party pair)"),
+                    })
+                except SchemaVersionError as exc:
+                    out["checks"].append({
+                        "name": "identity.peer",
+                        "status": "warn",
+                        "detail": f"{exc.code}: {exc}",
+                    })
 
     if env.shared_root and env.shared_root.is_dir():
         for r in run_probes(env.shared_root):
@@ -1968,7 +2129,7 @@ def cmd_status(args) -> int:
     _gc_heartbeat_orphans(session, env.author or "")
     _gc_renewal_orphans(session, env)
     _maybe_tick_renewal(session, env)
-    sj = json.loads((session / "session.json").read_text())
+    sj = read_session_json(session)
 
     pub = list_published(session)
     if args.last and args.last > 0:
@@ -2384,7 +2545,12 @@ def cmd_publish(args) -> int:
     if final_status not in STATUSES or final_status == "draft":
         print(f"relay publish: invalid --status: {final_status!r}", file=sys.stderr)
         return 2
-    if not session_is_active(session):
+    try:
+        publish_session_active = session_is_active(session)
+    except SchemaVersionError as exc:
+        print(f"relay publish: {exc}", file=sys.stderr)
+        return 2
+    if not publish_session_active:
         if not getattr(args, "force", False):
             print(
                 f"relay publish: refusing to publish into inactive pair: {session} "
@@ -2927,7 +3093,7 @@ def cmd_close(args) -> int:
     atomic_write_text(sentinel, close_meta, mode=0o644)
 
     sj_path = session / "session.json"
-    data = json.loads(sj_path.read_text())
+    data = read_session_json(session)
     data["state"] = "closed"
     data["closed_at"] = now_iso()
     data["close_reason"] = args.reason
@@ -2948,20 +3114,26 @@ def _pair_list_payload(root: Path, *, scan_root: Path | None = None) -> list[dic
     scan_root = scan_root or root
     items: list[dict] = []
     for sd in iter_pair_dirs(scan_root):
+        schema_error = None
         try:
-            sj = json.loads((sd / "session.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            sj = read_session_json(sd)
+        except SchemaVersionError as exc:
             sj = {}
+            schema_error = exc.to_dict()
+        except OSError:
+            sj = {}
+        category = schema_error["code"] if schema_error else session_category(sd)
+        is_active = False if schema_error else session_is_active(sd)
         latest = latest_artifact_frontmatter(sd)
         bindings = binding_for_pair(root, sd.name)
         live = [b for b in bindings if not _binding_is_stale(b)]
-        items.append({
+        item = {
             "session_id": sd.name,
             "project": sj.get("project"),
             "title": sj.get("title"),
             "state": sj.get("state"),
-            "category": session_category(sd),
-            "is_active": session_is_active(sd),
+            "category": category,
+            "is_active": is_active,
             "bound_instances": [b.get("instance_id") for b in bindings],
             "authors": [b.get("author") for b in live],
             "open_slots": max(0, 2 - len(live)),
@@ -2970,7 +3142,10 @@ def _pair_list_payload(root: Path, *, scan_root: Path | None = None) -> list[dic
             "latest": latest,
             "path": str(sd),
             "archived": scan_root != root,
-        })
+        }
+        if schema_error:
+            item["schema_error"] = schema_error
+        items.append(item)
     return items
 
 
@@ -3065,12 +3240,17 @@ def cmd_pairs_archive(args) -> int:
             print(f"relay pairs archive: no pair {slug!r} under {root} — "
                   f"run `relay pairs list` to see slugs.", file=sys.stderr)
             return 2
-        if session_is_active(sd) and not force:
+        try:
+            archive_active = session_is_active(sd)
+        except SchemaVersionError as exc:
+            print(f"relay pairs archive: {exc}", file=sys.stderr)
+            return 2
+        if archive_active and not force:
             print(f"relay pairs archive: {slug!r} is an active pair; run "
                   f"`relay close --pair-id {slug} --reason ...` first, or pass "
                   f"--force to shelve it.", file=sys.stderr)
             return 2
-        if session_is_active(sd) and force:
+        if archive_active and force:
             draft = sd / ".draft"
             if draft.is_dir() and any(draft.glob("*.heartbeat")):
                 print(f"note: {slug!r} has a live heartbeat sidecar; its daemon will "
@@ -4022,12 +4202,20 @@ def cmd_doctor(args) -> int:
     for sd in iter_pair_dirs(env.shared_root):
         entry = {
             "session_id": sd.name,
-            "is_active": session_is_active(sd),
+            "is_active": False,
             "drafts": [],
             "heartbeat_pidfile": None,
             "heartbeat_sidecars": [],
             "incomplete_triads": [],
+            "schema_error": None,
         }
+        try:
+            entry["is_active"] = session_is_active(sd)
+        except SchemaVersionError as exc:
+            entry["schema_error"] = exc.to_dict()
+            findings += 1
+            report["sessions"].append(entry)
+            continue
         # Drafts
         draft_dir = sd / ".draft"
         if draft_dir.is_dir():
@@ -4171,7 +4359,12 @@ def cmd_doctor(args) -> int:
     # Stale binding GC (v0.13). Bindings carry no PID — delete_binding removes
     # files only, never signals a process (mirrors _heartbeat_purge_files_only).
     report["stale_bindings"] = []
-    for b in list_bindings(env.shared_root):
+    report["unsupported_bindings"] = []
+    for b in list_bindings(env.shared_root, include_schema_errors=True):
+        if b.get("_schema_error"):
+            report["unsupported_bindings"].append(b["_schema_error"])
+            findings += 1
+            continue
         if _binding_is_stale(b):
             report["stale_bindings"].append(b.get("instance_id") or b.get("author"))
             findings += 1
@@ -4217,8 +4410,12 @@ def _print_doctor_text(report: dict, *, fix: bool) -> None:
             parts.append(f"heartbeat_sidecars={len(s['heartbeat_sidecars'])}")
         if s["incomplete_triads"]:
             parts.append(f"incomplete_triads={len(s['incomplete_triads'])}")
+        if s.get("schema_error"):
+            parts.append(s["schema_error"]["code"])
         detail = f" ({', '.join(parts)})" if parts else ""
         print(f"  - {s['session_id']} {marker}{detail}")
+        if s.get("schema_error"):
+            print(f"    schema: {s['schema_error']['message']}")
         if s["drafts"]:
             print("    drafts:")
             for d in s["drafts"]:
@@ -4242,6 +4439,10 @@ def _print_doctor_text(report: dict, *, fix: bool) -> None:
         print("\nstale bindings:")
         for ib in report["stale_bindings"]:
             print(f"  - {ib}")
+    if report.get("unsupported_bindings"):
+        print("\nunsupported bindings:")
+        for err in report["unsupported_bindings"]:
+            print(f"  - {err['message']}")
     if report.get("legacy_active_session"):
         print(f"\nnote: pre-v0.13 .active-session marker present (harmless): "
               f"{report['legacy_active_session']}")
@@ -4259,6 +4460,7 @@ def _doctor_session_has_findings(session: dict) -> bool:
         or session.get("heartbeat_pidfile")
         or session.get("heartbeat_sidecars")
         or session.get("incomplete_triads")
+        or session.get("schema_error")
     )
 
 
@@ -4700,11 +4902,19 @@ def cmd_whoami(args) -> int:
     env = load_env()
     bound = None
     derived_peer = None
+    schema_error = None
     if env.author and env.agent_session_id and env.shared_root:
-        b = read_binding(env.shared_root, env.author, env.agent_session_id)
+        try:
+            b = read_binding(env.shared_root, env.author, env.agent_session_id)
+        except SchemaVersionError as exc:
+            b = None
+            schema_error = exc.to_dict()
         bound = b.get("pair_slug") if b else None
         if bound:
-            derived_peer = resolve_peer(env.shared_root / bound, env.author)
+            try:
+                derived_peer = resolve_peer(env.shared_root / bound, env.author)
+            except SchemaVersionError as exc:
+                schema_error = exc.to_dict()
     payload = {
         "author": env.author,
         "author_source": env.author_source,
@@ -4713,6 +4923,7 @@ def cmd_whoami(args) -> int:
         "instance_id": env.instance_id,
         "bound_pair": bound,
         "derived_peer": derived_peer,
+        "schema_error": schema_error,
         "diagnostics": env.identity_diagnostics,
     }
     if getattr(args, "json", False):
@@ -4724,6 +4935,8 @@ def cmd_whoami(args) -> int:
     print(f"instance_id:       {env.instance_id or '(none)'}")
     print(f"bound_pair:        {bound or '(none)'}")
     print(f"derived_peer:      {derived_peer or '(none)'}")
+    if schema_error:
+        print(f"schema_error:      {schema_error['code']}: {schema_error['message']}")
     if env.identity_diagnostics:
         print(f"diagnostics:       {', '.join(env.identity_diagnostics)}")
     return 0
@@ -4759,8 +4972,8 @@ def cmd_pair_leave(args) -> int:
 
 def _pair_candidate(root: Path, sd: Path) -> dict:
     try:
-        sj = json.loads((sd / "session.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        sj = read_session_json(sd)
+    except (OSError, SchemaVersionError):
         sj = {}
     live = [x for x in binding_for_pair(root, sd.name) if not _binding_is_stale(x)]
     return {
@@ -4808,23 +5021,37 @@ def cmd_pair_ensure(args) -> int:
         # Identity can't be told apart from another same-author window here, so
         # never auto-bind (that would silently share a pair). Require explicit
         # selection. (codex code-review must-fix.)
+        try:
+            pairs = [s.name for s in active_pair_dirs(root)]
+        except SchemaVersionError as exc:
+            return _ensure_emit(args, {"action": "error", "detail": str(exc)}, rc=2)
         return _ensure_emit(args, {
             "action": "degraded",
             "detail": "agent session id unresolved (no platform id / tty / atuin); "
                       "pass --pair-id <slug> or export RELAY_AGENT_SESSION_ID",
-            "pairs": [s.name for s in active_pair_dirs(root)],
+            "pairs": pairs,
         }, rc=3)
     # 1. already bound to a live pair -> use it (fast path)
-    b = read_binding(root, env.author, env.agent_session_id)
+    try:
+        b = read_binding(root, env.author, env.agent_session_id)
+    except SchemaVersionError as exc:
+        return _ensure_emit(args, {"action": "error", "detail": str(exc)}, rc=2)
     if b:
         slug = b.get("pair_slug")
         cand = root / slug if slug else None
-        if cand and (cand / "session.json").exists() and session_is_active(cand):
-            return _ensure_emit(args, {"action": "use", "pair": slug,
-                                       "instance_id": env.instance_id}, rc=0)
+        if cand and (cand / "session.json").exists():
+            try:
+                if session_is_active(cand):
+                    return _ensure_emit(args, {"action": "use", "pair": slug,
+                                               "instance_id": env.instance_id}, rc=0)
+            except SchemaVersionError as exc:
+                return _ensure_emit(args, {"action": "error", "detail": str(exc)}, rc=2)
         delete_binding(root, env.author, env.agent_session_id)  # stale -> rediscover
     # 2. discover active pairs
-    actives = active_pair_dirs(root)
+    try:
+        actives = active_pair_dirs(root)
+    except SchemaVersionError as exc:
+        return _ensure_emit(args, {"action": "error", "detail": str(exc)}, rc=2)
     if not actives:
         return _ensure_emit(args, {"action": "bootstrap",
             "detail": "no active pair; bootstrap one"}, rc=3)
@@ -5163,7 +5390,11 @@ def main(argv: list[str] | None = None) -> int:
     _asid = getattr(args, "agent_session_id", None)
     if _asid:
         os.environ["RELAY_AGENT_SESSION_ID"] = _asid
-    return args.func(args)
+    try:
+        return args.func(args)
+    except SchemaVersionError as exc:
+        print(f"relay: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
