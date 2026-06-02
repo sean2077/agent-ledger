@@ -99,3 +99,10 @@ the issue ledger in
 [`file-protocol.md` §14](skills/agent-relay/references/file-protocol.md#14-issue-ledger-out-of-band-feedback-v010),
 and sync behavior in
 [`rsync-recipes.md`](skills/agent-relay/references/rsync-recipes.md).
+
+## Project hygiene
+
+- License: [MIT](LICENSE)
+- Security policy: [SECURITY.md](SECURITY.md) and
+  [`docs/threat-model.md`](docs/threat-model.md)
+- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
