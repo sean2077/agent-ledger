@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -23,6 +24,7 @@ def _clean_env() -> dict[str, str]:
 
 
 @pytest.mark.parametrize("argv", [
+    ["version", "--help"],
     ["bootstrap", "--help"],
     ["status", "--help"],
     ["claim", "--help"],
@@ -51,6 +53,39 @@ def test_current_top_level_commands_remain_available(argv):
     )
     assert res.returncode == 0, res.stderr
     assert "usage:" in res.stdout
+
+
+def test_version_json_reports_schema_and_package_metadata():
+    res = subprocess.run(
+        [sys.executable, str(RELAY), "version", "--json"],
+        cwd=ROOT,
+        env=_clean_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data["relay_version"]
+    assert data["schema_version"] == 3
+    assert data["binding_schema_version"] == 1
+    assert Path(data["package_dir"]).name == "agent-relay"
+    assert data["git_sha"] is None or len(data["git_sha"]) == 40
+
+
+def test_legacy_top_level_version_flag_still_works():
+    res = subprocess.run(
+        [sys.executable, str(RELAY), "--version"],
+        cwd=ROOT,
+        env=_clean_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.startswith("relay ")
 
 
 @pytest.mark.parametrize("argv", [

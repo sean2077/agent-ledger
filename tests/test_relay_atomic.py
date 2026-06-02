@@ -152,3 +152,29 @@ def test_frontmatter_multiline_preserves_relative_indent():
     fm, _ = relay.parse_frontmatter(text)
     assert fm["prompt_for_next"].startswith("- one")
     assert "two" in fm["prompt_for_next"]
+
+
+def test_frontmatter_duplicate_keys_fail_closed():
+    text = "---\nseq: 1\nseq: 2\n---\nbody\n"
+    with pytest.raises(ValueError, match="duplicate frontmatter key: seq"):
+        relay.parse_frontmatter(text)
+
+
+def test_frontmatter_control_chars_fail_closed():
+    text = "---\nauthor: codex\x00\n---\nbody\n"
+    with pytest.raises(ValueError, match="control character"):
+        relay.parse_frontmatter(text)
+
+
+def test_frontmatter_scalar_size_cap_fail_closed():
+    oversized = "x" * (relay.MAX_SCALAR_BYTES + 1)
+    text = f"---\nauthor: {oversized}\n---\nbody\n"
+    with pytest.raises(ValueError, match="frontmatter scalar exceeds"):
+        relay.parse_frontmatter(text)
+
+
+def test_frontmatter_body_size_cap_fail_closed():
+    body = "x" * (relay.MAX_BODY_BYTES + 1)
+    text = f"---\nseq: 1\n---\n{body}"
+    with pytest.raises(ValueError, match="body exceeds"):
+        relay.parse_frontmatter(text)

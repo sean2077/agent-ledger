@@ -129,6 +129,12 @@ corrects: null
 | `corrects` | int \| null | no | seq of the artifact this corrects (forward-only); see §6 |
 | `force_reason` | str | no | present iff publish used `--force`; explains the override reason |
 
+Parser hardening: duplicate frontmatter keys are invalid; C0 controls other
+than tab/newline are invalid; frontmatter, body, scalar, multiline, and list
+fields have conservative size caps. Oversized or malformed artifacts fail
+closed: readers hide or report them as malformed, and `publish` preserves the
+draft instead of writing a visible triad.
+
 ### 4.2 `kind` vocabulary
 
 Free-form short ASCII, but the well-known values are:

@@ -31,7 +31,7 @@ metadata leaking further than the user realized.
 | Surface | Assumption | In-scope risk | Mitigation (status) |
 |---|---|---|---|
 | Peer **artifact** content (`prompt_for_next`, body, `touched_paths`) | the peer is a non-malicious agent, but its output is **untrusted operational input** | prompt-injection: peer text steers this agent into unsafe shell/edits | **Untrusted-peer policy** (§4); human stays in the loop on real decisions; `@user:` escalation; hooks deny `.ready` edits |
-| Frontmatter parser (`_parse_yaml_subset`) | peers write the YAML subset | malformed/oversized/duplicate-key/control-char frontmatter corrupts routing or downstream behavior | parser hardening: duplicate-key reject, field-size + control-char caps, fail-closed (C6, in progress) |
+| Frontmatter parser (`_parse_yaml_subset`) | peers write the YAML subset | malformed/oversized/duplicate-key/control-char frontmatter corrupts routing or downstream behavior | parser hardening: duplicate-key reject, field-size + control-char caps, fail-closed |
 | `.shared/` on disk | same-user-trusted | accidental edit of a published `.md` | `.ready`/`.sha256` triad detects tampering on read; append-only discipline; PreToolUse hook denies edits to `.ready` artifacts (when installed) |
 | rsync transport | user supplies their own SSH; rsync owner only | wrong remote path / unintended overwrite / `.gitignore` `!negation` skew | `sync --dry-run` (always first), `--strict-gitignore`, `--delete` off by default; default-mode banner warns on re-include rules |
 | Hooks | optional autopilot | not installed / stale → guardrail absent | hooks are **additive**, never the only line of defense; the manual workflow is fully safe without them; `relay hooks doctor` verifies wiring |

@@ -441,6 +441,22 @@ def test_publish_rejects_placeholder_prompt(monkeypatch, tmp_path, capsys):
     assert draft.exists()  # draft preserved
 
 
+def test_publish_rejects_duplicate_frontmatter_key(monkeypatch, tmp_path, capsys):
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    draft = _manual_draft(session, author="codex", peer="claude")
+    text = draft.read_text()
+    draft.write_text(text.replace("seq: 1\n", "seq: 1\nseq: 2\n", 1))
+
+    rc = relay.cmd_publish(_publish_args(draft))
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "duplicate frontmatter key: seq" in captured.err
+    assert draft.exists()
+    assert not (session / "001-codex-note.md").exists()
+
+
 def test_publish_rejects_empty_body(monkeypatch, tmp_path, capsys):
     session = _bootstrap(monkeypatch, tmp_path)
     capsys.readouterr()
