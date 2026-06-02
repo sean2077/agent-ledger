@@ -62,7 +62,16 @@ KINDS = {"plan", "review", "fix", "note", "question", "decision", "correction", 
 # correction REQUIRES it; addendum MAY set it; all other kinds MUST NOT.
 CORRECTS_KINDS = {"correction", "addendum"}
 STATUSES = {"draft", "ready", "closed", "cancelled", "failed", "timed_out"}
+# Terminal = "this artifact no longer requires a peer response": `wait` exits 12,
+# discovery/reporting treat the pair as not-active. `timed_out` is terminal in
+# THAT sense (the peer stops waiting) but, unlike the hard-terminal trio, it is a
+# *pause* (the documented user-blocking escalation: `@user:` + --status
+# timed_out), so the write/bind path may RESUME it in-thread once the user
+# answers. HARD_TERMINAL_STATUSES end the pair for good — bootstrap a new one.
+# See file-protocol.md §5 (session-active rule) and §6 (status semantics).
 TERMINAL_STATUSES = {"closed", "cancelled", "failed", "timed_out"}
+HARD_TERMINAL_STATUSES = {"closed", "cancelled", "failed"}
+RESUMABLE_TERMINAL_STATUSES = TERMINAL_STATUSES - HARD_TERMINAL_STATUSES  # {"timed_out"}
 PLACEHOLDER_MARKER = "TODO:"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 # Full pair slug = bootstrap's date prefix + a topic matching SLUG_RE. archive /
@@ -806,11 +815,14 @@ def join_pair(env: "Env", root: Path, pair_slug: str) -> int:
         print(f"relay: no pair {pair_slug!r} under {root}", file=sys.stderr)
         return 2
     try:
-        active = session_is_active(session)
+        # session_is_resumable, not session_is_active: an explicit `pair join`
+        # may (re)bind to a `timed_out` (paused) pair so the peer can resume the
+        # round after the user answers. Hard-terminal/closed pairs still refuse.
+        usable = session_is_resumable(session)
     except SchemaVersionError as exc:
         print(f"relay: {exc}", file=sys.stderr)
         return 2
-    if not active:
+    if not usable:
         print(f"relay: pair {pair_slug!r} is not active", file=sys.stderr)
         return 2
     existing = binding_for_pair(root, pair_slug)
@@ -1136,7 +1148,8 @@ def _move_pair_dir(src: Path, dst: Path) -> None:
 
 
 def resolve_pair(env: Env, session_id: str | None = None, *,
-                    project: str | None = None, require_active: bool = False) -> Path:
+                    project: str | None = None, require_active: bool = False,
+                    allow_resumable: bool = False) -> Path:
     root = session_root(env)
     if not root.is_dir():
         raise SystemExit(f"no shared root: {root}")
@@ -1149,17 +1162,22 @@ def resolve_pair(env: Env, session_id: str | None = None, *,
             read_session_json(candidate)
         except SchemaVersionError as exc:
             raise SystemExit(f"relay: {exc}") from exc
-        if require_active and not session_is_active(candidate):
+        # allow_resumable lets the write/bind path supersede a `timed_out`
+        # latest (resume); the hard-terminal trio still fails closed.
+        usable = (session_is_resumable(candidate) if allow_resumable
+                  else session_is_active(candidate))
+        if require_active and not usable:
             raise SystemExit(f"pair is not active: {session_id}")
         return candidate
     if require_active:
-        return resolve_active_pair(env, project)
+        return resolve_active_pair(env, project, allow_resumable=allow_resumable)
     raise SystemExit("pair_id is required unless resolving the active pair")
 
 
 def resolve_active_pair(env: Env, project: str | None = None,
                            pair_id: str | None = None, *,
-                           require_binding: bool = False) -> "Path | None":
+                           require_binding: bool = False,
+                           allow_resumable: bool = False) -> "Path | None":
     """Resolve which pair a command operates on.
 
     Order (v0.13): explicit --pair-id > this instance's binding (if it still
@@ -1174,16 +1192,28 @@ def resolve_active_pair(env: Env, project: str | None = None,
     identity boundary — handing an unbound instance the lone active pair it
     never joined is the cross-talk bug (issue 20260601T182646-2920d5b9). Bare
     interactive `relay status` keeps the fallback (require_binding=False).
+
+    allow_resumable=True (the write/bind path, e.g. `claim`) returns a pair whose
+    latest artifact is `timed_out` (resumable pause) as well as a fully active
+    one. Independently — and regardless of allow_resumable — the binding is only
+    GC'd when its pair is truly dead (gone, or hard-terminal/closed): a paused
+    `timed_out` pair KEEPS its binding so the round can be resumed even after a
+    plain `status --require-binding` (the Stop hook) resolves it. Deleting the
+    binding on a mere pause was the latent half of the timed_out-resume deadlock
+    (issue 20260529T190821-0ec54be9).
     """
     root = session_root(env)
     if not root.is_dir():
         raise SystemExit(f"no shared root: {root}")
     _maybe_update_binding_last_seen(env, root)
     if pair_id:
-        return resolve_pair(env, pair_id, project=project, require_active=True)
+        return resolve_pair(env, pair_id, project=project, require_active=True,
+                            allow_resumable=allow_resumable)
 
-    # This instance's binding wins (fast path) when it still names an active
-    # pair. Otherwise drop the dangling binding and fall through to discovery.
+    # This instance's binding wins (fast path) when it still names a pair this
+    # caller may use. A `timed_out` pair is a pause, not death: keep the binding
+    # (so the round survives a status/wait resolve) and return it only when the
+    # caller allows resume. Drop the binding only when the pair is truly dead.
     if env.author and env.agent_session_id:
         try:
             b = read_binding(root, env.author, env.agent_session_id)
@@ -1192,13 +1222,17 @@ def resolve_active_pair(env: Env, project: str | None = None,
         if b:
             slug = b.get("pair_slug")
             cand = root / slug if slug else None
+            resumable = False
             if cand and (cand / "session.json").exists():
                 try:
-                    if session_is_active(cand):
-                        return cand
+                    resumable = session_is_resumable(cand)
+                    usable = resumable if allow_resumable else session_is_active(cand)
                 except SchemaVersionError as exc:
                     raise SystemExit(f"relay: {exc}") from exc
-            delete_binding(root, env.author, env.agent_session_id)
+                if usable:
+                    return cand
+            if not resumable:
+                delete_binding(root, env.author, env.agent_session_id)
 
     if require_binding:
         # Strict: no explicit --pair-id and no confirmed binding ⇒ refuse the
@@ -1396,8 +1430,12 @@ def published_paths(session: Path, base: str) -> dict[str, Path]:
     }
 
 
-def session_is_active(session: Path) -> bool:
-    """Implements the session-active rule from file-protocol.md §5."""
+def _session_open(session: Path, terminal: set[str]) -> bool:
+    """Core open-pair predicate (file-protocol.md §5): session.json `state` is
+    'active', no CLOSED sentinel, and the latest published artifact's status is
+    not in `terminal`. `session_is_active` passes the full TERMINAL_STATUSES;
+    `session_is_resumable` passes only HARD_TERMINAL_STATUSES so a `timed_out`
+    latest stays writable. Propagates SchemaVersionError to the caller."""
     sj = session / "session.json"
     if not sj.exists():
         return False
@@ -1413,11 +1451,26 @@ def session_is_active(session: Path) -> bool:
     try:
         fm, _ = parse_frontmatter(latest.read_text(encoding="utf-8"))
     except (ValueError, OSError):
-        return True  # malformed; conservatively keep active
-    status = fm.get("status")
-    if status in TERMINAL_STATUSES:
-        return False
-    return True
+        return True  # malformed; conservatively keep open
+    return fm.get("status") not in terminal
+
+
+def session_is_active(session: Path) -> bool:
+    """Implements the session-active rule from file-protocol.md §5. A terminal
+    latest — INCLUDING `timed_out` — makes the pair not-active. This is the
+    predicate for `wait` (peer stops waiting, exit 12), discovery
+    (`active_pair_dirs`), and reporting."""
+    return _session_open(session, TERMINAL_STATUSES)
+
+
+def session_is_resumable(session: Path) -> bool:
+    """Like `session_is_active`, but a `timed_out` latest is RESUMABLE rather
+    than terminal. The write/bind path (`claim`, `publish`, `pair join`,
+    `pair ensure`) uses this so the documented user-blocking pause (`@user:` +
+    --status timed_out) can be continued in-thread after the user answers; the
+    hard-terminal trio (closed/cancelled/failed) and a CLOSED sentinel stay
+    non-resumable. See file-protocol.md §5/§6."""
+    return _session_open(session, HARD_TERMINAL_STATUSES)
 
 
 def latest_artifact_frontmatter(session: Path) -> dict | None:
@@ -2125,8 +2178,16 @@ def cmd_status(args) -> int:
         if pair_id:
             session = resolve_pair(env, pair_id, project=getattr(args, "project", None))
         else:
+            # Bare interactive status RESOLVES a bound paused (`timed_out`) pair
+            # so it can report it (`is_active: false`, `resumable: true`) — the
+            # normal `pair ensure -> status` handoff must not dead-end after a
+            # pause. But `--require-binding` (the passive Stop hook) keeps
+            # allow_resumable=False: a paused pair resolves to None there, so the
+            # hook stays quiet and never wakes the auto-loop (the binding is
+            # preserved either way, by resolve_active_pair).
             session = resolve_active_pair(env, getattr(args, "project", None),
-                                          require_binding=require_binding)
+                                          require_binding=require_binding,
+                                          allow_resumable=not require_binding)
     except SystemExit as exc:
         msg = str(exc)
         if msg.startswith("relay: "):
@@ -2149,6 +2210,7 @@ def cmd_status(args) -> int:
             "session": None,
             "session_dir": None,
             "is_active": False,
+            "resumable": False,
             "next_seq": None,
             "published": [],
             "drafts": [],
@@ -2197,6 +2259,10 @@ def cmd_status(args) -> int:
         drafts = sorted(p.name for p in draft_dir.glob("*.md"))
 
     is_active = session_is_active(session)
+    # `resumable` is true only for a *paused* pair: not active (latest is
+    # `timed_out`) yet still writable — `claim`/`publish` may resume the round.
+    # A fully active pair reports resumable=false (it's just active).
+    resumable = session_is_resumable(session) and not is_active
 
     # Binding provenance (consistent with `whoami`): which pair THIS instance is
     # bound to, independent of how `session` was resolved (--pair-id can differ
@@ -2211,6 +2277,7 @@ def cmd_status(args) -> int:
         "session": sj,
         "session_dir": str(session),
         "is_active": is_active,
+        "resumable": resumable,
         "next_seq": latest_seq(session) + 1,
         "published": artifacts,
         "drafts": drafts,
@@ -2225,6 +2292,9 @@ def cmd_status(args) -> int:
     print(f"session: {sj['session_id']}  project={sj.get('project')}")
     print(f"  title:    {sj.get('title')}")
     print(f"  state:    {sj.get('state')}  (is_active={is_active})")
+    if resumable:
+        print("  resumable: yes  (latest artifact timed_out — `relay claim "
+              "--in-reply-to <seq>` resumes this round)")
     print(f"  created:  {sj.get('created_at')}")
     if sj.get("closed_at"):
         print(f"  closed:   {sj['closed_at']}  reason={sj.get('close_reason')!r}")
@@ -2354,11 +2424,16 @@ def cmd_claim(args) -> int:
         )
         return 2
     try:
+        # allow_resumable: claim may continue a `timed_out` (user-blocking)
+        # round once the user answers — the documented resume path. Hard-terminal
+        # pairs still fail closed. require_binding stays True (no sole-active
+        # fallback for this write boundary).
         session = resolve_active_pair(
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
             require_binding=True,
+            allow_resumable=True,
         )
     except SystemExit as exc:
         msg = str(exc)
@@ -2612,10 +2687,16 @@ def cmd_publish(args) -> int:
         return 2
     try:
         publish_session_active = session_is_active(session)
+        publish_session_resumable = session_is_resumable(session)
     except SchemaVersionError as exc:
         print(f"relay publish: {exc}", file=sys.stderr)
         return 2
-    if not publish_session_active:
+    # A `timed_out` latest is RESUMABLE: a normal continuation publish may
+    # supersede it (the documented resume path after a `@user:` escalation) with
+    # no --force. Only a hard terminal (closed/cancelled/failed) or a CLOSED
+    # pair — not active AND not resumable — needs the --force terminal-note
+    # escape hatch.
+    if not publish_session_active and not publish_session_resumable:
         if not getattr(args, "force", False):
             print(
                 f"relay publish: refusing to publish into inactive pair: {session} "
@@ -2680,9 +2761,12 @@ def cmd_publish(args) -> int:
             })())
         except Exception as exc:
             print(f"relay publish: heartbeat stop warning: {exc}", file=sys.stderr)
-        if final_status in TERMINAL_STATUSES:
-            # Terminal publish ends this pair; drop the publisher's binding (the
-            # peer self-heals its own dangling binding on its next resolve).
+        if final_status in HARD_TERMINAL_STATUSES:
+            # Hard-terminal publish ends this pair for good; drop the publisher's
+            # binding (the peer self-heals its own dangling binding on its next
+            # resolve). A `timed_out` publish is only a pause (resumable) — KEEP
+            # the binding so the publisher can resume the round in-thread once
+            # the user answers (issue 20260529T190821-0ec54be9).
             if env_pub.shared_root and env_pub.author and env_pub.agent_session_id:
                 delete_binding(env_pub.shared_root, env_pub.author,
                                env_pub.agent_session_id)
@@ -5106,12 +5190,15 @@ def cmd_pair_ensure(args) -> int:
         cand = root / slug if slug else None
         if cand and (cand / "session.json").exists():
             try:
-                if session_is_active(cand):
+                # session_is_resumable: a `timed_out` (paused) pair is still
+                # THIS instance's to resume — return `use` and keep the binding
+                # rather than dropping it and telling the agent to bootstrap.
+                if session_is_resumable(cand):
                     return _ensure_emit(args, {"action": "use", "pair": slug,
                                                "instance_id": env.instance_id}, rc=0)
             except SchemaVersionError as exc:
                 return _ensure_emit(args, {"action": "error", "detail": str(exc)}, rc=2)
-        delete_binding(root, env.author, env.agent_session_id)  # stale -> rediscover
+        delete_binding(root, env.author, env.agent_session_id)  # truly dead -> rediscover
     # 2. discover active pairs
     try:
         actives = active_pair_dirs(root)
