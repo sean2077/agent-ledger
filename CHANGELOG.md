@@ -4,6 +4,43 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.2.0 — 2026-06-02
+
+Release for the GPT-5.5 review triage hardening pass, covering the unreleased
+1.1.1 fixes plus the B-bucket feature and contract work.
+
+### New
+
+- `relay version [--json]` now reports `relay_version`, `schema_version`,
+  `binding_schema_version`, `package_dir`, and best-effort `git_sha`; the
+  existing top-level `relay --version` flag is retained.
+- Added a normative `docs/threat-model.md` covering the single-user trust
+  boundary, out-of-scope same-user attacks, and the untrusted-peer operational
+  policy.
+- Added the frozen-triad/binding contract regression file and process-level
+  concurrency tests for claim allocation and publish triad creation.
+- Added a GitHub Actions workflow with an OS/Python pytest matrix plus
+  production pyflakes, ruff, and shellcheck checks.
+
+### Changed
+
+- Relay-created files and publish sidecars now use private `0600` modes by
+  default, matching the existing private shared-root directory posture.
+- The issue ledger now writes `pair:` frontmatter for the active pair while
+  still normalizing older `session:` issue records on read.
+- Frontmatter parsing now fails closed on duplicate keys, oversized
+  frontmatter/body/scalar/list fields, and disallowed control characters.
+- Agent-facing docs now treat peer artifacts as untrusted operational input:
+  the workflow guide, protocol reference, and AGENTS.md source-of-truth section
+  point to the threat-model policy.
+
+### Compatibility
+
+- Additive, no schema bump. `relay version` is a new command, private file modes
+  are permission tightening, issue `session:` records remain readable as legacy
+  aliases, and parser caps reject malformed/pathological artifacts within the
+  existing YAML subset rather than changing the on-disk schema.
+
 ## 1.1.0 — 2026-06-02
 
 Pair-name visibility for precise pairing: make it obvious, from either side,
