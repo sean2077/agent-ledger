@@ -4,6 +4,32 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.2.1 — 2026-06-02
+
+Patch release for the timed-out wait/resume deadlock and the sshfs ready-sidecar
+debugging note from the v1.2.0 review follow-up.
+
+### Fixed
+
+- `relay wait` now resolves a bound resumable `timed_out` pair and keeps waiting
+  when the latest pause was authored by the current agent, so the peer can
+  resume with a follow-up artifact.
+- `relay wait` still exits 12 for a peer-authored `timed_out` artifact addressed
+  to the current agent, instead of returning that pause as a successful reply.
+- `relay heartbeat tick` now resolves bound resumable pairs, allowing an open
+  resumed draft to keep its renewal-file heartbeat fresh while the latest
+  published artifact remains `timed_out`.
+
+### Docs
+
+- `rsync-recipes.md` documents the exact publish sidecar names and the sshfs
+  cache knobs to check when manual `.ready` inspection appears stale.
+
+### Compatibility
+
+- Additive, no schema bump. The change is limited to `wait`/heartbeat handling
+  of already-resumable paused pairs; hard-terminal pair handling is unchanged.
+
 ## 1.2.0 — 2026-06-02
 
 Release for the GPT-5.5 review triage hardening pass, covering the unreleased

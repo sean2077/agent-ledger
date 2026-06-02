@@ -3,7 +3,7 @@
 Exit code contract (Stage 1 implementation):
     0   new .ready targeted at me; stdout = absolute artifact path
     10  timeout (RELAY_WAIT_TIMEOUT seconds elapsed)
-    12  session entered terminal state (closed / cancelled / failed / timed_out)
+    12  session entered terminal state, or peer-authored timed_out
     130 SIGINT
     2   protocol / env / mount error
 """
@@ -49,6 +49,7 @@ def _bootstrap(monkeypatch, tmp_path: Path, *, author="claude", peer="codex"):
     _isolated_env(monkeypatch,
         RELAY_SYNC="none" if author == "claude" else "rsync",
         RELAY_AUTHOR=author,
+        RELAY_AGENT_SESSION_ID=f"{author}-test-window",
         RELAY_SHARED_ROOT=str(shared),
         RELAY_REMOTE_SSH="x@y",
         RELAY_REMOTE_PATH="/r",
@@ -93,7 +94,7 @@ def _publish_artifact(session: Path, *, seq: int, author: str, peer: str,
 
 def _wait_args(**kw):
     base = {"project": None, "session_id": None, "timeout": None, "poll": None,
-            "no_timeout": False}
+            "no_timeout": False, "require_binding": False, "pair_id": None}
     base.update(kw)
     return type("A", (), base)()
 
@@ -112,6 +113,75 @@ def test_wait_returns_0_when_latest_already_targets_me(monkeypatch, tmp_path, ca
     assert rc == 0
     out = capsys.readouterr().out.strip()
     assert out.endswith("001-codex-review.md")
+
+
+def test_wait_blocks_after_self_authored_timed_out_until_peer_resume(
+    monkeypatch, tmp_path, capsys
+):
+    """A paused round authored by me remains waitable until the peer resumes it."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(
+        session,
+        seq=1,
+        author="claude",
+        peer="codex",
+        kind="question",
+        status="timed_out",
+    )
+
+    def _delayed_resume():
+        time.sleep(1.0)
+        _publish_artifact(session, seq=2, author="codex", peer="claude", kind="fix")
+
+    t = threading.Thread(target=_delayed_resume, daemon=True)
+    t.start()
+    capsys.readouterr()  # drain bootstrap chatter
+    rc = relay.cmd_wait(_wait_args(timeout=5, poll=1))
+    t.join(timeout=2)
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out.endswith("002-codex-fix.md")
+
+
+def test_wait_returns_12_on_peer_authored_timed_out_addressed_to_me(
+    monkeypatch, tmp_path, capsys
+):
+    """A peer's timed_out escalation addressed to me is terminal for wait."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(
+        session,
+        seq=1,
+        author="codex",
+        peer="claude",
+        kind="question",
+        status="timed_out",
+    )
+    capsys.readouterr()  # drain bootstrap chatter
+    rc = relay.cmd_wait(_wait_args(timeout=2, poll=1))
+    assert rc == 12
+    out = capsys.readouterr().out.strip()
+    assert out == "timed_out"
+
+
+def test_wait_require_binding_refuses_unbound_resumable_pair(
+    monkeypatch, tmp_path, capsys
+):
+    """Strict automation stays unbound even when a sole paused pair is resumable."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    _publish_artifact(
+        session,
+        seq=1,
+        author="claude",
+        peer="codex",
+        kind="question",
+        status="timed_out",
+    )
+    monkeypatch.setenv("RELAY_AGENT_SESSION_ID", "claude-other-window")
+    capsys.readouterr()  # drain bootstrap chatter
+    rc = relay.cmd_wait(_wait_args(timeout=2, poll=1, require_binding=True))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "not bound to any pair" in err
 
 
 def test_wait_returns_10_on_timeout(monkeypatch, tmp_path, capsys):
@@ -173,7 +243,7 @@ def test_wait_returns_12_when_session_closes_mid_wait(monkeypatch, tmp_path, cap
 
 def test_wait_returns_2_when_author_missing(monkeypatch, tmp_path, capsys):
     """RELAY_AUTHOR unset → exit 2 with clear error."""
-    session = _bootstrap(monkeypatch, tmp_path)
+    _bootstrap(monkeypatch, tmp_path)
     monkeypatch.delenv("RELAY_AUTHOR", raising=False)
     rc = relay.cmd_wait(_wait_args(timeout=1, poll=1))
     assert rc == 2

@@ -53,7 +53,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
@@ -1306,9 +1306,10 @@ def resolve_active_pair(env: Env, project: str | None = None,
     never joined is the cross-talk bug (issue 20260601T182646-2920d5b9). Bare
     interactive `relay status` keeps the fallback (require_binding=False).
 
-    allow_resumable=True (the write/bind path, e.g. `claim`) returns a pair whose
-    latest artifact is `timed_out` (resumable pause) as well as a fully active
-    one. Independently — and regardless of allow_resumable — the binding is only
+    allow_resumable=True (resume-aware callers like `claim`, `wait`, and
+    `heartbeat tick`) returns a pair whose latest artifact is `timed_out`
+    (resumable pause) as well as a fully active one. Independently — and
+    regardless of allow_resumable — the binding is only
     GC'd when its pair is truly dead (gone, or hard-terminal/closed): a paused
     `timed_out` pair KEEPS its binding so the round can be resumed even after a
     plain `status --require-binding` (the Stop hook) resolves it. Deleting the
@@ -1571,8 +1572,9 @@ def _session_open(session: Path, terminal: set[str]) -> bool:
 def session_is_active(session: Path) -> bool:
     """Implements the session-active rule from file-protocol.md §5. A terminal
     latest — INCLUDING `timed_out` — makes the pair not-active. This is the
-    predicate for `wait` (peer stops waiting, exit 12), discovery
-    (`active_pair_dirs`), and reporting."""
+    predicate for active-pair discovery (`active_pair_dirs`) and reporting.
+    `cmd_wait` adds author-aware `timed_out` handling: my own pause is
+    resumable/waitable, while my peer's pause is terminal for me."""
     return _session_open(session, TERMINAL_STATUSES)
 
 
@@ -1595,6 +1597,30 @@ def latest_artifact_frontmatter(session: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     return fm
+
+
+def _wait_artifact_terminal_status(fm: dict | None, author: str) -> str | None:
+    if not fm:
+        return None
+    status = fm.get("status")
+    if status in HARD_TERMINAL_STATUSES:
+        return status
+    if status == "timed_out" and fm.get("author") != author:
+        return "timed_out"
+    return None
+
+
+def _wait_session_terminal_status(session: Path, author: str) -> str | None:
+    fm = latest_artifact_frontmatter(session)
+    try:
+        data = read_session_json(session)
+    except SchemaVersionError:
+        raise
+    except OSError:
+        data = {}
+    if data.get("state") != "active" or (session / "CLOSED").exists():
+        return (fm or {}).get("status") or "closed"
+    return _wait_artifact_terminal_status(fm, author)
 
 
 def session_category(session: Path) -> str:
@@ -4381,6 +4407,7 @@ def cmd_heartbeat_tick(args) -> int:
             env,
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
+            allow_resumable=True,
         )
     except SystemExit as exc:
         print(f"relay heartbeat tick: {exc}", file=sys.stderr)
@@ -4397,7 +4424,7 @@ def cmd_heartbeat_tick(args) -> int:
 #   0   new .ready targeted at me; stdout = absolute artifact path
 #   10  timeout (RELAY_WAIT_TIMEOUT seconds elapsed)
 #   11  peer heartbeat stale (Stage 2/3 only; never emitted in Stage 1)
-#   12  session entered terminal state; stdout = one-line status
+#   12  session entered terminal state, or peer-authored timed_out; stdout = status
 #   130 SIGINT (shell convention: 128 + 2)
 #   2   protocol / mount / env / collision error; stderr = error message
 
@@ -4746,6 +4773,7 @@ def cmd_wait(args) -> int:
             getattr(args, "project", None),
             getattr(args, "pair_id", None),
             require_binding=require_binding,
+            allow_resumable=True,
         )
     except SystemExit as exc:
         msg = str(exc)
@@ -4782,12 +4810,23 @@ def cmd_wait(args) -> int:
         poll = 1
 
     def _terminal_exit() -> int:
-        fm = latest_artifact_frontmatter(session)
-        status = (fm or {}).get("status") or "closed"
+        status = _wait_session_terminal_status(session, env.author)
+        if status is None:
+            fm = latest_artifact_frontmatter(session)
+            status = (fm or {}).get("status") or "closed"
         print(status)
         return 12
 
-    # Entry: if the latest artifact is already targeting me, return it immediately.
+    # Entry: if the latest artifact is terminal-for-wait, stop before the
+    # addressed-to-me fast path. A peer-authored timed_out is an escalation, not
+    # a successful peer reply; my own timed_out remains waitable for peer resume.
+    wait_terminal_status = _wait_session_terminal_status(session, env.author)
+    if wait_terminal_status is not None:
+        print(wait_terminal_status)
+        return 12
+
+    # Entry: if the latest non-terminal artifact already targets me, return it
+    # immediately.
     pub_entry = list_published(session)
     if pub_entry:
         try:
@@ -4801,7 +4840,7 @@ def cmd_wait(args) -> int:
     # peer publishing the same seq they had open at wait entry is filtered.
     baseline_seq = latest_published_seq(session)
 
-    if not session_is_active(session):
+    if _wait_session_terminal_status(session, env.author) is not None:
         return _terminal_exit()
 
     # Stage 3 wait policy:
@@ -4843,12 +4882,16 @@ def cmd_wait(args) -> int:
                     fm, _body = parse_frontmatter(pub.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
+                wait_terminal_status = _wait_artifact_terminal_status(fm, env.author)
+                if wait_terminal_status is not None:
+                    print(wait_terminal_status)
+                    return 12
                 if fm.get("peer") == env.author:
                     print(pub)
                     return 0
                 baseline_seq = max(baseline_seq, seq)
 
-            if not session_is_active(session):
+            if _wait_session_terminal_status(session, env.author) is not None:
                 return _terminal_exit()
 
             # Dynamic peer-heartbeat detection: re-check every iteration.

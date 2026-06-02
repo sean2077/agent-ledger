@@ -79,6 +79,35 @@ Host and remote each have a local project tree. Only `.shared/` is the sshfs mou
 - `relay sync pull` (remote → host) for changes the remote made.
 - Remote CANNOT initiate sync — it cannot SSH back to host. So if the remote agent made changes, the remote-side handoff `prompt_for_next` should say "please pull on host before continuing" and set `sync_needed: true`.
 
+## Inspecting publish sidecars on sshfs
+
+Published artifacts are visible only when the full triad is present and valid:
+`NNN-author-kind.md`, `NNN-author-kind.md.sha256`, and
+`NNN-author-kind.ready`. The ready sentinel deliberately drops the `.md` suffix;
+`001-codex-plan.ready` is correct, while `001-codex-plan.md.ready` is not part
+of the protocol.
+
+When manually debugging over sshfs, `ls` or `stat` can briefly show stale
+directory entries or attributes because of client-side caching. Prefer
+protocol-aware checks first:
+
+```bash
+relay status
+relay doctor
+```
+
+For live manual sidecar inspection, reduce sshfs cache windows if your mount
+supports them, for example:
+
+```bash
+sshfs host:/path .shared -o attr_timeout=0 -o entry_timeout=0
+```
+
+Lower cache timeouts make manual inspection fresher but can slow large
+directory walks. The relay reader still requires both the `.ready` sentinel and
+the matching `.md.sha256`, so a transient manual listing mismatch should be
+checked against `relay status` before treating it as a protocol failure.
+
 ## First sync is the riskiest
 
 Always `--dry-run` first:

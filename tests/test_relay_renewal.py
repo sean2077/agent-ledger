@@ -8,10 +8,8 @@ on the shared mount so peer's `relay wait` can detect via exit 11.
 
 import json
 import os
-import signal
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
 
@@ -65,6 +63,18 @@ def _claim_draft(session, kind="plan"):
     # Name pattern: 001-<author>-<kind>.md
     drafts = sorted((session / ".draft").glob(f"*-{kind}.md"))
     return drafts[-1]
+
+
+def _publish_draft(draft, *, status="ready", prompt="carry on\n", body="\nbody.\n"):
+    fm, _ = relay.parse_frontmatter(draft.read_text())
+    fm["prompt_for_next"] = prompt
+    draft.write_text(relay.dump_frontmatter(fm, body))
+    rc = relay.cmd_publish(type("A", (), {
+        "draft_path": str(draft), "status": status,
+        "force": False, "force_reason": None,
+        "project": None, "pair_id": None,
+    })())
+    assert rc == 0
 
 
 def _hb_start(draft, owner_kind="renewal-file", interval=1, owner_pid=None):
@@ -154,6 +164,39 @@ def test_relay_subcommand_auto_ticks_renewal(monkeypatch, tmp_path, capsys):
         _hb_stop(draft)
 
 
+def test_heartbeat_tick_refreshes_resumable_bound_pair_with_open_draft(
+    monkeypatch, tmp_path, capsys
+):
+    """tick can refresh an open draft after this author paused with timed_out."""
+    session = _bootstrap(monkeypatch, tmp_path)
+    capsys.readouterr()
+    paused = _claim_draft(session, kind="question")
+    capsys.readouterr()
+    _publish_draft(
+        paused,
+        status="timed_out",
+        prompt="@user: answer before continuing\n",
+    )
+    capsys.readouterr()
+    draft = _claim_draft(session, kind="fix")
+    capsys.readouterr()
+    try:
+        assert _hb_start(draft, owner_kind="renewal-file", interval=1) == 0
+        capsys.readouterr()
+        env = relay.load_env()
+        renewal_file = relay._renewal_path_for_draft(draft, session, env)
+        assert renewal_file.exists()
+        old_mtime = time.time() - 100
+        os.utime(renewal_file, (old_mtime, old_mtime))
+        rc = relay.cmd_heartbeat_tick(type("A", (), {
+            "project": None, "session_id": None,
+        })())
+        assert rc == 0
+        assert renewal_file.stat().st_mtime > old_mtime
+    finally:
+        _hb_stop(draft)
+
+
 def test_heartbeat_stop_removes_renewal_file(monkeypatch, tmp_path, capsys):
     """relay heartbeat stop should clear pidfile, sidecar, AND renewal file."""
     session = _bootstrap(monkeypatch, tmp_path)
@@ -224,7 +267,6 @@ def test_cross_session_same_author_does_not_share_renewal(monkeypatch, tmp_path,
         # daemons — we only need two scoped renewal files.
         assert rc_b in {0, 3}
         capsys.readouterr()
-        env = relay.load_env()
         renewal_a = relay._renewal_dir_for(
             "myproj", session_a.name, "claude") / f"{draft_a.stem}.renewal"
         renewal_b = relay._renewal_dir_for(
