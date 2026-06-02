@@ -71,9 +71,35 @@ def test_issue_add_writes_file_with_frontmatter(monkeypatch, tmp_path, capsys):
     assert fm["severity"] == "major"
     assert fm["area"] == "cli"
     assert fm["reporter"] == "claude"
+    assert fm["pair"] is None
+    assert "session" not in fm
     assert fm["status"] == "open"
     assert fm["resolved_at"] is None
     assert "two publishers race" in body
+
+
+def test_issue_add_records_active_pair(monkeypatch, tmp_path, capsys):
+    d = tmp_path / "issues"
+    _isolated_env(monkeypatch, d, RELAY_AUTHOR="claude")
+    shared = tmp_path / "shared-iso"
+    session = shared / "20260602-issue-pair"
+    session.mkdir(parents=True)
+    (session / "session.json").write_text(json.dumps({
+        "schema_version": 3,
+        "project": "unknown",
+        "session_id": session.name,
+        "title": "issue pair",
+        "state": "active",
+        "created_at": relay.now_iso(),
+        "closed_at": None,
+        "close_reason": None,
+        "participants": ["claude", "codex"],
+    }))
+
+    assert relay.cmd_issue_add(_add(title="has context")) == 0
+    fm, _ = relay.parse_frontmatter(Path(capsys.readouterr().out.strip()).read_text())
+    assert fm["pair"] == session.name
+    assert "session" not in fm
 
 
 def test_issue_add_requires_title(monkeypatch, tmp_path, capsys):
@@ -124,7 +150,8 @@ def test_issue_add_reporter_unknown_without_author(monkeypatch, tmp_path, capsys
     relay.cmd_issue_add(_add(title="anon"))
     fm, _ = relay.parse_frontmatter(Path(capsys.readouterr().out.strip()).read_text())
     assert fm["reporter"] == "unknown"
-    assert fm["session"] is None  # no active pair resolvable
+    assert fm["pair"] is None  # no active pair resolvable
+    assert "session" not in fm
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +190,42 @@ def test_issue_list_all_and_json(monkeypatch, tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     assert {r["id"] for r in data["issues"]} == set(ids)
     assert data["unreadable"] == []
+
+
+def test_issue_reader_accepts_legacy_session_field(monkeypatch, tmp_path, capsys):
+    d = tmp_path / "issues"
+    _isolated_env(monkeypatch, d, RELAY_AUTHOR="claude")
+    d.mkdir(parents=True)
+    issue_id = "20260602T120000-abcdef12"
+    legacy = d / f"{issue_id}.md"
+    legacy.write_text(relay.dump_frontmatter({
+        "id": issue_id,
+        "created": relay.now_iso(),
+        "reporter": "claude",
+        "project": "agent-ledger",
+        "session": "20260602-old-name",
+        "severity": "minor",
+        "area": "cli",
+        "title": "legacy issue",
+        "status": "open",
+        "resolved_at": None,
+        "resolution": None,
+    }, "\nlegacy body\n"))
+
+    assert relay.cmd_issue_show(_show(issue_id, json=True)) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["frontmatter"]["pair"] == "20260602-old-name"
+
+    assert relay.cmd_issue_list(_list(status="all", json=True)) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["issues"][0]["pair"] == "20260602-old-name"
+
+    assert relay.cmd_issue_resolve(
+        type("A", (), {"id": issue_id, "note": "accepted legacy alias"})()
+    ) == 0
+    fm, _ = relay.parse_frontmatter(legacy.read_text())
+    assert fm["pair"] == "20260602-old-name"
+    assert fm["status"] == "resolved"
 
 
 def test_issue_list_empty(monkeypatch, tmp_path, capsys):

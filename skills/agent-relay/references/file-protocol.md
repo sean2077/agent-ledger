@@ -411,6 +411,8 @@ later.
   `pair` (active pair slug if resolvable, else null), `severity` (`minor`/`major`),
   `area` (`cli`/`hooks`/`docs`/`protocol`/`tests`/`build`/`other`),
   `title`, `status` (`open`/`resolved`), `resolved_at`, `resolution`.
+  Readers accept legacy issue files that used `session` for this pair context
+  field, but new writes use `pair`.
 - **Mutability**: unlike published pair artifacts, issues are a
   mutable tracker — `relay issue resolve` rewrites the file in place.
   They carry no `.ready`/`.sha256` sidecars and are not append-only.

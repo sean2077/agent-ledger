@@ -2967,6 +2967,8 @@ def _read_issue(path: Path) -> Optional[tuple[dict, str]]:
         fm, body = parse_frontmatter(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if "pair" not in fm and "session" in fm:
+        fm["pair"] = fm.get("session")
     return fm, body
 
 
@@ -3068,11 +3070,11 @@ def cmd_issue_add(args) -> int:
 
     env = load_env()
     # Best-effort pair context — issues can be filed with no active pair.
-    session_id = None
+    pair_id = None
     try:
-        session_id = resolve_active_pair(env).name
+        pair_id = resolve_active_pair(env).name
     except SystemExit:
-        session_id = None
+        pair_id = None
 
     d = _ensure_issues_dir()
     body_text = body.strip() or title
@@ -3086,7 +3088,7 @@ def cmd_issue_add(args) -> int:
         issue_id = _issue_id()
         fm = {
             "id": issue_id, "created": created, "reporter": reporter,
-            "project": project, "session": session_id,
+            "project": project, "pair": pair_id,
             "severity": severity, "area": area, "title": title,
             "status": "open", "resolved_at": None, "resolution": None,
         }
