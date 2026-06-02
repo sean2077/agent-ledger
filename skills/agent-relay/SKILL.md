@@ -120,7 +120,7 @@ Interpret the `action` field (the CLI does the mechanical decision; you only han
 | `full` | pair(s) exist but none joinable (full, or already hold a same-author instance) | tell the user; offer to `bootstrap` a new pair or wait |
 | `degraded` | your agent session id is unresolvable (no platform id / tty / atuin), so auto-binding can't be done safely | **ask the user** to pass `--pair-id <slug>` per command, or `export RELAY_AGENT_SESSION_ID=<stable per-window value>` |
 
-`relay whoami` shows your instance id (`<author>:<short-session-id>`) and current binding. Same-agent pairs (claude+claude) are not supported — `ensure` excludes them. Only `choose` / `bootstrap` / `full` / `degraded` interrupt the user; `use` / `joined` proceed silently.
+`relay whoami` shows your instance id (`<author>:<short-session-id>`) and current binding; `relay pair show` focuses on the pair — this session's bound pair, its peer, and the exact `relay pair join <slug>` command the peer runs to pair with you (precise pairing). Same-agent pairs (claude+claude) are not supported — `ensure` excludes them. Only `choose` / `bootstrap` / `full` / `degraded` interrupt the user; `use` / `joined` proceed silently.
 
 ## Decide intent from user input
 
@@ -237,11 +237,11 @@ This is the core 95% case. Take one full turn in the relay.
     - One-line summary: what was published, where, sync state.
     - The 2-3 **key open questions** from your `prompt_for_next` — surface them at user-level so they see the decisions without opening the artifact.
     - An explicit fork — let the user pick the next step. Each option must include the **concrete next command/window** the user runs, not a vague "wait" or "do":
-      - **(a) cross-review** — hand off to the peer agent. Tell the user literally where to go and what to type:
-        - If peer is `codex` (on host): "Switch to your codex CLI and run `$agent-relay`."
-        - If peer is `claude` (on remote / Claude Code): "Switch to Claude Code and run `/agent-relay`."
-        - If peer is `gpt55` or another agent: name the runtime and the exact command.
-        This is the default safeguard.
+      - **(a) cross-review** — hand off to the peer agent. **Name which pair** so the peer binds to the exact one — run `"$RELAY" pair show` to get the slug + the peer's join command — then tell the user literally where to go and what to type:
+        - If peer is `codex` (on host): "Switch to your codex CLI and run `relay pair join <slug>` then `$agent-relay`."
+        - If peer is `claude` (on remote / Claude Code): "Switch to Claude Code and run `relay pair join <slug>` then `/agent-relay`."
+        - If peer is `gpt55` or another agent: name the runtime, the pair slug, and the exact command.
+        (With a single active pair the peer's `pair ensure` auto-joins; naming the pair keeps pairing precise once several exist.) This is the default safeguard.
       - **(b) execute immediately** — skip peer review; this agent implements the proposals now in the current window. Use when scope is small, well-defined, and the user trusts the call. Record what was executed in a follow-up `kind: decision` or in the next turn's body — "execute" never means "no record".
       - **(c) discuss further** — stay in the current window and talk it through with the user before anything else moves.
     - **Stop and wait for user reply.** Do not silently invoke another tool, claim, or start work on (b) until the user confirms.
@@ -278,7 +278,7 @@ Run this when starting a new relay pair, **not** when continuing an existing one
 
 Pairs are flat directories at `.shared/<pair-slug>/` (slug `YYYYMMDD-<topic>`). The project slug is metadata in `session.json`, not a parent directory.
 
-After bootstrap, immediately do `handoff` to write the first artifact (typically `kind: plan` or `kind: question`).
+After bootstrap, **tell the user the pair name and how the peer joins it** — `bootstrap` prints the slug and the exact `relay pair join <slug>` command, and `"$RELAY" pair show` reprints it anytime. Surface this prominently so the user can point the other agent at the *exact* pair (precise pairing matters once more than one pair exists). Then immediately do `handoff` to write the first artifact (typically `kind: plan` or `kind: question`).
 
 `relay bootstrap` creates a new pair and binds you to it. If you're already bound to an active pair, **do not bootstrap silently** — continue it or close it first. To intentionally run a second pair in parallel, use `relay bootstrap --force` (it binds you to the new pair; your old binding moves). `relay pairs list` shows all pairs.
 
@@ -293,6 +293,7 @@ After bootstrap, immediately do `handoff` to write the first artifact (typically
 "$RELAY" status --pair-id 20260527-topic
 "$RELAY" pairs list        # recovery/discovery; all pairs + bound instances + open slots
 "$RELAY" whoami            # your instance id + current pair binding
+"$RELAY" pair show         # this session's pair + the peer's exact `pair join` command
 "$RELAY" pair ensure       # smart-resolve / auto-bind (see "Resolve your pair")
 ```
 

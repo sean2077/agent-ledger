@@ -78,8 +78,8 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay init [--same-host] [--sync rsync] [--author X]` | Idempotent first-run setup (shared root + sentinel). Same-host claude+codex is **zero-config**; only the rsync owner needs flags. |
 | `relay preflight` | Health gate: identity, mount, project, FS atomicity probes, and schema compatibility diagnostics (`unsupported_schema` is reported, not fixed). Exit 0 ok / 1 blocking-warn / 2 fail. Run every turn. |
 | `relay whoami` | This instance's resolved identity (author + source), session id, bound pair, derived peer, diagnostics, and schema compatibility diagnostics. |
-| `relay bootstrap --topic <slug> [--peer <name>]` | Create + bind a new pair. claude/codex auto-derive the peer; custom agents pass `--peer`. |
-| `relay pair ensure \| join <slug> \| leave` | Resolve / pick / drop this instance's pair binding. |
+| `relay bootstrap --topic <slug> [--peer <name>]` | Create + bind a new pair. claude/codex auto-derive the peer; custom agents pass `--peer`. Announces the pair name + the peer's exact `pair join <slug>` command so the other agent pairs precisely. |
+| `relay pair ensure \| join <slug> \| leave \| show` | Resolve / pick / drop this instance's pair binding. `show` prints this session's bound pair, peer, and the exact `pair join <slug>` command the peer runs (precise pairing; `--json` for automation). |
 | `relay pairs list [--archived]` | Discovery: all pairs (or, with `--archived`, the archived ones), bound instances, open slots, and `unsupported_schema` categories. |
 | `relay pairs archive <slug> [--force] \| --terminated` | Move terminated pair dir(s) into `.shared/_archive/` to declutter the top level. `--force` shelves an active pair (drops its bindings); `--terminated` sweeps all closed/terminal pairs. |
 | `relay pairs restore <slug>` | Move an archived pair back to `.shared/` (state unchanged — closed stays closed, shelved-active stays active; never auto-rebinds). |

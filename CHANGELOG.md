@@ -4,6 +4,35 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.1.0 — 2026-06-02
+
+Pair-name visibility for precise pairing: make it obvious, from either side,
+which pair a session is in and how the peer joins the *exact* same one.
+
+### New
+
+- `relay pair show [--json]` — prints this session's bound pair, its peer, and
+  the exact `relay pair join <slug>` command the peer runs to pair with it. Reads
+  the binding directly, so it answers "which pair am I in?" at any lifecycle
+  stage (active, paused, or closed). `--json` for automation
+  (`{pair, author, peer, peer_join_cmd, bound, ...}`).
+- `relay bootstrap` now announces the pair name prominently and prints the
+  peer's `relay pair join <slug>` command, so the other agent can pair precisely
+  even when several pairs exist. (The human-readable label changed from
+  `session_id:` to `pair name:`; the on-disk `session.json.session_id` field is
+  unchanged.)
+
+### Changed
+
+- `SKILL.md`: the bootstrap flow surfaces the pair name to the user; the
+  cross-review hand-off names the pair (`relay pair join <slug>`) instead of a
+  bare "run agent-relay"; `relay pair show` is documented alongside `whoami`.
+
+### Compatibility
+
+- Additive, no schema bump (file-protocol.md §15.2): a new read-only command and
+  richer human output; no on-disk surface changes.
+
 ## 1.0.1 — 2026-06-02
 
 Post-1.0 maintenance: close the `timed_out` resume edge that 0.19.0 deferred
