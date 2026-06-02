@@ -53,7 +53,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
@@ -911,9 +911,66 @@ def git_toplevel(start: Path | None = None) -> Optional[Path]:
         return None
 
 
+def main_worktree(start: Path | None = None) -> Optional[Path]:
+    """The MAIN worktree root — the stable LEDGER anchor across a repo's worktrees.
+
+    A linked worktree's `git rev-parse --show-toplevel` (git_toplevel) points at
+    the worktree itself, which would split the ledger: an agent in the main
+    checkout and one in a linked worktree would each resolve a different
+    `<top>/.shared` and never see each other. Anchoring the *ledger* (shared
+    root, project slug, binding namespace, init, preflight shared-root check) to
+    the main worktree makes every agent in the worktree family converge on ONE
+    `.shared/` — no RELAY_SHARED_ROOT change, no relocating the peer.
+
+    This is the LEDGER anchor, NOT the content root. `relay sync` and shape-A
+    detection deliberately stay on git_toplevel() (the checkout whose files are
+    synced); main-anchoring them would push stale main-tree content to the remote
+    and recreate the very content-split this avoids.
+
+    `git worktree list --porcelain` lists the main worktree first. If that first
+    record is `bare` (a bare backing repo, not a usable checkout) we fall back to
+    git_toplevel() rather than implicitly anchoring `.shared` inside a bare repo.
+    A missing git binary, non-zero exit (pre-`worktree` git, not a repo), or an
+    unparseable record also falls back, so non-worktree and legacy setups behave
+    exactly as before (the main worktree IS `--show-toplevel` with no links).
+    """
+    start = start or Path.cwd()
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(start), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return git_toplevel(start)
+    if res.returncode != 0:
+        return git_toplevel(start)
+    # Porcelain records are blank-line separated; the FIRST record is the main
+    # worktree. Parse only that record: its `worktree <path>` line and whether it
+    # carries the standalone `bare` attribute.
+    first_path: Optional[str] = None
+    first_is_bare = False
+    for line in res.stdout.splitlines():
+        if line.startswith("worktree "):
+            if first_path is not None:
+                break  # second record begins; first record fully parsed
+            first_path = line[len("worktree "):].strip()
+        elif line.strip() == "bare" and first_path is not None:
+            first_is_bare = True
+        elif not line.strip() and first_path is not None:
+            break  # blank line ends the first record
+    if not first_path or first_is_bare:
+        return git_toplevel(start)
+    return Path(first_path).resolve()
+
+
 def default_shared_root(start: Path | None = None) -> Optional[Path]:
-    """Project-local shared root used when RELAY_SHARED_ROOT is not exported."""
-    top = git_toplevel(start)
+    """Project-local shared root used when RELAY_SHARED_ROOT is not exported.
+
+    Anchored to the MAIN worktree (see main_worktree) so an agent in a linked
+    worktree shares the same `.shared/` as one in the main checkout — no
+    RELAY_SHARED_ROOT change, no relocating the peer.
+    """
+    top = main_worktree(start)
     if top is None:
         return None
     return (top / ".shared").resolve()
@@ -981,7 +1038,9 @@ def sanitize_project_slug(raw: str) -> str:
 def derive_project(env: Env) -> Optional[str]:
     if env.project:
         return env.project
-    top = git_toplevel()
+    # Ledger anchor (main worktree), so the project slug is identical whether the
+    # agent runs from the main checkout or a linked worktree.
+    top = main_worktree()
     if not top:
         return None
     return sanitize_project_slug(top.name) or None
@@ -1718,7 +1777,8 @@ def cmd_preflight(args) -> int:
     #            inapplicable; RELAY_REMOTE_SSH / RELAY_REMOTE_PATH irrelevant.
     #   shape B: PROJECT_ROOT is local; only .shared/ may be mounted.
     is_shape_a = False
-    project_root = git_toplevel()
+    project_root = git_toplevel()        # CONTENT root: the checkout being synced
+    ledger_anchor = main_worktree()      # LEDGER anchor: stable across worktrees
     if project_root is not None:
         is_shape_a = _is_fuse_mount(project_root)
 
@@ -1855,21 +1915,40 @@ def cmd_preflight(args) -> int:
                 "detail": "shape B (PROJECT_ROOT is local; rsync available if SYNC=rsync)",
             })
 
-    if env.shared_root and project_root is not None:
-        top = project_root.resolve()
+    if env.shared_root and ledger_anchor is not None:
+        top = ledger_anchor.resolve()
         try:
             env.shared_root.relative_to(top)
             out["checks"].append({
                 "name": "shared_root.location",
                 "status": "pass",
-                "detail": f"{env.shared_root} is under git toplevel {top}",
+                "detail": f"{env.shared_root} is under ledger anchor (main worktree) {top}",
             })
         except ValueError:
             out["checks"].append({
                 "name": "shared_root.location",
                 "status": "fail",
-                "detail": f"{env.shared_root} is outside git toplevel {top}",
+                "detail": f"{env.shared_root} is outside ledger anchor (main worktree) {top}",
             })
+
+    # Worktree awareness: when the agent operates from a LINKED worktree the
+    # ledger anchors to the main worktree (so the pair never splits) while the
+    # CONTENT lives in this worktree. Surface both — non-blocking (pass), a
+    # worktree is a valid place to work — so the agent states the worktree path
+    # to its peer and understands `relay sync` follows this content root.
+    if (project_root is not None and ledger_anchor is not None
+            and project_root.resolve() != ledger_anchor.resolve()):
+        out["checks"].append({
+            "name": "project.worktree",
+            "status": "pass",
+            "detail": (
+                f"operating from linked worktree {project_root.resolve()}; "
+                f"ledger anchored at main worktree {ledger_anchor.resolve()}. "
+                f"Tell your peer this worktree path (claim records it as "
+                f"worktree_root); `relay sync` follows this content root, "
+                f"not the anchor."
+            ),
+        })
 
     if env.shared_root:
         sentinel = env.shared_root / "_relay" / ".sentinel"
@@ -1884,7 +1963,9 @@ def cmd_preflight(args) -> int:
                                "detail": "RELAY_SHARED_ROOT not set"})
 
     declared = env.project
-    derived = git_toplevel()
+    # Ledger anchor (main worktree): the slug must match the shared-root anchor,
+    # not the linked worktree the agent happens to run from.
+    derived = main_worktree()
     derived_name = derived.name if derived else None
     # Finding 7: compare sanitized forms so an explicit RELAY_PROJECT that
     # matches the *valid slug grammar* of a dotted/underscored repo (e.g.
@@ -1898,7 +1979,7 @@ def cmd_preflight(args) -> int:
             "name": "project.consistency", "status": "fail",
             "detail": (
                 f"$RELAY_PROJECT={declared!r} (canonical {declared_canon!r}) "
-                f"vs git toplevel basename {derived_name!r} "
+                f"vs ledger anchor basename {derived_name!r} "
                 f"(canonical {derived_canon!r}); pick one"
             ),
         })
@@ -2052,7 +2133,10 @@ def _copy_envrc_dispatcher(project_root: Path) -> tuple[Path, bool]:
 
 def cmd_init(args) -> int:
     env = load_env()
-    project_root = git_toplevel()
+    # Ledger anchor (main worktree): init's `.shared` (via env.shared_root) and
+    # the optional rsync-owner .envrc belong with the canonical project, not a
+    # linked worktree.
+    project_root = main_worktree()
     root = env.shared_root
     if root is None:
         print("relay init: RELAY_SHARED_ROOT not set; either export it or run inside a git repo",
@@ -2391,6 +2475,7 @@ def cmd_status(args) -> int:
             "created": fm.get("created"),
             "in_reply_to": fm.get("in_reply_to"),
             "sync_needed": fm.get("sync_needed"),
+            "worktree_root": fm.get("worktree_root"),
             "corrects": fm.get("corrects"),
             "path": str(f.relative_to(session)),
             "first_line": first_line[:120],
@@ -2453,6 +2538,9 @@ def cmd_status(args) -> int:
                   f"{a['kind']:<11}  {a['path']}")
             if a["first_line"]:
                 print(f"       | {a['first_line']}")
+            if a.get("worktree_root"):
+                print(f"       worktree_root: {a['worktree_root']}  "
+                      f"(read/edit touched_paths here)")
     else:
         print("(no published artifacts yet)")
     if drafts:
@@ -2465,8 +2553,9 @@ def cmd_status(args) -> int:
 
 def _scaffold_frontmatter(author: str, peer: str, seq: int, kind: str,
                           in_reply_to: int | None,
-                          corrects: int | None = None) -> dict:
-    return {
+                          corrects: int | None = None,
+                          worktree_root: str | None = None) -> dict:
+    fm = {
         "seq": seq,
         "author": author,
         "peer": peer,
@@ -2477,8 +2566,15 @@ def _scaffold_frontmatter(author: str, peer: str, seq: int, kind: str,
         "prompt_for_next": "TODO: write actionable instructions for the peer\n",
         "sync_needed": False,
         "touched_paths": [],
-        "corrects": corrects,
     }
+    # Optional (narrow B): present only when the author works from a linked
+    # worktree (content root != ledger anchor). Absent otherwise, so normal
+    # artifacts stay byte-identical and 1.0 forward-read fixtures are unaffected.
+    # When present, relative touched_paths are resolved under worktree_root.
+    if worktree_root:
+        fm["worktree_root"] = worktree_root
+    fm["corrects"] = corrects
+    return fm
 
 
 # Test seam: the suite flips this to False (via monkeypatch on the module
@@ -2618,6 +2714,17 @@ def cmd_claim(args) -> int:
     draft_dir = session / ".draft"
     draft_dir.mkdir(exist_ok=True)
 
+    # Worktree awareness (narrow B): if the author runs from a LINKED worktree,
+    # record its absolute path so the peer reads/edits the right tree. Stamp ONLY
+    # when the content root differs from the ledger anchor; normal artifacts omit
+    # the field entirely (kept byte-identical for forward-read).
+    worktree_root = None
+    _content_root = git_toplevel()
+    _anchor = main_worktree()
+    if (_content_root is not None and _anchor is not None
+            and _content_root.resolve() != _anchor.resolve()):
+        worktree_root = str(_content_root.resolve())
+
     seq = latest_seq(session) + 1
     for attempt in range(10):
         if attempt > 0:
@@ -2628,7 +2735,7 @@ def cmd_claim(args) -> int:
             seq += 1
             continue
         fm = _scaffold_frontmatter(author, peer, seq, args.kind, args.in_reply_to,
-                                   corrects=corrects)
+                                   corrects=corrects, worktree_root=worktree_root)
         body = (
             f"\n# {args.kind} by {author}, seq {seq}\n\n"
             "<!-- write your substantive content here. delete this comment. -->\n"
@@ -3656,6 +3763,11 @@ def _gitignore_has_negation(repo: Path) -> bool:
 
 def cmd_sync(args) -> int:
     env = load_env()
+    # CONTENT root, deliberately NOT the ledger anchor (main_worktree): sync
+    # mirrors the checkout's files, so when the author runs from a linked
+    # worktree we push THAT worktree's content. Switching this to main_worktree()
+    # would sync stale main-tree files and recreate the content-split on the
+    # remote — do not "align" it with the ledger anchor.
     top = git_toplevel()
     if not top:
         print("relay sync: not in a git repo (need project root)", file=sys.stderr)
@@ -5216,6 +5328,8 @@ def cmd_whoami(args) -> int:
     bound = None
     derived_peer = None
     schema_error = None
+    content_root = git_toplevel()        # CONTENT root (where the agent runs)
+    ledger_anchor = main_worktree()      # LEDGER anchor (main worktree -> .shared)
     if env.author and env.agent_session_id and env.shared_root:
         try:
             b = read_binding(env.shared_root, env.author, env.agent_session_id)
@@ -5238,6 +5352,8 @@ def cmd_whoami(args) -> int:
         "derived_peer": derived_peer,
         "schema_error": schema_error,
         "diagnostics": env.identity_diagnostics,
+        "content_root": str(content_root) if content_root else None,
+        "ledger_anchor": str(ledger_anchor) if ledger_anchor else None,
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False))
@@ -5248,6 +5364,10 @@ def cmd_whoami(args) -> int:
     print(f"instance_id:       {env.instance_id or '(none)'}")
     print(f"bound_pair:        {bound or '(none)'}")
     print(f"derived_peer:      {derived_peer or '(none)'}")
+    if (content_root and ledger_anchor
+            and content_root.resolve() != ledger_anchor.resolve()):
+        print(f"content_root:      {content_root}  (linked worktree)")
+        print(f"ledger_anchor:     {ledger_anchor}  (main worktree -> .shared)")
     if schema_error:
         print(f"schema_error:      {schema_error['code']}: {schema_error['message']}")
     if env.identity_diagnostics:
