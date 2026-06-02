@@ -2,6 +2,7 @@
 
 > Source spec for the `relay` CLI implementation. v1.1.0; session schema v3.
 > The binding 1.0 frozen-contract and compatibility policy is in §15.
+> Security model and untrusted-peer policy: `docs/threat-model.md`.
 
 ## 1. Directory layout
 
@@ -247,6 +248,11 @@ Sequence allocation is internal: `relay claim` derives the next NNN as `max(seqs
 5. After exhausting 10 attempts, exit 2 with the `relay doctor` recovery hint.
 
 **Incomplete-triad invisibility.** Between step 2 and step 4 the `.md` exists on disk without its `.sha256`/`.ready` siblings. This partial state is **invisible to protocol-compliant readers**: `list_published()` (and everything that funnels through it — `status`, wait, pairs-list, latest-artifact helpers) returns a `.md` only when both `.ready` and `.md.sha256` exist AND the re-hashed `.md` matches the recorded digest. A reader MUST gate on `.ready` + sha256 match; it MUST NOT treat a bare `NNN-*.md` as published.
+
+The triad proves artifact completeness and content integrity for the local
+file protocol; it does not make peer text semantically safe or authoritative.
+Treat peer artifacts as untrusted operational input per `docs/threat-model.md`
+section 4.
 
 ### 7.2 No locks
 
