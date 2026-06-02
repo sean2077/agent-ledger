@@ -1876,7 +1876,7 @@ def _ensure_shared_root(root: Path) -> tuple[list[str], list[str]]:
 
     sentinel = relay_meta / ".sentinel"
     if not sentinel.exists():
-        atomic_write_text(sentinel, f"relay mount sentinel\ncreated_at: {now_iso()}\n", mode=0o644)
+        atomic_write_text(sentinel, f"relay mount sentinel\ncreated_at: {now_iso()}\n", mode=0o600)
         created.append(str(sentinel))
     else:
         existed.append(str(sentinel))
@@ -2161,7 +2161,7 @@ def cmd_bootstrap(args) -> int:
         f"Participants: {', '.join(participants) or '(none)'}\n\n"
         f"Use `relay status` to see current state, `relay claim` to start an artifact.\n"
     )
-    atomic_write_text(session_dir / "README.md", readme, mode=0o644)
+    atomic_write_text(session_dir / "README.md", readme, mode=0o600)
 
     print(f"created pair: {session_dir}")
     print(f"  project:      {proj}")
@@ -2749,8 +2749,8 @@ def cmd_publish(args) -> int:
             )
             continue
         digest = sha256_of_file(paths["md"])
-        atomic_write_text(paths["sha256"], f"{digest}  {paths['md'].name}\n", mode=0o644)
-        atomic_write_bytes(paths["ready"], b"", mode=0o644)
+        atomic_write_text(paths["sha256"], f"{digest}  {paths['md'].name}\n", mode=0o600)
+        atomic_write_bytes(paths["ready"], b"", mode=0o600)
         try:
             draft_path.unlink()
         except FileNotFoundError:
@@ -3243,7 +3243,7 @@ def cmd_close(args) -> int:
         f'closed_by = {json.dumps(env.author or "unknown")}\n'
         f'closed_at = {json.dumps(now_iso())}\n'
     )
-    atomic_write_text(sentinel, close_meta, mode=0o644)
+    atomic_write_text(sentinel, close_meta, mode=0o600)
 
     sj_path = session / "session.json"
     data = read_session_json(session)
