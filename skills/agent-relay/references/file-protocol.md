@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v1.2.1; session schema v3.
+> Source spec for the `relay` CLI implementation. v1.3.0; session schema v3.
 > The binding 1.0 frozen-contract and compatibility policy is in §15.
 > Security model and untrusted-peer policy: `docs/threat-model.md`.
 
@@ -125,7 +125,8 @@ corrects: null
 | `in_reply_to` | int \| null | no | seq of the artifact this responds to; default = seq-1 |
 | `prompt_for_next` | str (multiline) | yes | substantive instructions for peer; `publish` rejects placeholders like `"TODO: ..."` |
 | `sync_needed` | bool | yes | true if peer must `relay sync pull` (host) or wait for host to push (remote) before acting |
-| `touched_paths` | str[] | no | list of non-`.shared` paths the author modified |
+| `touched_paths` | str[] | no | list of non-`.shared` paths the author modified; resolve relative entries per §4.4 (under `worktree_root` if present) |
+| `worktree_root` | str (abs path) | no | present **only** when the author wrote from a git linked worktree (content root ≠ ledger anchor); auto-stamped by `relay claim`. Absent for normal artifacts. See §4.4 |
 | `corrects` | int \| null | no | seq of the artifact this corrects (forward-only); see §6 |
 | `force_reason` | str | no | present iff publish used `--force`; explains the override reason |
 
@@ -167,6 +168,38 @@ Free-form short ASCII, but the well-known values are:
 - `timed_out` is a **pause**. It is the documented user-blocking escalation (publish a `@user:` line with `--status timed_out`; the peer's `wait` exits 12 so it stops). Once the user answers, the round is **resumable in-thread**: `relay claim` / `publish` / `pair join` / `pair ensure` may supersede the `timed_out` latest with a new in-reply-to artifact — no `--force`. `session_is_resumable()` is the predicate.
 
 This is a **writer-side** distinction only. The on-disk `status` vocabulary and the frozen terminal set (§15.1) are unchanged — `timed_out` remains a terminal status, and a 1.0 reader still treats it as not-active (just more conservatively, never resuming). Resuming is a normal append (§6.2), not an edit.
+
+### 4.4 Ledger anchor vs content root (git worktrees)
+
+The **ledger anchor** is the *main worktree* of the repo: the default
+`RELAY_SHARED_ROOT` (`<main>/.shared`), the project slug, the binding namespace,
+and `init`/`preflight` shared-root validation all resolve there. The CLI finds
+it with `git worktree list --porcelain` (first record; a `bare` first record or
+any git error falls back to `git rev-parse --show-toplevel`). This is what lets
+an agent in the main checkout and an agent in a **linked worktree** share **one**
+ledger automatically — no `RELAY_SHARED_ROOT` change, no relocating either
+window. For a repo with no linked worktrees the anchor IS `--show-toplevel`, so
+nothing changes.
+
+The **content root** is the *current* worktree (`git rev-parse
+--show-toplevel`). It is deliberately **not** main-anchored: `relay sync` mirrors
+the checkout being pushed/pulled, and shape-A fuse detection probes the same
+checkout. Anchoring sync to the main worktree would push stale main-tree files
+and recreate the split on the remote.
+
+When the author's content root differs from the ledger anchor, `relay claim`
+records the content root as the artifact's `worktree_root` (§4.1). Resolving a
+peer's relative `touched_paths`:
+
+- **`worktree_root` present, same host:** open/edit `worktree_root/<touched_path>`
+  directly — no `cd`, no relocation.
+- **`worktree_root` absent:** the author wrote from the main worktree; resolve
+  under the **ledger anchor** (both sides compute it identically via
+  `main_worktree()`), exactly as before this field existed.
+- **Cross host (`RELAY_SYNC=rsync`):** an absolute `worktree_root` from the
+  author's host may not exist on the peer's; it is informational. `relay sync`
+  mirrors the author's *content root* to `RELAY_REMOTE_PATH`, so the peer syncs
+  first, then resolves relative `touched_paths` under its local synced root.
 
 ## 5. Pair-active rule (CLI must hard-code this)
 

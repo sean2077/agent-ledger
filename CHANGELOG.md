@@ -4,6 +4,48 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.3.0 — 2026-06-03
+
+Worktree robustness. Previously, if one agent operated from a git **linked
+worktree**, `relay` resolved a *different* `.shared/` (via
+`git rev-parse --show-toplevel`) than its peer in the main checkout — silently
+splitting the ledger so the pair never saw each other. This release anchors the
+ledger to the **main worktree** and records the authoring worktree in artifacts,
+so two agents share one ledger with no `RELAY_SHARED_ROOT` change and without
+relocating either window.
+
+### Added
+
+- `main_worktree()` resolves the stable **ledger anchor** (the main worktree)
+  via `git worktree list --porcelain`, falling back to `git_toplevel()` for
+  bare-backed first records, non-repos, missing git, or pre-`worktree` git.
+- Optional `worktree_root` frontmatter field, auto-stamped by `relay claim` only
+  when the author's content root differs from the ledger anchor (absent
+  otherwise). Relative `touched_paths` are interpreted under it when present.
+  Exposed in `relay status [--json]`.
+- `relay whoami` and `relay preflight` surface the content root vs ledger anchor
+  when they differ (preflight adds a non-blocking `project.worktree` check).
+
+### Changed
+
+- Ledger-anchoring call sites (`default_shared_root`, `derive_project`,
+  preflight `shared_root.location` + `project.consistency`, `cmd_init`) now use
+  the main worktree. Behavior is byte-identical for repos without linked
+  worktrees (the main worktree IS `--show-toplevel`).
+- `relay sync` deliberately stays on the **content root** (current worktree):
+  sync mirrors the checkout being pushed/pulled, so a worktree author syncs that
+  worktree's files — anchoring sync to the main worktree would push stale
+  main-tree content and recreate the split on the remote.
+
+### Compatibility
+
+- Additive, **no schema bump** (frozen contract §15.2: new optional frontmatter
+  field old readers ignore). 1.0 fixtures forward-read unchanged. Explicit
+  `RELAY_SHARED_ROOT` still wins. Cross-host caveat: a `worktree_root` absolute
+  path from host A may not exist on host B — same-host peers open it directly;
+  cross-host peers sync first, then read relative `touched_paths` under the
+  remote content root.
+
 ## 1.2.1 — 2026-06-02
 
 Patch release for the timed-out wait/resume deadlock and the sshfs ready-sidecar

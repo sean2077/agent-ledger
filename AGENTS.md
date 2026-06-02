@@ -122,7 +122,7 @@ Env vars, all optional in the common case:
 
 | Var | Meaning | Default |
 |---|---|---|
-| `RELAY_SHARED_ROOT` | ledger root | `<git toplevel>/.shared` |
+| `RELAY_SHARED_ROOT` | ledger root | `<main-worktree toplevel>/.shared` |
 | `RELAY_SYNC` | `none` or `rsync` (rsync owner only) | `none` |
 | `RELAY_REMOTE_SSH` / `RELAY_REMOTE_PATH` | rsync transport (rsync owner) | unset |
 | `RELAY_AUTHOR` | author override for custom agents | auto-detected |
@@ -133,6 +133,18 @@ init --same-host` just confirms it). The rsync owner runs `relay init --sync
 rsync` and fills the two remote vars. `direnv`/`.envrc` is optional, only for
 the rsync side. (The pre-v0.14 per-terminal `export RELAY_AUTHOR` dance and the
 `envrc.same-host.example` template are retired.)
+
+**Ledger anchor vs content root (git worktrees).** The default ledger root
+anchors to the repo's **main worktree** (via `git worktree list --porcelain`),
+*not* the current checkout — so an agent in a linked worktree shares the **same**
+`.shared/` as one in the main checkout, with no `RELAY_SHARED_ROOT` change and
+without relocating the peer. The **content root** (current `git_toplevel()`) is a
+separate concept used by `relay sync` and shape-A detection: sync mirrors the
+checkout you're in, so a worktree author syncs *that* worktree's files (anchoring
+sync to main would push stale content). When the two differ, `relay claim`
+stamps the artifact's `worktree_root` and `whoami`/`preflight` surface both;
+relative `touched_paths` are read under `worktree_root`. Full semantics:
+`references/file-protocol.md` §4.4.
 
 ## 6. The handoff loop (how a turn works)
 
