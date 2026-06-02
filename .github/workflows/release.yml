@@ -1,0 +1,68 @@
+name: relay release
+
+# Tag-driven release. Pushing a `vX.Y.Z` tag runs a consistency gate
+# (tag == relay __version__ == a CHANGELOG section) and, if it passes,
+# publishes a GitHub Release whose notes are the CHANGELOG section and whose
+# only asset is the single-file `relay` (drop-on-any-host). The gate is the
+# automated guard against the version-drift class (e.g. tag ahead of
+# __version__ / missing CHANGELOG entry).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # required for `gh release create`
+
+jobs:
+  release:
+    name: release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and version
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME}"      # e.g. v1.2.0
+          ver="${tag#v}"                # e.g. 1.2.0
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'ver=%s\n' "$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Gate — tag matches relay __version__
+        run: |
+          code_ver="$(python3 -c "import re;print(re.search(r'__version__ = \"([^\"]+)\"', open('skills/agent-relay/bin/relay').read()).group(1))")"
+          if [ "$code_ver" != "${{ steps.ver.outputs.ver }}" ]; then
+            echo "::error::tag ${{ steps.ver.outputs.tag }} does not match relay __version__ ($code_ver)"
+            exit 1
+          fi
+          echo "version gate ok: $code_ver"
+
+      - name: Gate — CHANGELOG section exists; extract release notes
+        run: |
+          ver="${{ steps.ver.outputs.ver }}"
+          if ! grep -qE "^## ${ver}( |\$|—)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## ${ver}' section"
+            exit 1
+          fi
+          awk -v ver="$ver" '
+            $0 ~ "^## " ver "( |$|—)" {inb=1; next}
+            inb && /^## / {exit}
+            inb {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::extracted release notes are empty for ${ver}"
+            exit 1
+          fi
+          echo "changelog gate ok"
+
+      - name: Create GitHub Release (single-file relay asset)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp skills/agent-relay/bin/relay relay
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --notes-file RELEASE_NOTES.md \
+            relay

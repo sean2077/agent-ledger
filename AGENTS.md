@@ -193,6 +193,10 @@ the rsync side. (The pre-v0.14 per-terminal `export RELAY_AUTHOR` dance and the
 
 - **Run:** `python -m pytest -q` (or `.venv/bin/pytest`). All tests must pass
   before you call work done; state failures honestly with output.
+- **Release:** push a `vX.Y.Z` tag only on a commit that already contains the
+  matching `__version__` and `CHANGELOG.md` section. The tag-driven release
+  workflow verifies that consistency and publishes the single-file `relay` as
+  the release asset.
 - **Layout:** one `tests/test_relay_<area>.py` per area. `conftest.py` loads the
   extensionless `bin/relay` as a module **and** has an autouse fixture clearing
   `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` so the host platform signal can't
