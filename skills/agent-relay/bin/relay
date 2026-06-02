@@ -53,7 +53,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
@@ -2165,8 +2165,12 @@ def cmd_bootstrap(args) -> int:
 
     print(f"created pair: {session_dir}")
     print(f"  project:      {proj}")
-    print(f"  session_id:   {session_slug}")
+    print(f"  pair name:    {session_slug}")
     print(f"  participants: {', '.join(participants) or '(none)'}")
+    print(f"  you:          {author}  (bound to this pair)")
+    print(f"► tell your peer ({peer}) to join THIS exact pair — precise pairing:")
+    print(f"      relay pair join {session_slug}")
+    print(f"  then run agent-relay on the {peer} side. (`relay pair show` reprints this anytime.)")
     return 0
 
 
@@ -5091,6 +5095,61 @@ def cmd_whoami(args) -> int:
     return 0
 
 
+def cmd_pair_show(args) -> int:
+    """Show THIS session's pair binding and the exact command the peer uses to
+    join the same pair. The quick "which pair am I in / how does my peer pair
+    with me precisely" affordance — callable anytime, complements `relay whoami`
+    and `relay pairs list`. Reads the binding directly, so it reports the pair
+    even when it is paused (`timed_out`) or closed."""
+    env = load_env()
+    try:
+        root = session_root(env)
+    except SystemExit as exc:
+        print(f"relay pair show: {exc}", file=sys.stderr)
+        return 2
+    bound = None
+    peer = None
+    schema_error = None
+    if env.author and env.agent_session_id:
+        try:
+            b = read_binding(root, env.author, env.agent_session_id)
+        except SchemaVersionError as exc:
+            b = None
+            schema_error = exc.to_dict()
+        bound = b.get("pair_slug") if b else None
+        if bound and (root / bound / "session.json").exists():
+            try:
+                peer = resolve_peer(root / bound, env.author)
+            except SchemaVersionError as exc:
+                schema_error = exc.to_dict()
+    join_cmd = f"relay pair join {bound}" if bound else None
+    payload = {
+        "pair": bound,
+        "author": env.author,
+        "peer": peer,
+        "instance_id": env.instance_id,
+        "peer_join_cmd": join_cmd,
+        "bound": bound is not None,
+        "schema_error": schema_error,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    if not bound:
+        print("pair:    (none — this session is not bound to a pair)")
+        print("         run `relay pair ensure` to bind, or `relay bootstrap "
+              "--topic <slug>` to start one.")
+        return 0
+    print(f"pair:    {bound}")
+    print(f"you:     {env.author or '(unset)'}  (instance {env.instance_id or '(none)'})")
+    print(f"peer:    {peer or '(unresolved)'}")
+    print(f"► your peer ({peer or 'the other agent'}) joins THIS exact pair with:")
+    print(f"      {join_cmd}")
+    if schema_error:
+        print(f"schema_error: {schema_error['code']}: {schema_error['message']}")
+    return 0
+
+
 def cmd_pair_join(args) -> int:
     env = load_env()
     try:
@@ -5407,8 +5466,9 @@ def build_parser() -> argparse.ArgumentParser:
     ppr.set_defaults(func=cmd_pairs_restore)
 
     ppair = sub.add_parser("pair",
-        help="Bind this instance to a pair (join), drop the binding (leave), or "
-             "smart-resolve which pair to work in (ensure).")
+        help="Bind this instance to a pair (join), drop the binding (leave), "
+             "smart-resolve which pair to work in (ensure), or show this "
+             "session's pair + the peer's join command (show).")
     pair_sub = ppair.add_subparsers(dest="pair_cmd", required=True)
     pj = pair_sub.add_parser("join", help="Bind this instance to <slug>.")
     pj.add_argument("slug", help="Pair slug (YYYYMMDD-topic).")
@@ -5426,6 +5486,13 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--agent-session-id", default=None,
         help="Override agent session id for instance resolution (used by hooks).")
     pe.set_defaults(func=cmd_pair_ensure)
+    psh = pair_sub.add_parser("show",
+        help="Show this session's bound pair + the exact `pair join` command the "
+             "peer uses to pair with it (precise pairing).")
+    psh.add_argument("--json", action="store_true")
+    psh.add_argument("--agent-session-id", default=None,
+        help="Override agent session id for instance resolution (used by hooks).")
+    psh.set_defaults(func=cmd_pair_show)
 
     psync = sub.add_parser("sync", help="rsync wrapper (only the RELAY_SYNC=rsync side may run it).")
     psync.add_argument("direction", choices=["push", "pull"])
