@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v1.0.0; session schema v3.
+> Source spec for the `relay` CLI implementation. v1.0.1; session schema v3.
 > The binding 1.0 frozen-contract and compatibility policy is in §15.
 
 ## 1. Directory layout
@@ -150,9 +150,16 @@ Free-form short ASCII, but the well-known values are:
 | `closed` | this artifact concluded by author | **terminal** (no peer action expected) | ✓ (e.g., final decision) |
 | `cancelled` | author/user withdrew | **terminal** | ✓ |
 | `failed` | author or peer recorded that the artifact or requested work is broken and should not continue | **terminal** | ✓ |
-| `timed_out` | long elapsed time without peer response | **terminal** | ✓ |
+| `timed_out` | long elapsed time without peer response, **or** a deliberate user-blocking pause (`@user:` escalation) | **terminal for read** (peer stops waiting); **resumable** by the write path | ✓ |
 
 **All four terminal statuses (`closed`/`cancelled`/`failed`/`timed_out`) signal that THIS artifact no longer requires peer response.** A local `relay publish` validation failure leaves the draft in place and does not create a `failed` artifact.
+
+**Hard-terminal vs resumable (write path).** All four are terminal for *reading*: `relay wait` exits 12, `session_is_active` is false, and discovery / `relay status` report the pair not-active. For *writing*, they split:
+
+- `closed` / `cancelled` / `failed` are **hard-terminal** — the pair is over. `relay claim` / `publish` fail closed; appending a terminal note needs the `--force` escape hatch (§8).
+- `timed_out` is a **pause**. It is the documented user-blocking escalation (publish a `@user:` line with `--status timed_out`; the peer's `wait` exits 12 so it stops). Once the user answers, the round is **resumable in-thread**: `relay claim` / `publish` / `pair join` / `pair ensure` may supersede the `timed_out` latest with a new in-reply-to artifact — no `--force`. `session_is_resumable()` is the predicate.
+
+This is a **writer-side** distinction only. The on-disk `status` vocabulary and the frozen terminal set (§15.1) are unchanged — `timed_out` remains a terminal status, and a 1.0 reader still treats it as not-active (just more conservatively, never resuming). Resuming is a normal append (§6.2), not an edit.
 
 ## 5. Pair-active rule (CLI must hard-code this)
 
@@ -169,6 +176,20 @@ pair is active ⟺
 "Latest published file" = highest `seq` among `*.md` files with companion `.ready` sentinel.
 
 `relay status` evaluates this; `relay close` independently can move the pair to closed via state transition or sentinel.
+
+**Resumable carve-out (write/bind path).** The rule above defines `session_is_active`, used by `relay wait` (peer stops waiting), discovery (`active_pair_dirs`), and reporting. The write/bind path — `relay claim`, `relay publish`, `relay pair join`, `relay pair ensure` — instead uses `session_is_resumable`, identical EXCEPT a `timed_out` latest is treated as still open:
+
+```
+pair is resumable ⟺
+    session.json.state == "active"
+    AND no CLOSED sentinel file exists in pair dir
+    AND (
+        no published files yet
+        OR latest published file's status NOT IN {closed, cancelled, failed}   # note: timed_out omitted
+    )
+```
+
+This lets an agent resume the documented user-blocking pause after the user answers, without resurrecting a hard-terminal (`closed`/`cancelled`/`failed`) pair. A *paused* pair also KEEPS its instance bindings — they are GC'd only when the pair is truly dead (gone, or hard-terminal/closed), never on a mere `timed_out` — so a passive `relay status --require-binding` resolve (e.g. the Stop hook) reports the pair not-active yet never strands the round.
 
 If more than one pair is active, `relay status`, `relay claim`, and `relay close` without `--pair-id` (and without a resolvable instance binding) refuse. `relay pairs list` is the discovery fallback and must not fail merely because zero or multiple pairs are active.
 

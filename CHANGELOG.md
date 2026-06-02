@@ -4,6 +4,42 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.0.1 — 2026-06-02
+
+Post-1.0 maintenance: close the `timed_out` resume edge that 0.19.0 deferred
+(issue 20260529T190821-0ec54be9).
+
+### Fixed
+
+- A `timed_out` round is now **resumable**. The skill tells a user-blocking
+  agent to publish `--status timed_out` with a `@user:` line; that status stays
+  terminal for *reading* (the peer's `relay wait` still exits 12 and stops), but
+  the write/bind path no longer treats it as a dead end. Once the user answers,
+  `relay claim` / `publish` / `pair join` / `pair ensure` supersede the
+  `timed_out` latest with a new in-reply-to artifact — no `--force`, no fresh
+  pair, in-thread continuity preserved. `closed` / `cancelled` / `failed` remain
+  hard-terminal (only a `--force` terminal note may append).
+- A *paused* (`timed_out`) pair now KEEPS its instance bindings. Binding GC is
+  decoupled from the active-check: a binding is dropped only when its pair is
+  truly dead (gone, or hard-terminal/closed), never on a mere pause. This closed
+  the latent half of the deadlock where a passive `relay status --require-binding`
+  resolve (the Stop hook, run every turn) garbage-collected the binding of a
+  timed-out pair and stranded the round. `relay publish --status timed_out` no
+  longer drops the publisher's own binding either.
+- `relay status` now reports `resumable: <bool>` (true only for a paused pair:
+  not active, `timed_out` latest, still writable) and prints a resume hint.
+
+### Compatibility
+
+- **No schema bump.** This is a writer-side relaxation: the on-disk `status`
+  vocabulary and the frozen terminal set (`file-protocol.md` §15.1) are
+  unchanged — `timed_out` is still a terminal status, and a 1.0 reader still
+  treats a `timed_out`-latest pair as not-active (it simply never resumes one).
+  Resuming is a normal append (§6.2), so a 1.0 reader parses a 1.0.1-written
+  ledger with no ambiguity. New predicate `session_is_resumable` backs the
+  write/bind path; `session_is_active` is unchanged for `wait`/discovery/report.
+  Spec: `file-protocol.md` §4.3 + §5.
+
 ## 1.0.0 — 2026-06-02
 
 The 1.0 protocol contract is frozen and binding.

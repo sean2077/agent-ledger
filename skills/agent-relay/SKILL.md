@@ -257,6 +257,7 @@ This is the part of the artifact that determines whether the peer can act effect
 - Note risks or open questions the peer should address.
 - If the next round needs a specific `kind`, say so: "Please respond with `kind: review`."
 - If you're blocking on user input, put the ask on its own line **starting with** `@user:` (the line-start marker is what triggers the surface — see step 10) and publish with `"$RELAY" publish "$DRAFT" --status timed_out`. Don't write `@user:` mid-sentence unless you actually intend to escalate; a line-start marker is the only form that counts, but keeping it off non-escalating lines avoids confusing future readers.
+  - **`timed_out` is a pause, not the end — it resumes.** It stops the peer's `wait` (exit 12) so nobody spins while the user is away, but the round is *not* dead. When the user answers, just claim the next artifact **in reply to the timed_out seq** and publish normally — `"$RELAY" claim --kind <k> --in-reply-to <timed_out-seq>` then `"$RELAY" publish "$DRAFT"` (no `--force`). `relay status` flags such a pair `resumable: yes`, and your binding survives the pause, so `relay pair ensure` keeps returning `use`. (Reserve `closed`/`cancelled`/`failed` for a *real* end — those are hard-terminal and only a `--force` terminal note can append to them.)
 
 Avoid:
 - Vague verbs without context ("review this", "improve that").
