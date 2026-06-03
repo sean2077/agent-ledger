@@ -4,6 +4,49 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.4.0 — 2026-06-03
+
+Statusline. A new `relay statusline` renders a compact, glanceable
+"which pair / whose turn" line for Claude Code's command-backed `statusLine`,
+plus a `--watch` dashboard for any terminal — including a tmux pane next to
+Codex CLI, whose native statusline takes only a fixed enum of built-in items and
+cannot run a command yet (openai/codex#20140 / #17827 / #20244). One primitive
+feeds every surface; it wires into Codex unchanged the moment upstream lands
+command-backed rendering.
+
+### Added
+
+- `relay statusline` — binding-scoped, **pure-read**, fail-quiet render of the
+  bound pair's state: your move / waiting / peer writing / peer stale / `@user`
+  pause / decision / terminal / fresh. `--json` emits structured state with a
+  plain `text` line; `--watch [--interval N]` repaints in place until Ctrl-C;
+  `--pair-id` pins a specific pair; color honors `--no-color` / `NO_COLOR`. The
+  Claude `statusLine` payload's `session_id` (on stdin) drives binding-scoped
+  identity, the same way the hook dispatcher reads it.
+- `relay statusline install | uninstall | doctor` — wires `relay statusline`
+  into Claude Code's `settings.json`. Because `statusLine` is a single slot
+  (unlike the hook arrays), install **never clobbers** an existing user
+  statusline: it refuses with a compose recipe, or `--force` replaces it.
+  Uninstall removes only the relay-managed entry. Claude-only (Codex has no
+  command-backed statusline yet).
+
+### Notes
+
+- The render path is a deliberate **pure read** (no `last_seen` bump, no GC): it
+  runs on a ~300ms cadence over a possibly-sshfs mount, and it is binding-scoped
+  like the Stop hook — an unbound window is never shown the lone active pair
+  (issue 20260601T182646-2920d5b9).
+- Fail-quiet is total: the stdin ingest is a **bounded `select` read** (a
+  half-open / no-payload pipe like `sleep 5 | relay statusline` can never block
+  the footer), and even a hard `SystemExit` from a helper (no shared root /
+  outside a repo) degrades to an empty line at exit 0 rather than a rc-2 error
+  in the bar.
+
+### Compatibility
+
+- Additive only. No session/binding schema change; no change to existing
+  commands, artifacts, or sidecars. Skipping the new command is a no-op.
+
 ## 1.3.0 — 2026-06-03
 
 Worktree robustness. Previously, if one agent operated from a git **linked

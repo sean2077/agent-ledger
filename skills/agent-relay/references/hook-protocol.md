@@ -270,6 +270,9 @@ These are explicitly **not** done by the hook layer in this version:
 
 - `relay sync push` / `relay close` automation (require user confirmation).
 - `relay claim` / `relay publish` automation (require agent content judgment).
-- Statusline integration (use `tail -f hook-trail.log` for now).
+- Statusline integration is **not** a hook concern: `relay statusline` (v1.4.0)
+  is a standalone command-backed surface for Claude Code's `statusLine` and a
+  `--watch` dashboard elsewhere. The hook layer only emits `[relay-state]` /
+  `[relay-action]` lines + the `hook-trail.log` it always has.
 - Rewriting `relay-hook.py` as an `oh-my-codex` plugin (chose append-after
   coexistence instead).

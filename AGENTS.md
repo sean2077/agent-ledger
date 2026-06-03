@@ -94,6 +94,8 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay heartbeat start\|stop\|tick` | Liveness daemon for a draft (see §7). |
 | `relay doctor [--fix]` | Read-only ledger diagnosis; `--fix` cleans owner-safe junk, including old incomplete publish triads (never signals a live PID and never mutates unsupported-schema records). |
 | `relay hooks install\|uninstall\|doctor\|status` | Manage the optional autopilot hooks (§7). |
+| `relay statusline [--watch] [--json] [--pair-id X]` | Compact "which pair / whose turn" line. Binding-scoped + **pure-read** + fail-quiet render for Claude Code's `statusLine`; `--watch` is a live in-place dashboard for any terminal (incl. a pane next to Codex). |
+| `relay statusline install\|uninstall\|doctor` | Wire `relay statusline` into Claude's `settings.json` (claude-only; Codex has no command-backed statusline yet). `statusLine` is a single slot, so install **never clobbers** a user's own — it refuses with a compose recipe, or `--force` replaces. |
 | `relay issue add\|list\|show\|resolve` | Out-of-band feedback ledger for the *tool itself* (machine-local, never synced). |
 
 `kind` ∈ `plan | review | fix | note | question | decision | correction | addendum`.
@@ -200,6 +202,17 @@ relative `touched_paths` are read under `worktree_root`. Full semantics:
   never pulled into the lone active pair (issue 20260601T182646-2920d5b9). Every
   hook decision is appended to `.shared/_relay/hook-trail.log`. Spec:
   `references/hook-protocol.md`.
+- **Statusline (optional, v1.4.0).** `relay statusline` renders the bound pair's
+  state as one glanceable line (your move / waiting / peer writing / peer stale /
+  `@user` pause / decision / terminal). The render path is a deliberate **pure
+  read** — no `last_seen` bump, no GC — because it runs on a ~300ms cadence over
+  a possibly-sshfs mount; and it is **binding-scoped** exactly like the Stop
+  hook (an unbound window is never shown the lone active pair). `relay statusline
+  install` wires it into Claude Code's `statusLine` (claude-only — Codex has no
+  command-backed statusline yet, openai/codex#20140; there it stays on `relay
+  statusline --watch` in a side pane or the Stop hook's `[relay-state]` line).
+  Because `statusLine` is a single config slot, install never clobbers a user's
+  own statusline — it refuses with a compose recipe unless `--force`.
 
 ## 8. Testing & dev conventions
 
