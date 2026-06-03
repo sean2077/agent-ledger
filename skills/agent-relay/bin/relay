@@ -38,6 +38,7 @@ import json
 import os
 import random
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -53,7 +54,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
@@ -5570,6 +5571,479 @@ def cmd_pair_ensure(args) -> int:
         "candidates": [_pair_candidate(root, sd) for sd in joinable]}, rc=3)
 
 
+# ---------------------------------------------------------------------------
+# statusline subcommand — a compact, glanceable "which pair / whose turn" line.
+#
+# Surfaces it feeds (one primitive, three consumers):
+#   * Claude Code's command-backed `statusLine` (settings.json) — turnkey today.
+#   * `--watch`, an in-place dashboard for ANY terminal — incl. a tmux pane next
+#     to Codex CLI, whose native statusline takes only a fixed enum of built-in
+#     items and cannot run a command yet (openai/codex#20140 / #17827 / #20244).
+#   * the same `relay statusline` embedded as a segment in a user's own script.
+#
+# Design contract (mirrors the Stop hook's care — see resolve_active_pair):
+#   * binding-scoped + PURE READ. The render path resolves only THIS session's
+#     bound pair and NEVER mutates the ledger (no last_seen bump, no GC) — it
+#     runs on a ~300ms cadence over a (possibly sshfs) mount, so refreshing
+#     liveness or write-amplifying on every paint would be wrong. Unbound or a
+#     pair this session never joined => empty (issue 20260601T182646-2920d5b9:
+#     never surface a pair the session is not bound to).
+#   * fail-quiet. Any error prints nothing and exits 0; a statusline must never
+#     spew a traceback into the footer.
+# ---------------------------------------------------------------------------
+
+_SL_RESET = "\033[0m"
+
+# state -> (glyph, SGR color). All glyphs are single-width BMP symbols (NO emoji
+# / double-width chars), so the host's footer column math stays correct.
+_SL_STYLE = {
+    "your_move":  ("▸", "1;32"),  # ▸ bold green   — peer published; act
+    "waiting":    ("○", "2"),     # ○ dim          — you published; waiting
+    "peer_stale": ("!",      "1;31"),  # ! bold red     — peer heartbeat stale
+    "paused":     ("‖", "1;35"),  # ‖ bold magenta — timed_out / @user pause
+    "decision":   ("◆", "1;36"),  # ◆ bold cyan    — decision: a break
+    "closed":     ("✓", "2"),     # ✓ dim
+    "cancelled":  ("✗", "2"),     # ✗ dim
+    "failed":     ("✗", "1;31"),  # ✗ bold red
+    "fresh":      ("·", "2"),     # · dim          — pair has no artifacts
+    "neutral":    ("○", "2"),     # ○ dim          — watcher with no "me"
+}
+# States rendered with the whole body colored (high signal), not just the glyph.
+_SL_LOUD = {"your_move", "paused", "peer_stale", "failed"}
+
+
+def _sl_paint(text: str, code: str, enabled: bool) -> str:
+    return f"\033[{code}m{text}{_SL_RESET}" if (enabled and code) else text
+
+
+def _sl_short_pair(slug: str) -> str:
+    """Drop a leading 8-digit date prefix for brevity (20260603-foo -> foo)."""
+    if len(slug) > 9 and slug[:8].isdigit() and slug[8] == "-":
+        return slug[9:]
+    return slug
+
+
+def _sl_stale_threshold() -> int:
+    """Seconds before a peer renewal-file heartbeat reads as stale — reuse the
+    same env knob `relay wait` uses for its exit-11 escape."""
+    try:
+        return max(int(os.environ.get("RELAY_RENEWAL_STALE_THRESHOLD", "3600")), 60)
+    except (TypeError, ValueError):
+        return 3600
+
+
+# Hard wall on the stdin read (seconds). A real Claude statusLine payload is
+# ready instantly (select returns at once); this bound only bites a half-open /
+# no-payload pipe so the footer can NEVER hang. Comfortably under any 1s host
+# timeout — see test_statusline_never_hangs_on_half_open_stdin (codex seq 2).
+_SL_STDIN_DEADLINE = 0.5
+
+
+def _statusline_read_stdin_json():
+    """Best-effort read of a JSON payload from a PIPED stdin, with a hard
+    deadline so a half-open or no-payload pipe can never block the footer.
+
+    `sys.stdin.read()` blocks until EOF, so a writer that holds the pipe open
+    without closing (e.g. `sleep 5 | relay statusline`) hangs the process — the
+    isatty() guard does not help (a pipe is not a tty). So we poll the fd with
+    `select` against a wall and read only what is already available via
+    `os.read`, stopping at EOF, the deadline, or a size cap. Returns a dict or
+    None; any failure (tty, no select, not readable, partial/non-JSON) -> None."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        fd = sys.stdin.fileno()
+    except Exception:
+        return None
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + _SL_STDIN_DEADLINE
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            readable, _, _ = select.select([fd], [], [], remaining)
+            if not readable:
+                break  # nothing ready before the wall -> give up (no hang)
+            data = os.read(fd, 65536)
+            if not data:
+                break  # EOF: writer closed the pipe (the normal Claude case)
+            chunks.append(data)
+            total += len(data)
+            if total >= (1 << 20):  # 1 MiB cap; a statusLine payload is tiny
+                break
+    except Exception:
+        pass  # exotic fd / select unsupported -> fall through with what we have
+    if not chunks:
+        return None
+    try:
+        parsed = json.loads(b"".join(chunks).decode("utf-8", "replace"))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _statusline_ingest_stdin() -> None:
+    """Claude Code feeds the statusLine command a JSON payload on stdin
+    (session_id, cwd, workspace, model, ...). Map session_id ->
+    CLAUDE_CODE_SESSION_ID (drives BOTH author detection and the binding's
+    session id — a command-backed statusline payload can only come from Claude,
+    since Codex has none yet) and chdir into the workspace so the shared root
+    resolves. Best-effort + bounded (never blocks; see
+    `_statusline_read_stdin_json`)."""
+    data = _statusline_read_stdin_json()
+    if not data:
+        return
+    sid = data.get("session_id")
+    if isinstance(sid, str) and sid:
+        # setdefault: a real env signal wins (it matches anyway).
+        os.environ.setdefault("CLAUDE_CODE_SESSION_ID", sid)
+    ws = data.get("workspace")
+    ws = ws if isinstance(ws, dict) else {}
+    cwd = ws.get("current_dir") or ws.get("project_dir") or data.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        try:
+            os.chdir(cwd)
+        except OSError:
+            pass
+
+
+def _statusline_resolve(env, pair_id, strict):
+    """Read-only pair resolution for the statusline. Order: explicit --pair-id >
+    this instance's live binding > (non-strict only) the sole active pair. PURE
+    reads — never mutates a binding or GCs (unlike resolve_active_pair). Returns
+    a pair dir (even if closed/paused; the renderer reflects state) or None."""
+    try:
+        root = session_root(env)
+    except SystemExit:
+        return None
+    if not root.is_dir():
+        return None
+    if pair_id:
+        cand = root / pair_id
+        return cand if (cand / "session.json").exists() else None
+    if env.author and env.agent_session_id:
+        try:
+            b = read_binding(root, env.author, env.agent_session_id)
+        except Exception:
+            b = None
+        if b:
+            slug = b.get("pair_slug")
+            cand = root / slug if slug else None
+            if cand and (cand / "session.json").exists():
+                return cand
+    if strict:
+        return None
+    try:
+        actives = active_pair_dirs(root)
+    except Exception:
+        return None
+    return actives[0] if len(actives) == 1 else None
+
+
+def _statusline_state(session, env) -> dict:
+    """Structured statusline state for `session` from `env.author`'s POV. Always
+    returns a dict; pure reads. `author` may be None (a neutral watcher with no
+    platform identity) -> neutral framing."""
+    me = env.author
+    try:
+        peer = resolve_peer(session, me) if me else None
+    except Exception:
+        peer = None
+    try:
+        fm = latest_artifact_frontmatter(session)
+    except Exception:
+        fm = None
+    closed_sentinel = (session / "CLOSED").exists()
+    status = fm.get("status") if fm else None
+    kind = fm.get("kind") if fm else None
+    a_author = fm.get("author") if fm else None
+    a_peer = fm.get("peer") if fm else None
+
+    extra = None
+    if closed_sentinel or status in HARD_TERMINAL_STATUSES:
+        state = status if status in HARD_TERMINAL_STATUSES else "closed"
+    elif status == "timed_out":
+        state = "paused"
+    elif kind == "decision":
+        state = "decision"
+    elif fm is None:
+        state = "fresh"
+    elif me and a_author == me:
+        state = "waiting"
+        try:  # probe peer liveness only in the waiting branch (bounded cost)
+            if peer and _peer_heartbeat_is_stale(session, peer, _sl_stale_threshold()):
+                state = "peer_stale"
+            elif peer and _peer_has_renewal_file_heartbeat(session, peer):
+                extra = "peer writing"
+        except Exception:
+            pass
+    elif me and a_peer == me:
+        state = "your_move"
+    else:
+        state = "neutral"
+
+    return {
+        "bound": True,
+        "pair": session.name,
+        "peer": peer,
+        "me": me,
+        "state": state,
+        "seq": fm.get("seq") if fm else None,
+        "kind": kind,
+        "status": status,
+        "artifact_author": a_author,
+        "artifact_peer": a_peer,
+        "extra": extra,
+    }
+
+
+def _statusline_format(st: dict, color: bool) -> str:
+    """Render structured state to a single plain line (no trailing newline).
+    Empty string when there's nothing to show."""
+    if not st or not st.get("bound"):
+        return ""
+    state = st["state"]
+    glyph, code = _SL_STYLE.get(state, _SL_STYLE["neutral"])
+    pair = _sl_short_pair(st["pair"])
+    peer = st.get("peer") or "?"
+    seq = st.get("seq")
+    kind = st.get("kind") or ""
+    seqkind = (f"#{seq} {kind}".strip()) if seq is not None else ""
+    tail = f" · {seqkind}" if seqkind else ""
+
+    if state == "your_move":
+        body = f"{pair} ← {peer}  YOUR MOVE{tail}"
+    elif state in ("waiting", "peer_stale"):
+        label = "peer stale?" if state == "peer_stale" else "waiting"
+        body = f"{pair} → {peer}  {label}{tail}"
+        if st.get("extra"):
+            body += f" · {st['extra']}"
+    elif state == "paused":
+        body = f"{pair}  @user{tail}"
+    elif state == "decision":
+        body = f"{pair}  decision" + (f" · #{seq}" if seq is not None else "")
+    elif state in ("closed", "cancelled", "failed"):
+        body = f"{pair}  {state}"
+    elif state == "fresh":
+        body = f"{pair} → {peer}  new pair" if peer != "?" else f"{pair}  new pair"
+    else:  # neutral watcher (no resolved "me")
+        aa = st.get("artifact_author") or "?"
+        ap = st.get("artifact_peer") or "?"
+        stt = st.get("status") or ""
+        body = (f"{pair}  #{seq} {aa}→{ap} {kind} [{stt}]"
+                if seq is not None else f"{pair}  (no artifacts)")
+
+    glyph_p = _sl_paint(glyph, code, color)
+    body_p = _sl_paint(body, code, color) if state in _SL_LOUD else body
+    return f"{glyph_p} {body_p}".rstrip()
+
+
+def _statusline_color_enabled(args) -> bool:
+    if getattr(args, "no_color", False):
+        return False
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    return True
+
+
+def _statusline_once(args) -> int:
+    color = _statusline_color_enabled(args)
+    want_json = bool(getattr(args, "json", False))
+    try:
+        _statusline_ingest_stdin()
+        env = load_env()
+        session = _statusline_resolve(env, getattr(args, "pair_id", None), strict=True)
+        if session is None:
+            if want_json:
+                print(json.dumps({"bound": False, "pair": None,
+                                  "state": "unbound", "text": ""}, ensure_ascii=False))
+            return 0  # fail-quiet: empty footer line
+        st = _statusline_state(session, env)
+        if want_json:
+            st["text"] = _statusline_format(st, color=False)
+            print(json.dumps(st, ensure_ascii=False))
+            return 0
+        line = _statusline_format(st, color=color)
+        if line:
+            print(line)
+        return 0
+    except (Exception, SystemExit):
+        # A statusline must never crash the footer. Swallow + emit nothing.
+        # SystemExit too: helpers hard-exit on e.g. no shared root / not a repo,
+        # which for a footer must degrade to an empty line, not a rc-2 error.
+        # (KeyboardInterrupt stays a BaseException -> propagates for clean ^C.)
+        if want_json:
+            try:
+                print(json.dumps({"bound": False, "pair": None,
+                                  "state": "error", "text": ""}, ensure_ascii=False))
+            except Exception:
+                pass
+        return 0
+
+
+def _statusline_watch(args) -> int:
+    """Repaint a live line in place until Ctrl-C. An interactive dashboard for
+    any terminal, so it uses non-strict resolution (the sole active pair when
+    this terminal holds no binding) and shows a dim hint rather than a blank
+    line when nothing resolves. --pair-id pins a specific pair."""
+    color = _statusline_color_enabled(args)
+    try:
+        interval = max(int(getattr(args, "interval", None) or 2), 1)
+    except (TypeError, ValueError):
+        interval = 2
+    pair_id = getattr(args, "pair_id", None)
+    out = sys.stdout
+    try:
+        while True:
+            try:
+                env = load_env()
+                session = _statusline_resolve(env, pair_id, strict=False)
+                line = _statusline_format(_statusline_state(session, env), color) if session else ""
+                if not line:
+                    line = _sl_paint("relay · (no bound/active pair)", "2", color)
+            except (Exception, SystemExit):  # incl. no-shared-root hard-exit
+                line = _sl_paint("relay · (unavailable)", "2", color)
+            out.write("\r\033[2K" + line)
+            out.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        out.write("\n")
+        out.flush()
+        return 130
+
+
+def cmd_statusline(args) -> int:
+    if getattr(args, "watch", False):
+        return _statusline_watch(args)
+    return _statusline_once(args)
+
+
+# --- statusline install/uninstall/doctor (Claude Code settings.json) ---------
+# Claude's `statusLine` is a SINGLE slot (not an append-array like hooks), so an
+# install must never silently clobber a user's own statusline; it refuses and
+# prints a compose recipe instead (or --force to replace). Codex has no
+# command-backed statusline yet, so install is claude-only.
+
+
+def _statusline_render_command() -> str:
+    """The statusLine command, shell-quoted + PATH-independent (same robustness
+    as the hook command): absolute interpreter, and fail-open if the script is
+    gone so a missing relay never wedges the footer."""
+    py = shlex.quote(sys.executable)
+    script = shlex.quote(str(Path(__file__).resolve()))
+    return f"[ -f {script} ] || exit 0; exec {py} {script} statusline"
+
+
+def _statusline_segment_recipe() -> str:
+    return f"{shlex.quote(str(Path(__file__).resolve()))} statusline"
+
+
+def _statusline_is_managed(value) -> bool:
+    """A statusLine object is relay's if its command runs our `relay statusline`.
+    Detected by string shape (no foreign key injected into the host's config)."""
+    if not isinstance(value, dict):
+        return False
+    cmd = value.get("command", "")
+    return isinstance(cmd, str) and " statusline" in cmd and "relay" in cmd
+
+
+def cmd_statusline_install(args) -> int:
+    target = getattr(args, "target", "claude")
+    if target != "claude":
+        print("relay statusline install: only --target claude is supported.")
+        print("  Codex CLI's statusline takes a fixed set of built-in items and")
+        print("  cannot run a command yet (openai/codex#20140). On Codex, run a")
+        print("  live view in a side pane instead:  relay statusline --watch")
+        print("  (or rely on the Stop hook's [relay-state] line: relay hooks install).")
+        return 2
+    cfg_path = _hooks_target_path("claude")
+    cfg = _hooks_read_config(cfg_path)
+    existing = cfg.get("statusLine")
+    cmd = _statusline_render_command()
+    occupied = isinstance(existing, dict) and not _statusline_is_managed(existing)
+
+    if occupied and not getattr(args, "force", False):
+        print(f"target: claude  ({cfg_path})")
+        print("  a non-relay statusLine is already configured; NOT overwriting it.")
+        print(f"  existing command: {existing.get('command')!r}")
+        print("  To combine, append the relay segment to your own statusline script")
+        print("  (it prints an empty string when this session is in no pair):")
+        print(f"      {_statusline_segment_recipe()}")
+        print("  Or replace it with relay's: rerun with --force.")
+        return 3
+
+    action = ("updated" if _statusline_is_managed(existing)
+              else "replaced" if isinstance(existing, dict) else "installed")
+    print(f"target: claude  ({cfg_path})")
+    if occupied:  # implies --force
+        print(f"  (--force) replacing existing statusLine: {existing.get('command')!r}")
+    cfg["statusLine"] = {"type": "command", "command": cmd, "padding": 0}
+    if getattr(args, "dry_run", False):
+        print(f"  (dry-run; no changes written) would have {action} statusLine")
+    else:
+        _hooks_atomic_write_json(cfg_path, cfg)
+        print(f"  {action} statusLine -> {cmd}")
+    print()
+    print("Claude Code applies it at the next render (new session / config reload).")
+    print("Inspect: relay statusline doctor")
+    return 0
+
+
+def cmd_statusline_uninstall(args) -> int:
+    target = getattr(args, "target", "claude")
+    if target != "claude":
+        print("relay statusline uninstall: only --target claude is supported.")
+        return 2
+    cfg_path = _hooks_target_path("claude")
+    if not cfg_path.exists():
+        print(f"target: claude  (no config at {cfg_path}; skipped)")
+        return 0
+    cfg = _hooks_read_config(cfg_path)
+    existing = cfg.get("statusLine")
+    if not isinstance(existing, dict):
+        print("target: claude  (no statusLine configured; skipped)")
+        return 0
+    if not _statusline_is_managed(existing):
+        print("target: claude  (statusLine is not relay-managed; left untouched)")
+        print(f"  command: {existing.get('command')!r}")
+        return 0
+    if getattr(args, "dry_run", False):
+        print(f"target: claude  ({cfg_path})  (dry-run; would remove relay statusLine)")
+        return 0
+    cfg.pop("statusLine", None)
+    _hooks_atomic_write_json(cfg_path, cfg)
+    print(f"target: claude  ({cfg_path})  removed relay statusLine")
+    return 0
+
+
+def cmd_statusline_doctor(args) -> int:
+    script = Path(__file__).resolve()
+    print(f"relay statusline doctor (render cmd: {script} statusline)")
+    findings = 0
+    if not script.exists():
+        print("  [fail] relay script path not found")
+        findings += 1
+    else:
+        print("  [ok]   relay script present")
+    cfg_path = _hooks_target_path("claude")
+    if not cfg_path.exists():
+        print(f"  [--]   claude: no settings.json ({cfg_path})  (relay statusline install)")
+    else:
+        existing = _hooks_read_config(cfg_path).get("statusLine")
+        if not isinstance(existing, dict):
+            print("  [--]   claude: no statusLine configured  (relay statusline install)")
+        elif _statusline_is_managed(existing):
+            print("  [ok]   claude: relay-managed statusLine present")
+        else:
+            print("  [warn] claude: a non-relay statusLine is configured")
+            print(f"           command: {existing.get('command')!r}")
+    print("  note:  Codex CLI has no command-backed statusline (openai/codex#20140);")
+    print("         use `relay statusline --watch` in a side pane there.")
+    return 2 if findings else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="relay",
         description="agent-relay file protocol CLI.")
@@ -5879,6 +6353,42 @@ def build_parser() -> argparse.ArgumentParser:
     pho_status = phos.add_parser("status",
         help="Show hook install state + recent activity from hook-trail.log.")
     pho_status.set_defaults(func=cmd_hooks_status)
+
+    psl = sub.add_parser("statusline",
+        help="Compact 'which pair / whose turn' line for Claude Code's "
+             "statusLine, a --watch dashboard for any terminal (incl. a pane "
+             "next to Codex), or install/uninstall/doctor the Claude wiring.")
+    psl.add_argument("--json", action="store_true",
+        help="Emit the structured state as JSON (carries a plain 'text' line).")
+    psl.add_argument("--watch", action="store_true",
+        help="Repaint a live line in place until Ctrl-C (interactive dashboard; "
+             "resolves the sole active pair when this terminal holds no binding).")
+    psl.add_argument("--interval", type=int, default=None,
+        help="Watch repaint interval in seconds (default 2).")
+    psl.add_argument("--pair-id", default=None,
+        help="Render a specific pair regardless of this session's binding.")
+    psl.add_argument("--no-color", action="store_true",
+        help="Disable ANSI color (also honored via the NO_COLOR env var).")
+    psl.add_argument("--agent-session-id", default=None,
+        help="Override agent session id (for composing into another statusline "
+             "script, or testing).")
+    psl.set_defaults(func=cmd_statusline)
+    sl_sub = psl.add_subparsers(dest="statusline_cmd")
+    psl_install = sl_sub.add_parser("install",
+        help="Wire `relay statusline` into Claude Code's settings.json "
+             "(claude only; never clobbers an existing statusLine).")
+    psl_install.add_argument("--target", choices=("claude",), default="claude")
+    psl_install.add_argument("--dry-run", action="store_true")
+    psl_install.add_argument("--force", action="store_true",
+        help="Replace an existing non-relay statusLine instead of refusing.")
+    psl_install.set_defaults(func=cmd_statusline_install)
+    psl_uninstall = sl_sub.add_parser("uninstall",
+        help="Remove the relay-managed statusLine from Claude settings.json.")
+    psl_uninstall.add_argument("--target", choices=("claude",), default="claude")
+    psl_uninstall.add_argument("--dry-run", action="store_true")
+    psl_uninstall.set_defaults(func=cmd_statusline_uninstall)
+    psl_doctor = sl_sub.add_parser("doctor", help="Report statusline wiring state.")
+    psl_doctor.set_defaults(func=cmd_statusline_doctor)
 
     return p
 

@@ -40,6 +40,8 @@ def _clean_env() -> dict[str, str]:
     ["wait", "--help"],
     ["heartbeat", "--help"],
     ["hooks", "--help"],
+    ["statusline", "--help"],
+    ["statusline", "install", "--help"],
     ["issue", "--help"],
 ])
 def test_current_top_level_commands_remain_available(argv):
