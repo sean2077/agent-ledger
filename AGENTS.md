@@ -162,19 +162,22 @@ relative `touched_paths` are read under `worktree_root`. Full semantics:
    set` → `relay publish`. Claim is a write boundary: it uses this instance's
    binding, or an explicit `--pair-id`; it never falls through to the sole-active
    convenience fallback.
-6. **Auto-loop:** unless a rule-based break fires, `relay wait` for the peer and
-   repeat. Break triggers (surface to the user): `kind: decision`, a terminal
-   status, a `prompt_for_next` line **starting with** `@user:`, or the
-   consecutive-round cap (`RELAY_AUTO_ROUND_CAP`, default 5). The gap between
-   your publish and the peer's reply is **wait time, not user time** — never end
-   a turn just to ask "should I wait?"/"continue?"; that bare gate is the
-   interruption the loop exists to remove. **Prefer waiting in the background**
-   where the runtime allows it (Claude Code: Bash `run_in_background` — the user
-   stays interactive and the harness re-invokes you when the wait exits). Codex
-   CLI has no backgroundable task (its exec PTY is torn down at turn end), so it
-   leans on the Stop-hook auto-continue or a foreground `relay wait` instead of
-   breaking out. The goal is an un-interrupted multi-round cross-review that
-   still hands back on real decisions and stays interruptible (Ctrl-C any time).
+6. **Auto-loop:** unless a rule-based break fires, `relay wait --require-binding`
+   for the peer and repeat. Break triggers (surface to the user): artifacts
+   with `kind: decision`, terminal statuses, a `prompt_for_next` line
+   **starting with** `@user:`, or the consecutive-round cap
+   (`RELAY_AUTO_ROUND_CAP`, default 5).
+   The gap between your publish and the peer's reply is **wait time, not user
+   time** — never end a turn just to ask "should I wait?"/"continue?"; that bare
+   gate is the interruption the loop exists to remove. **Prefer waiting in the
+   background** where the runtime allows it (Claude Code: Bash
+   `run_in_background` — the user stays interactive and the harness re-invokes
+   you when the wait exits). Codex CLI has no backgroundable task (its exec PTY
+   is torn down at turn end), so it uses the Stop hook only when the peer has
+   already published, otherwise it runs `relay wait --require-binding` in the
+   foreground instead of breaking out. The goal is an un-interrupted multi-round
+   cross-review that still hands back on real decisions and stays interruptible
+   (Ctrl-C any time).
 
 **Hard rules:** never edit a `.md` that has a `.ready` sidecar (append a
 `kind: correction` instead); never hand-write `.sha256`/`.ready`; never bypass

@@ -14,6 +14,13 @@ Starting at 1.0.0, compatibility follows the frozen contract in
   host while recording `status-timeout` / `status-failed` in
   `.shared/_relay/hook-trail.log`.
 
+### Docs
+
+- Codex relay guidance now makes the wait semantics explicit: the Stop hook can
+  only auto-continue once the peer has already published; if the peer has not
+  published yet, Codex should run foreground `relay wait --require-binding`
+  instead of asking the user whether to wait.
+
 ## 1.4.0 — 2026-06-03
 
 Statusline. A new `relay statusline` renders a compact, glanceable

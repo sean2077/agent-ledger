@@ -191,9 +191,9 @@ This is the core 95% case. Take one full turn in the relay.
     interruption the auto-loop exists to remove. If no break rule fired, the
     next action is mechanical:
     1. Increment the in-memory round counter.
-    2. Run `"$RELAY" wait` exactly once — **prefer the background form** so the
-       user stays interactive (see "How to wait" below). No progress chatter
-       before or after.
+    2. Run `"$RELAY" wait --require-binding` exactly once — **prefer the
+       background form** so the user stays interactive (see "How to wait"
+       below). No progress chatter before or after.
     3. Interpret its exit code (identical whether the wait ran foreground or
        background):
        - `0` — new artifact path is on stdout. Jump back to step 1.
@@ -210,11 +210,11 @@ This is the core 95% case. Take one full turn in the relay.
     differs:
 
     - **Claude Code (and any runtime with backgroundable shell tasks): run
-      `"$RELAY" wait` in the background.** Invoke it with the Bash tool's
-      `run_in_background: true`, emit one status line ("published seq N →
-      `<peer>`; waiting in the background — keep chatting, I'll pick up when
-      they reply"), and end your turn. The user stays fully interactive and the
-      harness re-invokes you when the wait process exits; then interpret its
+      `"$RELAY" wait --require-binding` in the background.** Invoke it with the
+      Bash tool's `run_in_background: true`, emit one status line ("published
+      seq N → `<peer>`; waiting in the background — keep chatting, I'll pick up
+      when they reply"), and end your turn. The user stays fully interactive and
+      the harness re-invokes you when the wait process exits; then interpret its
       exit code exactly as above. This is the default on Claude Code — a
       blocking foreground wait needlessly freezes the user out for up to an
       hour. **While a background wait is pending, do not start another relay round**
@@ -225,14 +225,14 @@ This is the core 95% case. Take one full turn in the relay.
       **no `run_in_background` equivalent** — a detached wait can neither
       survive the turn nor notify on completion. With hooks installed, publish
       and let the Stop hook's `decision: "block"` carry the loop (it
-      auto-continues whenever the peer has already published). When the peer has
-      not yet published, run `"$RELAY" wait` in the **foreground**: it blocks
-      this turn (Ctrl-C to break; `RELAY_WAIT_TIMEOUT` bounds it), but blocking
-      on the peer is the correct move. **Breaking out to ask the user "should I
-      wait?" is never the Codex fallback** — that is the very stall this rule
-      exists to prevent.
+      auto-continues only when the peer has already published). When the peer has
+      not yet published, run `"$RELAY" wait --require-binding` in the
+      **foreground**: it blocks this turn (Ctrl-C to break;
+      `RELAY_WAIT_TIMEOUT` bounds it), but blocking on the peer is the correct
+      move. **Breaking out to ask the user "should I wait?" is never the Codex
+      fallback** — that is the very stall this rule exists to prevent.
 
-    **When hooks are installed**: the Stop hook auto-continues the turn via `decision: "block"` whenever the peer published an artifact addressed to you, so the loop above happens implicitly between turns; rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
+    **When hooks are installed**: the Stop hook auto-continues the turn via `decision: "block"` whenever the peer published an artifact addressed to you, so that already-published case happens implicitly between turns; if the peer has not published yet, keep the manual wait above. Rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
 
 11. **User gate** (when step 10 chose to surface). Reset the in-memory round counter to 0, then output:
     - One-line summary: what was published, where, sync state.

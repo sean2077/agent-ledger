@@ -281,10 +281,12 @@ def test_skill_prefers_background_wait_and_forbids_break_out_to_ask():
     # (a) never end a turn merely to ask permission to wait
     assert "wait time, not user time" in text
     # (b) background wait is the preferred form, via run_in_background
-    assert "wait` in the background" in text
+    assert "wait --require-binding` in the background" in text
     assert "run_in_background" in text
     # (c) Codex's honest no-background reality is spelled out
     assert "no `run_in_background` equivalent" in text
+    assert "wait --require-binding` in the" in text
+    assert "**foreground**" in text
     # the mutating guard during a pending background wait survives (reframed)
     assert "do not start another relay round" in text
     # the retired Q3 framing must be gone
@@ -297,7 +299,11 @@ def test_hook_protocol_timeout_and_path_canonicalization_match_dispatcher():
     text = (ROOT / "skills/agent-relay/references/hook-protocol.md").read_text(encoding="utf-8")
     src = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
     assert "Subprocess timeout 8s" in text
-    assert "timeout: int = 8" in src
+    assert "timeout: float = 8" in src
+    assert "timeout 3s" in text
+    assert "STOP_STATUS_TIMEOUT_S" in src
+    assert "0.5s" in text
+    assert "HOOK_STDIN_DEADLINE_S = 0.5" in src
     assert "slower than 5s" in text
     assert "`payload.cwd`, then" in text
     assert "`CLAUDE_PROJECT_DIR`, then" in text

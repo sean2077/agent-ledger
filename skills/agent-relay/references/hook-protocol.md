@@ -68,9 +68,10 @@ else:
     log "hint"
 ```
 
-Subprocess timeout 8s, matching the dispatcher default for `relay doctor`
-and `relay status` subprocess calls. Calls slower than 5s write a slow
-trail entry. Never blocks the session indefinitely.
+Subprocess timeout 8s, matching the dispatcher default for `relay doctor`.
+Calls slower than 5s write a slow trail entry. Never blocks the session
+indefinitely. The dispatcher also bounds host stdin reads at 0.5s so a
+half-open hook pipe cannot hang while waiting for EOF.
 
 ### 4.2 `PreToolUse`
 
@@ -131,7 +132,9 @@ applies regardless of state-change.
 Then:
 
 ```python
-status = relay status --require-binding --agent-session-id <id> --json
+status = relay status --require-binding --agent-session-id <id> --json  # timeout 3s
+if status timed out or failed:
+    log "status-timeout" or "status-failed"; exit 0 silent
 if status.bound_pair is None:            # this session joined no pair
     log "clean-exit-unbound"; exit 0 silent   # never pull an unbound window in
 fingerprint = compute_fingerprint(status)
@@ -157,6 +160,12 @@ work was pulled into whatever the lone active pair happened to be (the
 sole-active fallback in `resolve_active_pair`), because "addressed to me" is
 judged at platform-author granularity. A session must be `pair join`ed (or be
 the pair's creator) to be surfaced.
+
+**Bounded status call.** Stop is a quick continuation surface, not a long
+waiter. Its internal `relay status --require-binding` call has a shorter 3s
+timeout than the generic dispatcher default. Timeout or subprocess/JSON failure
+emits no stdout but writes a `status-timeout` or `status-failed` trail line so
+Codex/Claude do not report an opaque hook hang.
 
 **Do not** emit `"continue": false` alongside `"decision": "block"` for Stop.
 Codex hook docs state that `continue: false` from any matching Stop hook
