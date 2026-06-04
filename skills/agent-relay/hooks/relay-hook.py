@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -42,6 +43,22 @@ HOOK_QUIET = os.environ.get("RELAY_HOOK_QUIET", "1") != "0"
 HOOK_VERBOSE = os.environ.get("RELAY_HOOK_VERBOSE", "0") == "1"
 HOOK_FORCE = os.environ.get("RELAY_HOOK_FORCE", "0") == "1"
 HOOK_SOFT_TIMEOUT_S = 5  # warn (not fail) past this
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+# Hook hosts kill slow hooks. Keep dispatcher-owned waits short and fail quiet,
+# with details in hook-trail.log once the shared root is known. find_relay()
+# has its own bounded git probe, so Stop remains a best-effort continuation
+# surface under the host wall, not a guaranteed waiter.
+HOOK_STDIN_DEADLINE_S = 0.5
+HOOK_STDIN_MAX_BYTES = 1 << 20
+STOP_STATUS_TIMEOUT_S = env_float("RELAY_HOOK_STOP_STATUS_TIMEOUT", 3)
 
 
 # ---------------------------------------------------------------------------
@@ -153,22 +170,37 @@ def find_relay() -> Optional[Path]:
     return None
 
 
-def call_relay_json(relay: Path, *args: str, timeout: int = 8) -> Optional[dict]:
-    """Run `relay <args> --json` and return parsed dict, or None on failure."""
+def call_relay_json_result(relay: Path, *args: str,
+                           timeout: float = 8) -> tuple[Optional[dict], Optional[str]]:
+    """Run `relay <args> --json`.
+
+    Returns (parsed_json, None) on success, or (None, reason) on failure. Stop
+    uses the reason for trail logging so hook subprocess failures are visible
+    instead of looking like a clean no-op.
+    """
     cmd = [str(relay), *args]
     if "--json" not in args:
         cmd.append("--json")
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError):
-        return None
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    except OSError as exc:
+        return None, f"os-error:{type(exc).__name__}"
     # status / doctor exit 0 = healthy, 1 = findings/warnings but still valid JSON
     if r.returncode not in (0, 1):
-        return None
+        return None, f"exit-{r.returncode}"
     try:
-        return json.loads(r.stdout)
+        parsed = json.loads(r.stdout)
     except json.JSONDecodeError:
-        return None
+        return None, "invalid-json"
+    return parsed if isinstance(parsed, dict) else None, None
+
+
+def call_relay_json(relay: Path, *args: str, timeout: float = 8) -> Optional[dict]:
+    """Run `relay <args> --json` and return parsed dict, or None on failure."""
+    parsed, _reason = call_relay_json_result(relay, *args, timeout=timeout)
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +468,16 @@ def handle_stop(payload: dict, shared_root: Path,
     # Strict binding: resolve ONLY this instance's bound pair, never the
     # sole-active fallback. An unbound session doing unrelated work must not be
     # pulled into whatever the lone active pair is (issue 20260601T182646).
-    status = call_relay_json(relay, "status", "--require-binding", *extra)
+    status, status_error = call_relay_json_result(
+        relay, "status", "--require-binding", *extra,
+        timeout=STOP_STATUS_TIMEOUT_S,
+    )
     if status is None:
+        append_trail(shared_root, {
+            "event": "Stop", "host": host,
+            "decision": "status-timeout" if status_error == "timeout" else "status-failed",
+            "reason": status_error or "unknown",
+        })
         return None
 
     # No confirmed binding for this (author, agent_session_id) => this session is
@@ -510,6 +550,50 @@ HANDLERS = {
 }
 
 
+def read_stdin_payload() -> Optional[dict]:
+    """Best-effort hook payload read with a hard deadline.
+
+    Hook hosts provide a small JSON object on stdin. `sys.stdin.read()` waits
+    for EOF, so a half-open pipe can wedge the dispatcher until the host kills
+    it. Poll and read only what is currently available instead.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        fd = sys.stdin.fileno()
+    except Exception:
+        return {}
+
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + HOOK_STDIN_DEADLINE_S
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            readable, _, _ = select.select([fd], [], [], remaining)
+            if not readable:
+                break
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+            if total >= HOOK_STDIN_MAX_BYTES:
+                break
+    except Exception:
+        return None
+
+    if not chunks:
+        return {}
+    try:
+        parsed = json.loads(b"".join(chunks).decode("utf-8", "replace"))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def emit(response: Optional[dict]) -> int:
     """Codex dedup wants exit 0 + no stdout. Claude accepts the same."""
     if not response:
@@ -521,10 +605,8 @@ def emit(response: Optional[dict]) -> int:
 
 def main() -> int:
     start = time.monotonic()
-    try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
+    payload = read_stdin_payload()
+    if payload is None:
         return 0  # never break host on bad input
 
     cwd = payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()

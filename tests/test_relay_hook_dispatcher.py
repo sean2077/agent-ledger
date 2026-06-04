@@ -602,6 +602,69 @@ def test_14_stop_unbound_session_stays_silent(monkeypatch, tmp_path):
     )
 
 
+def test_15_hook_half_open_stdin_never_hangs(tmp_path):
+    """A hook host that leaves stdin half-open must not wedge the dispatcher."""
+    repo = _new_repo(tmp_path)
+    shared = repo / ".shared"
+    (shared / "_relay").mkdir(parents=True)
+    (shared / "_relay" / ".sentinel").touch()
+    env = os.environ.copy()
+    env["RELAY_BIN"] = str(RELAY_BIN)
+    env["RELAY_SHARED_ROOT"] = str(shared)
+
+    proc = subprocess.Popen(
+        ["python3", str(HOOK_SCRIPT)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=str(repo),
+    )
+    try:
+        rc = proc.wait(timeout=3)
+        stdout = proc.stdout.read() if proc.stdout else ""
+        stderr = proc.stderr.read() if proc.stderr else ""
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if proc.stdin:
+            proc.stdin.close()
+
+    assert rc == 0
+    assert stdout == ""
+    assert stderr == ""
+
+
+def test_16_stop_status_timeout_logs_and_stays_silent(monkeypatch, tmp_path):
+    """A slow `relay status` subprocess must be bounded and diagnosable."""
+    repo, _session = _bootstrap_bound(monkeypatch, tmp_path)
+    fake_relay = tmp_path / "slow-relay"
+    fake_relay.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "time.sleep(2)\n",
+        encoding="utf-8",
+    )
+    fake_relay.chmod(0o755)
+
+    payload = _claude_stop(repo)
+    r = _run_hook(payload, env_overrides={
+        "RELAY_BIN": str(fake_relay),
+        "RELAY_SHARED_ROOT": str(repo / ".shared"),
+        "RELAY_AUTHOR": "claude",
+        "RELAY_HOOK_STOP_STATUS_TIMEOUT": "0.2",
+    })
+
+    assert r.returncode == 0
+    assert r.stdout == ""
+    trail = repo / ".shared" / "_relay" / "hook-trail.log"
+    last = json.loads(trail.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert last["event"] == "Stop"
+    assert last["decision"] == "status-timeout"
+    assert last["reason"] == "timeout"
+
+
 # ---------------------------------------------------------------------------
 # Installer merge: append-after preserves existing entries byte-for-byte
 # ---------------------------------------------------------------------------

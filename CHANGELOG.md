@@ -4,6 +4,16 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## Unreleased
+
+### Fixed
+
+- Hook dispatcher input and Stop status checks are now bounded so a half-open
+  hook stdin pipe or slow `relay status --require-binding` cannot wedge the
+  host hook until its outer timeout. Stop status failures now stay silent to the
+  host while recording `status-timeout` / `status-failed` in
+  `.shared/_relay/hook-trail.log`.
+
 ## 1.4.0 — 2026-06-03
 
 Statusline. A new `relay statusline` renders a compact, glanceable
