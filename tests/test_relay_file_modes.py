@@ -69,7 +69,8 @@ def test_relay_created_files_are_0600_and_dirs_are_0700(monkeypatch, tmp_path, c
     published = Path(capsys.readouterr().out.strip())
 
     assert relay.cmd_close(
-        _args(reason="mode contract verified", outcome=None, project=None, pair_id=None)
+        _args(reason="mode contract verified", outcome=None, project=None,
+              pair_id=None, no_archive=True)
     ) == 0
     capsys.readouterr()
     assert relay.cmd_issue_add(

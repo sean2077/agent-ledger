@@ -238,10 +238,14 @@ This is the core 95% case. Take one full turn in the relay.
     - One-line summary: what was published, where, sync state.
     - The 2-3 **key open questions** from your `prompt_for_next` — surface them at user-level so they see the decisions without opening the artifact.
     - An explicit fork — let the user pick the next step. Each option must include the **concrete next command/window** the user runs, not a vague "wait" or "do":
-      - **(a) cross-review** — hand off to the peer agent. **Name which pair** so the peer binds to the exact one — run `"$RELAY" pair show` to get the slug + the peer's join command — then tell the user literally where to go and what to type:
-        - If peer is `codex` (on host): "Switch to your codex CLI and run `relay pair join <slug>` then `$agent-relay`."
-        - If peer is `claude` (on remote / Claude Code): "Switch to Claude Code and run `relay pair join <slug>` then `/agent-relay`."
-        - If peer is `gpt55` or another agent: name the runtime, the pair slug, and the exact command.
+      - **(a) cross-review** — hand off to the peer agent. **Name which pair** so the peer binds to the exact one — run `"$RELAY" pair show` to get the slug + the peer's join command — then tell the user literally where to go and what to type. **Highlight the `relay pair join <slug>` command: put it on its own line as a fenced code block** (not inline mid-sentence) so the user can copy it at a glance — it is the one thing they must paste into the other agent:
+        - If peer is `codex` (on host): "Switch to your codex CLI, run the join command below, then `$agent-relay`."
+        - If peer is `claude` (on remote / Claude Code): "Switch to Claude Code, run the join command below, then `/agent-relay`."
+        - If peer is `gpt55` or another agent: name the runtime, then the join command, then the invocation.
+
+          ```bash
+          relay pair join <slug>
+          ```
         (With a single active pair the peer's `pair ensure` auto-joins; naming the pair keeps pairing precise once several exist.) This is the default safeguard.
       - **(b) execute immediately** — skip peer review; this agent implements the proposals now in the current window. Use when scope is small, well-defined, and the user trusts the call. Record what was executed in a follow-up `kind: decision` or in the next turn's body — "execute" never means "no record".
       - **(c) discuss further** — stay in the current window and talk it through with the user before anything else moves.
@@ -279,7 +283,13 @@ Run this when starting a new relay pair, **not** when continuing an existing one
 
 Pairs are flat directories at `.shared/<pair-slug>/` (slug `YYYYMMDD-<topic>`). The project slug is metadata in `session.json`, not a parent directory.
 
-After bootstrap, **tell the user the pair name and how the peer joins it** — `bootstrap` prints the slug and the exact `relay pair join <slug>` command, and `"$RELAY" pair show` reprints it anytime. Surface this prominently so the user can point the other agent at the *exact* pair (precise pairing matters once more than one pair exists). Then immediately do `handoff` to write the first artifact (typically `kind: plan` or `kind: question`).
+After bootstrap, **tell the user the pair name and how the peer joins it** — `bootstrap` prints the slug and the exact `relay pair join <slug>` command, and `"$RELAY" pair show` reprints it anytime. **Surface the join command on its own line as a fenced code block** (highlighted, copy-pasteable — not buried inline) so the user can point the other agent at the *exact* pair (precise pairing matters once more than one pair exists):
+
+```bash
+relay pair join <slug>
+```
+
+Then immediately do `handoff` to write the first artifact (typically `kind: plan` or `kind: question`).
 
 `relay bootstrap` creates a new pair and binds you to it. If you're already bound to an active pair, **do not bootstrap silently** — continue it or close it first. To intentionally run a second pair in parallel, use `relay bootstrap --force` (it binds you to the new pair; your old binding moves). `relay pairs list` shows all pairs.
 
@@ -337,7 +347,7 @@ If `cmd_sync` reports the project root is a fuse mount → that's shape A (whole
 "$RELAY" close --reason "what concluded" --outcome approve
 ```
 
-Writes `CLOSED` sentinel and updates `session.json` state to closed. **Does not modify prior published files** (append-only invariant).
+Writes `CLOSED` sentinel and updates `session.json` state to closed, then **auto-archives the pair** into `.shared/_archive/` so the top level stays uncluttered. **Does not modify prior published files** (append-only invariant) — the archived pair keeps its full history and can be brought back with `relay pairs restore <slug>`. Auto-archive is best-effort: if it can't move the pair the close still succeeds and prints a retry note. Pass `--no-archive` to leave the closed pair under `.shared/` (e.g. if the peer still needs to read it in place).
 
 If user wants a final synthesis on record, do a `handoff` first with `relay claim --kind decision`, fill it with the synthesis, then `publish` and only then `close`.
 
@@ -364,7 +374,7 @@ If user wants a final synthesis on record, do a `handoff` first with `relay clai
 - **`relay sync push` aborts with a `RELAY_SYNC` reason**: this side is not the rsync owner (`RELAY_SYNC=none` explicitly or by default). Tell the user; the side with `RELAY_SYNC=rsync` must run the push.
 - **Unsure what state `.shared/` is in (stuck drafts, leftover heartbeats, incomplete publish triads, etc.)**: run `relay doctor` for a read-only report. Add `--fix` to clean owner-safe junk (dead pidfiles); add `--fix --older-than 1h` to additionally delete abandoned drafts and incomplete publish triads older than the threshold. Doctor never signals a live PID.
 - **`unsupported_schema` appears in `preflight`, `whoami`, `pairs list`, or `doctor`**: an older relay is looking at a newer or intentionally unsupported ledger/binding schema. Treat this as a compatibility blocker for that record; do not claim, publish, close, archive, or auto-rebind it until relay is upgraded.
-- **`.shared/` is cluttered with old/closed pairs**: `relay pairs archive --terminated` moves every closed/terminal pair into `.shared/_archive/` so the top level stays clean. Archive one with `relay pairs archive <slug>` (it refuses an active pair — `relay close` it first, or pass `--force` to shelve a live one). `relay pairs list --archived` lists what's archived; `relay pairs restore <slug>` brings one back. **User-initiated maintenance only — never run it inside the auto-loop.**
+- **`.shared/` is cluttered with old/closed pairs**: `relay close` already auto-archives the pair it closes, so this is mainly for pairs closed before v1.5.0 or with `--no-archive`. `relay pairs archive --terminated` moves every closed/terminal pair into `.shared/_archive/` so the top level stays clean. Archive one with `relay pairs archive <slug>` (it refuses an active pair — `relay close` it first, or pass `--force` to shelve a live one). `relay pairs list --archived` lists what's archived; `relay pairs restore <slug>` brings one back. **User-initiated maintenance only — never run it inside the auto-loop.**
 
 ## Filing issues (feedback ledger)
 

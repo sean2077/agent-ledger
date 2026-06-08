@@ -15,7 +15,8 @@ Commands:
   pair         subcommands: join, leave, ensure (bind this instance to a pair)
   claim        scaffold a new draft under .draft/
   publish      validate draft, atomically promote to published + sha256 + ready
-  close        write CLOSED sentinel + update session.json (no edit to prior files)
+  close        write CLOSED sentinel + update session.json (no edit to prior
+               files), then auto-archive the pair (--no-archive to keep it)
   sync         rsync wrapper for the RELAY_SYNC=rsync side (push/pull,
                default and strict modes)
   wait         block until peer publishes; exit codes 0/10/11/12/130/2
@@ -54,7 +55,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.4.2"
+__version__ = "1.5.0"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
@@ -1340,6 +1341,27 @@ def _move_pair_dir(src: Path, dst: Path) -> None:
         raise
     _fsync_dir(src.parent)
     _fsync_dir(dst.parent)
+
+
+def _archive_one_pair(root: Path, sd: Path) -> Path:
+    """Move a single pair dir `sd` into `_archive/`, drop its bindings, and
+    return the destination path. Shared by `relay pairs archive` and the
+    auto-archive step of `relay close`.
+
+    Bindings are dropped only AFTER a successful move (codex must-fix 2): if the
+    process dies between move and drop, the binding points at a now-gone
+    root/<slug> and `resolve_active_pair` self-heals it as stale — strictly safer
+    than dropping first and then failing the move. Raises FileExistsError when
+    the destination is occupied, OSError (incl. EXDEV) when the rename fails."""
+    arc = archive_root(root)
+    arc.mkdir(mode=0o700, exist_ok=True)
+    dst = arc / sd.name
+    if dst.exists():
+        raise FileExistsError(f"destination already exists at {dst}")
+    _move_pair_dir(sd, dst)                    # atomic rename + fsync BOTH parents
+    for b in binding_for_pair(root, sd.name):
+        delete_binding(root, b.get("author", ""), b.get("agent_session_id", ""))
+    return dst
 
 
 def resolve_pair(env: Env, session_id: str | None = None, *,
@@ -3525,7 +3547,26 @@ def cmd_close(args) -> int:
     if env.shared_root and env.author and env.agent_session_id:
         delete_binding(env.shared_root, env.author, env.agent_session_id)
 
-    print(f"closed: {session}")
+    # Auto-archive the just-closed pair into `_archive/` so `.shared/` stays
+    # uncluttered (--no-archive opts out). This is best-effort: the close itself
+    # is already durable (sentinel + session.json written above), so an archive
+    # failure is reported as a note and the close still succeeds — `relay pairs
+    # archive <slug>` can retry later. The pair dir lives directly under the
+    # shared root, so session.parent IS that root.
+    archived_to = None
+    if not getattr(args, "no_archive", False):
+        try:
+            archived_to = _archive_one_pair(session.parent, session)
+        except (OSError, FileExistsError) as exc:
+            print(
+                f"note: closed but could not archive {session.name!r}: {exc} — "
+                f"run `relay pairs archive {session.name}` to retry.",
+                file=sys.stderr,
+            )
+
+    print(f"closed: {archived_to or session}")
+    if archived_to:
+        print(f"  archived: {session.name} -> {archived_to}")
     print(f"  reason:   {args.reason}")
     print(f"  outcome:  {args.outcome or '(none)'}")
     return 0
@@ -3681,26 +3722,14 @@ def cmd_pairs_archive(args) -> int:
                       f"self-expire after the move (no PID is signalled).")
         targets = [sd]
 
-    arc.mkdir(mode=0o700, exist_ok=True)
-
     archived: list[str] = []
     failed: list[tuple[str, str]] = []
     for sd in targets:
-        dst = arc / sd.name
-        if dst.exists():
-            failed.append((sd.name, f"destination already exists at {dst}"))
-            continue
         try:
-            _move_pair_dir(sd, dst)            # atomic rename + fsync BOTH parents
+            _archive_one_pair(root, sd)        # move + drop bindings (move-first)
         except (OSError, FileExistsError) as exc:
             failed.append((sd.name, str(exc)))
             continue
-        # Drop bindings only AFTER a successful move (codex review must-fix 2): if
-        # the process dies between move and here, the binding points at a now-gone
-        # root/<slug> and resolve_active_pair self-heals it as stale — strictly
-        # safer than dropping first and then failing the move.
-        for b in binding_for_pair(root, sd.name):
-            delete_binding(root, b.get("author", ""), b.get("agent_session_id", ""))
         archived.append(sd.name)
 
     for name in archived:
@@ -6287,11 +6316,14 @@ def build_parser() -> argparse.ArgumentParser:
     ppub.add_argument("--force-reason", default=None)
     ppub.set_defaults(func=cmd_publish)
 
-    pcl = sub.add_parser("close", help="Write CLOSED sentinel + update session.json.")
+    pcl = sub.add_parser("close",
+        help="Write CLOSED sentinel + update session.json, then auto-archive the pair.")
     pcl.add_argument("--reason", required=True)
     pcl.add_argument("--outcome", default=None)
     pcl.add_argument("--project", default=None)
     pcl.add_argument("--pair-id", default=None)
+    pcl.add_argument("--no-archive", action="store_true",
+        help="Leave the closed pair under .shared/ instead of moving it into _archive/.")
     pcl.set_defaults(func=cmd_close)
 
     ppairs = sub.add_parser("pairs",

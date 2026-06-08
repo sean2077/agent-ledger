@@ -89,7 +89,7 @@ Resolve the binary first (`relay` may not be on `$PATH`): prefer
 | `relay draft set <draft> --body-file … --prompt-for-next-file …` | Fill a draft atomically (preferred over hand-editing the file). |
 | `relay publish <draft>` | Validate + atomically promote a draft (writes `.sha256` + `.ready`). The authorship boundary. Supersedes a `timed_out` latest with no `--force` (resume); a hard-terminal/closed pair needs `--force` + a terminal `--status` for an append-only note. |
 | `relay wait [--require-binding]` | Block until the peer publishes an artifact addressed to you. Exit 0 new / 10 timeout / 11 peer-stale / 12 terminal / 130 SIGINT. `--require-binding` refuses (non-zero) when unbound instead of waiting on a sole-active pair. |
-| `relay close --reason … --outcome …` | Write `CLOSED` sentinel; mark `session.json` closed. |
+| `relay close --reason … --outcome … [--no-archive]` | Write `CLOSED` sentinel; mark `session.json` closed; then **auto-archive** the pair into `.shared/_archive/` (best-effort — a failed archive prints a note but `close` still succeeds, since the sentinel/`session.json` are already durable). `--no-archive` leaves the closed pair under `.shared/`. |
 | `relay sync push\|pull [--dry-run]` | rsync wrapper — only the `RELAY_SYNC=rsync` side may run it. |
 | `relay heartbeat start\|stop\|tick` | Liveness daemon for a draft (see §7). |
 | `relay doctor [--fix]` | Read-only ledger diagnosis; `--fix` cleans owner-safe junk, including old incomplete publish triads (never signals a live PID and never mutates unsupported-schema records). |

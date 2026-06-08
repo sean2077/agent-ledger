@@ -4,6 +4,21 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.5.0 — 2026-06-08
+
+### Added
+
+- `relay close` now **auto-archives** the just-closed pair into `.shared/_archive/`
+  so the top level stays uncluttered without a separate `relay pairs archive`
+  step. The archive runs after the `CLOSED` sentinel + `session.json` are written,
+  reusing the same move-then-drop-bindings path as `pairs archive` (atomic
+  rename; bindings dropped only after a successful move). It is **best-effort**:
+  the close itself is already durable, so an archive failure (e.g. a destination
+  collision) is reported as a note and `close` still exits 0 — `relay pairs
+  archive <slug>` can retry. Pass `--no-archive` to leave the closed pair under
+  `.shared/`. The two commands stay separate: `pairs archive` still owns the
+  `--terminated` sweep, `--force` active-shelving, and the `restore` counterpart.
+
 ## 1.4.2 — 2026-06-08
 
 ### Fixed
