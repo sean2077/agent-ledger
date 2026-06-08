@@ -126,6 +126,23 @@ def test_readme_documents_privacy_trust_surface():
         assert needle in section
 
 
+def test_readme_documents_npx_skills_install_and_checkout_symlinks():
+    """README install guidance uses the skills installer and documents the
+    local-checkout mechanics symlinks."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    install_section = readme.split("## Install", 1)[1].split("## Configure", 1)[0]
+    for needle in (
+        "npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y",
+        "`~/.agents/skills/agent-relay`",
+        "npx skills add . -g --agent claude-code codex --skill agent-relay -y",
+        'ln -sfn "$PWD/skills/agent-relay/bin/relay" ~/.agents/skills/agent-relay/bin/relay',
+        "rm -rf ~/.agents/skills/agent-relay/hooks",
+        'ln -s "$PWD/skills/agent-relay/hooks" ~/.agents/skills/agent-relay/hooks',
+    ):
+        assert needle in install_section
+    assert 'ln -s "$PWD/skills/agent-relay/bin/relay" ~/.local/bin/relay' not in install_section
+
+
 def test_skill_preamble_leads_with_claude_codex_hook():
     """D6: SKILL.md preamble names both Claude Code and Codex CLI."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
@@ -233,7 +250,7 @@ def test_skill_relay_lookup_guidance_documents_priority_contract():
         "$HOME/.codex/skills/agent-relay/bin/relay",
         "$HOME/.claude/skills/agent-relay/bin/relay",
         "$HOME/.agents/skills/agent-relay/bin/relay",
-        'ln -s "$PWD/skills/agent-relay/bin/relay" ~/.local/bin/relay',
+        "npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y",
     ):
         assert needle in text
     assert 'bins: ["relay", "bash"]' not in text

@@ -65,7 +65,7 @@ else
   done
 fi
 [ -n "${RELAY:-}" ] || {
-  echo 'cannot locate relay CLI; install with: ln -s "$PWD/skills/agent-relay/bin/relay" ~/.local/bin/relay' >&2
+  echo 'cannot locate relay CLI; install with: npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y' >&2
   exit 2
 }
 export RELAY

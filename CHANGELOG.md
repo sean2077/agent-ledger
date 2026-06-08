@@ -4,6 +4,14 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## Unreleased
+
+### Docs
+
+- Install guidance now uses `npx skills add ...` for the public path and
+  documents the local-checkout symlinks for `~/.agents/skills/agent-relay/bin/relay`
+  and `~/.agents/skills/agent-relay/hooks`.
+
 ## 1.4.1 — 2026-06-04
 
 ### Fixed

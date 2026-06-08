@@ -21,14 +21,24 @@ The package lives in `skills/agent-relay/`:
 ## Install
 
 ```bash
-ln -s "$PWD/skills/agent-relay/bin/relay" ~/.local/bin/relay
-ln -s "$PWD/skills/agent-relay" ~/.codex/skills/agent-relay
-ln -s "$PWD/skills/agent-relay" ~/.claude/skills/agent-relay
+npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y
 ```
 
-For a two-machine setup (each side has its own checkout), copy or `scp`
-the same bits onto the other host and symlink the skill into its
-`~/.codex/skills/` or `~/.agents/skills/`.
+The skills installer places the canonical package at
+`~/.agents/skills/agent-relay` and links agent-specific skill directories to
+that copy when needed. For a two-machine setup, run the same command on each
+host.
+
+When developing from a checkout and dogfooding local changes, install from the
+checkout and point the executable + hook mechanics back at the repo:
+
+```bash
+npx skills add . -g --agent claude-code codex --skill agent-relay -y
+mkdir -p ~/.agents/skills/agent-relay/bin
+ln -sfn "$PWD/skills/agent-relay/bin/relay" ~/.agents/skills/agent-relay/bin/relay
+rm -rf ~/.agents/skills/agent-relay/hooks
+ln -s "$PWD/skills/agent-relay/hooks" ~/.agents/skills/agent-relay/hooks
+```
 
 ## Configure
 
