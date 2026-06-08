@@ -40,7 +40,9 @@ obvious way to wire that up has costs:
   back-and-forth.
 - Going headless inside one of these tools (subprocess automation, screen
   scraping) gives up the interactive review surface that makes them
-  useful in the first place — diffs, plan mode, tool gating, etc.
+  useful in the first place — diffs, plan mode, tool gating, etc. — and,
+  on the Anthropic side, it now carries an explicit billing penalty too:
+  see the 2026-06-15 split below.
 
 `agent-relay` skips both paths. The two agents stay in their **interactive
 sessions**. The relay between them is just markdown files in a shared
@@ -80,6 +82,63 @@ boundary*. Whether running an N-round cross-review costs you money depends
 entirely on how you're paying for the two interactive tools. Always
 verify current vendor terms — pricing and inclusion details change
 independently and faster than this document.
+
+### The 2026-06-15 Anthropic headless billing split
+
+This is the change that sharpens the whole argument, so it gets its own
+note. Effective **2026-06-15**, Anthropic moves non-interactive Claude
+Code off the flat-rate subscription pool:
+
+- **Interactive** Claude Code — the terminal/IDE TUI a human drives —
+  stays on your Pro / Max subscription, unchanged.
+- **Headless** Claude — `claude -p` (print mode), the Claude Agent SDK,
+  Claude Code GitHub Actions, and subscription-authenticated third-party
+  apps over ACP — leaves the subscription pool and draws from a separate,
+  metered monthly "Agent SDK credit" billed at standard API rates, with
+  no rollover and a one-time opt-in. When that credit is gone, requests
+  fail (or fall through to API credits, if you enabled those).
+
+A one-line test, in Anthropic's own framing: **if a human presses Enter
+for the work to happen, it stays on your subscription; if a robot presses
+Enter while you're away, it moves to the metered credit.**
+
+The OpenAI side is asymmetric and you must check it yourself: Codex is
+included with ChatGPT plans and the Codex CLI is a supported client, but
+OpenAI has not published an equivalent dated "headless is carved out"
+rule. Treat "does `codex exec` count against my ChatGPT plan the same as
+interactive?" as a question to confirm against current terms, not an
+assumption.
+
+Sources:
+[Use Claude Code with your Pro or Max plan](https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan),
+[Run Claude Code programmatically](https://code.claude.com/docs/en/headless),
+[Codex in ChatGPT](https://help.openai.com/en/articles/11369540-icodex-in-chatgpt).
+
+### What this means for agent-ledger
+
+Put the billing split together with the design and the relay stops
+looking like a quirk and starts looking like the point. An N-round
+cross-review between two strong coding agents has three ways to be wired,
+and only one keeps both engines on flat-rate plans:
+
+1. **API orchestrator.** Pay per token for every back-and-forth, on both
+   vendors. Predictably expensive, and it grows linearly with rounds.
+2. **Headless automation inside one tool.** From 2026-06-15 this drains
+   the metered Agent SDK credit on the Anthropic side — and it gives up
+   the interactive review surface either way.
+3. **agent-relay.** Both agents stay in their *interactive* sessions and
+   talk through the file ledger. Each side passes the Enter-key test, so
+   each side rides whatever flat-rate subscription you already pay for.
+   The relay adds no third billing boundary of its own.
+
+That is the significance of agent-ledger: it is the cheapest correct way
+to get multi-agent cross-review *as the per-call-metered path gets more
+expensive, not less*. The file ledger is not a workaround for missing API
+glue — it is precisely what lets the collaboration ride flat-rate,
+human-in-the-loop billing instead of metered, machine-to-machine billing.
+And the structure the ledger enforces (sequence numbers, `kind`,
+`prompt_for_next`, content hashes) is what makes that interactive-only
+path produce real review instead of a chat transcript.
 
 ## Setup topologies
 
@@ -152,6 +211,77 @@ structure to make peer review actually useful:
 
 None of these prevent the user from intervening — they're guardrails for
 the bots, not gates on the human.
+
+## Alternatives, and where agent-relay fits
+
+The "run more than one coding agent" space is crowded, but almost all of
+it solves a *different* problem: parallel fan-out (N agents on N tasks),
+not cross-review (two agents on one artifact, drafting and reviewing in
+turn). The buckets make the niche clear.
+
+**Single-vendor productivity frameworks — the two this repo bridges.**
+
+- **oh-my-claudecode (OMC)** wraps Claude Code. Its cross-agent surfaces
+  are `/ask codex|gemini`, `/ccg` (ask Codex + Gemini, then Claude
+  synthesizes), `/omc-teams` (N CLI workers in tmux panes), and Claude's
+  own native agent teams. In all of them the *other* model is either a
+  one-shot callee or a fan-out worker — Claude stays the orchestrator.
+- **oh-my-codex (OMX)** is the mirror image on the Codex side (ralph /
+  ultrawork / team modes, plus a tmux-injection hook that drives a Codex
+  pane). Its `team` is Codex-side fan-out; it does not itself reach
+  across to Claude.
+
+Each is excellent at making *one* engine more autonomous. Neither makes
+two *different* engines review each other as peers. agent-relay is the
+connective tissue between an OMC-driven Claude and an OMX-driven Codex —
+which is why it ships from this repo and is loaded by *both* through the
+shared skills directory.
+
+**Parallel orchestrators — worktree + tmux/desktop fan-out.** Claude
+Squad, Conductor, Crystal→Nimbalyst, parallel-code, dux, orc, ORCH,
+multi-agent-shogun, clideck and others share one foundation: each agent
+runs in its own git worktree, isolated, on its own task, reviewed by the
+human at the end. Most have **no agent-to-agent communication at all**
+(Claude Squad says so outright); the ones that coordinate do it through a
+*lead/orchestrator*, not a peer exchange. Several are closed-source
+binaries that clone the repo and hold your GitHub auth — a real trust
+surface on proprietary code.
+
+**Native Claude agent teams.** Anthropic's own (experimental) teams give
+a lead plus teammates with direct messaging. But teammates are
+**Claude-only** (same vendor, same model family), the messaging is
+ephemeral in-process (no durable, auditable record), and after
+2026-06-15 spawning extra non-interactive Claude workers is exactly the
+path that leaves the flat-rate subscription (see the billing split
+above).
+
+**API multi-agent frameworks.** LangGraph / AutoGen / CrewAI and kin can
+wire any models together, but you build and pay for an API orchestrator:
+keys, per-turn token billing, prompt scaffolding.
+
+Against that field agent-relay occupies a corner almost nothing else
+targets:
+
+| | parallel orchestrators | native Claude teams | API frameworks | **agent-relay** |
+|---|---|---|---|---|
+| unit of work | fan-out, N tasks | fan-out + lead | whatever you build | **peer cross-review, 1 artifact** |
+| cross-vendor | runs them, no dialogue | Claude-only | yes | **yes (Claude ↔ Codex)** |
+| agent↔agent channel | usually none | ephemeral in-proc | your code | **durable structured file ledger** |
+| control plane | TUI / desktop / daemon | the harness | your orchestrator | **none — files + a CLI** |
+| billing | per-tool | metered when headless | per-token API | **both interactive → flat-rate** |
+| cross-machine | mostly single host | single host | wherever you host | **yes (rsync / sshfs)** |
+| trust surface | sometimes closed binary + repo/GitHub auth | vendor harness | your API keys | **local files, `0600`, no keys** |
+
+So agent-relay is not "a worse Claude Squad." It is the one option whose
+unit of work is *two different engines reviewing the same work through a
+durable, structured, auditable ledger, with no control plane and no
+metered billing boundary*. That is the gap it exists to fill.
+
+Sources (verify current; the field moves fast):
+[awesome-agent-orchestrators](https://github.com/andyrewlee/awesome-agent-orchestrators),
+[claude-squad](https://github.com/smtg-ai/claude-squad),
+[Claude Code agent teams](https://code.claude.com/docs/en/agent-teams),
+[multi-agent orchestrators round-up (amux)](https://amux.io/blog/best-multi-agent-orchestrators-2026/).
 
 ## What this tool is **not**
 
