@@ -107,15 +107,20 @@ def _fmt(**st):
 def test_format_your_move():
     line = _fmt(state="your_move", seq=8, kind="review")
     assert "YOUR MOVE" in line
-    assert "auth" in line and "← codex" in line and "#8 review" in line
-    # date prefix is stripped for brevity
-    assert "20260603-" not in line
+    assert "20260603-auth" in line and "← codex" in line and "#8 review" in line
 
 
 def test_format_waiting_with_peer_writing():
     line = _fmt(state="waiting", seq=7, kind="plan", extra="peer writing")
     assert "→ codex" in line and "waiting" in line
     assert "#7 plan" in line and "peer writing" in line
+
+
+def test_format_keeps_full_pair_slug():
+    pair = "20260603-long-pair-name-with-routing-context"
+    line = _fmt(pair=pair, state="waiting", seq=None, kind=None)
+    assert pair in line
+    assert "long-pair-name-with-routing-context" in line
 
 
 def test_format_peer_stale_paused_decision_terminal():

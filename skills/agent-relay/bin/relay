@@ -55,7 +55,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
@@ -5667,13 +5667,6 @@ def _sl_paint(text: str, code: str, enabled: bool) -> str:
     return f"\033[{code}m{text}{_SL_RESET}" if (enabled and code) else text
 
 
-def _sl_short_pair(slug: str) -> str:
-    """Drop a leading 8-digit date prefix for brevity (20260603-foo -> foo)."""
-    if len(slug) > 9 and slug[:8].isdigit() and slug[8] == "-":
-        return slug[9:]
-    return slug
-
-
 def _sl_stale_threshold() -> int:
     """Seconds before a peer renewal-file heartbeat reads as stale — reuse the
     same env knob `relay wait` uses for its exit-11 escape."""
@@ -5857,7 +5850,7 @@ def _statusline_format(st: dict, color: bool) -> str:
         return ""
     state = st["state"]
     glyph, code = _SL_STYLE.get(state, _SL_STYLE["neutral"])
-    pair = _sl_short_pair(st["pair"])
+    pair = st["pair"]
     peer = st.get("peer") or "?"
     seq = st.get("seq")
     kind = st.get("kind") or ""

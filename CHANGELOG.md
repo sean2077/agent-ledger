@@ -4,6 +4,13 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## 1.5.1 — 2026-06-08
+
+### Fixed
+
+- `relay statusline` now renders the full pair slug, including any leading date
+  prefix, instead of shortening it for display.
+
 ## 1.5.0 — 2026-06-08
 
 ### Added
