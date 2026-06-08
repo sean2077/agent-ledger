@@ -54,7 +54,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
@@ -898,17 +898,33 @@ def _resolve_sync(env: Env, *, is_shape_a: bool) -> tuple[Optional[str], str]:
     return "none", "default"
 
 
+def _git_timeout() -> Optional[float]:
+    """Seconds to bound every git invocation. A hung VCS or a stalled mount
+    underneath the repo must never wedge a relay command forever (the statusline
+    layers its own tighter wall on top — see _statusline_deadline). Returns None
+    (no bound) only when `RELAY_GIT_TIMEOUT` is explicitly <= 0, an escape hatch
+    for odd setups; a missing/garbage value keeps the safe default."""
+    raw = os.environ.get("RELAY_GIT_TIMEOUT")
+    if raw is None:
+        return 10.0
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 10.0
+    return val if val > 0 else None
+
+
 def git_toplevel(start: Path | None = None) -> Optional[Path]:
     start = start or Path.cwd()
     try:
         res = subprocess.run(
             ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=_git_timeout(),
         )
         if res.returncode != 0:
             return None
         return Path(res.stdout.strip())
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
 
 
@@ -939,10 +955,16 @@ def main_worktree(start: Path | None = None) -> Optional[Path]:
     try:
         res = subprocess.run(
             ["git", "-C", str(start), "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=_git_timeout(),
         )
     except FileNotFoundError:
         return git_toplevel(start)
+    except subprocess.TimeoutExpired:
+        # git is wedged (hung VCS / stalled mount). Do NOT fall back to
+        # git_toplevel — that just runs another git that would hang again.
+        # Report "no anchor"; the caller degrades (statusline -> empty line,
+        # others -> a clear no-shared-root error) instead of blocking forever.
+        return None
     if res.returncode != 0:
         return git_toplevel(start)
     # Porcelain records are blank-line separated; the FIRST record is the main
@@ -988,9 +1010,9 @@ def git_sha(start: Path | None = None) -> Optional[str]:
     try:
         res = subprocess.run(
             ["git", "-C", str(top), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=_git_timeout(),
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     if res.returncode != 0:
         return None
@@ -5848,31 +5870,96 @@ def _statusline_color_enabled(args) -> bool:
     return True
 
 
+class _StatuslineDeadline(Exception):
+    """Raised by the render wall when a single paint exceeds its budget (a hung
+    or slow git / sshfs stat). Caught by the fail-quiet handlers in
+    _statusline_once / _statusline_watch -> empty or last-known line, never a
+    frozen footer."""
+
+
+def _sl_render_deadline() -> float:
+    """Seconds a single render may run before the wall fires. The footer's whole
+    point is to be glanceable, so a stalled mount must yield an empty/idle line,
+    not block. `RELAY_STATUSLINE_DEADLINE=0` disables the wall; a missing or
+    garbage value keeps the default."""
+    raw = os.environ.get("RELAY_STATUSLINE_DEADLINE")
+    if raw is None:
+        return 1.0
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    return val if val > 0 else 0.0
+
+
+@contextlib.contextmanager
+def _statusline_deadline(seconds: float):
+    """Best-effort SIGALRM wall around one render. The agent host's statusLine
+    timeout gives this bound for free, but NON-agent surfaces (`--watch` in a
+    pane next to Codex, a user's own statusline script) get no such reaper, so
+    without it a hung mount/git wedges the process indefinitely. Degrades to a
+    no-op where SIGALRM is unavailable (Windows) or we are not on the main
+    thread; restores the prior handler + timer unconditionally.
+
+    A signal cannot interrupt a true uninterruptible (D-state) syscall — nothing
+    in userspace can — but it DOES unblock the cases that actually bite here: a
+    git subprocess wait (subprocess.run's pipe wait is interruptible and it
+    kills the child on the way out) and the interruptible fuse round-trips sshfs
+    uses in practice."""
+    if not seconds or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _fire(_signum, _frame):
+        raise _StatuslineDeadline()
+
+    try:
+        prev = signal.signal(signal.SIGALRM, _fire)
+    except (ValueError, OSError):
+        yield  # not the main thread / unsupported -> no wall, still render
+        return
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            signal.signal(signal.SIGALRM, prev)
+        except (ValueError, OSError):
+            pass
+
+
 def _statusline_once(args) -> int:
     color = _statusline_color_enabled(args)
     want_json = bool(getattr(args, "json", False))
     try:
-        _statusline_ingest_stdin()
-        env = load_env()
-        session = _statusline_resolve(env, getattr(args, "pair_id", None), strict=True)
-        if session is None:
-            if want_json:
-                print(json.dumps({"bound": False, "pair": None,
-                                  "state": "unbound", "text": ""}, ensure_ascii=False))
-            return 0  # fail-quiet: empty footer line
-        st = _statusline_state(session, env)
+        _statusline_ingest_stdin()  # own bounded select read; never blocks
+        payload = None  # JSON dict to emit (json mode), else None
+        line = ""       # plain line to emit (text mode), else ""
+        with _statusline_deadline(_sl_render_deadline()):
+            env = load_env()
+            session = _statusline_resolve(env, getattr(args, "pair_id", None), strict=True)
+            if session is None:
+                payload = {"bound": False, "pair": None, "state": "unbound", "text": ""}
+            else:
+                st = _statusline_state(session, env)
+                line = _statusline_format(st, color=(False if want_json else color))
+                if want_json:
+                    st["text"] = line
+                    payload = st
+        # Emit OUTSIDE the wall so a firing SIGALRM can never tear a half-written
+        # line (text mode with session None stays a silent empty footer).
         if want_json:
-            st["text"] = _statusline_format(st, color=False)
-            print(json.dumps(st, ensure_ascii=False))
-            return 0
-        line = _statusline_format(st, color=color)
-        if line:
+            print(json.dumps(payload, ensure_ascii=False))
+        elif line:
             print(line)
         return 0
     except (Exception, SystemExit):
         # A statusline must never crash the footer. Swallow + emit nothing.
         # SystemExit too: helpers hard-exit on e.g. no shared root / not a repo,
         # which for a footer must degrade to an empty line, not a rc-2 error.
+        # _StatuslineDeadline lands here as well -> a stalled render degrades to
+        # an empty/idle line instead of a frozen footer.
         # (KeyboardInterrupt stays a BaseException -> propagates for clean ^C.)
         if want_json:
             try:
@@ -5894,16 +5981,21 @@ def _statusline_watch(args) -> int:
     except (TypeError, ValueError):
         interval = 2
     pair_id = getattr(args, "pair_id", None)
+    deadline = _sl_render_deadline()
     out = sys.stdout
     try:
         while True:
             try:
-                env = load_env()
-                session = _statusline_resolve(env, pair_id, strict=False)
-                line = _statusline_format(_statusline_state(session, env), color) if session else ""
+                with _statusline_deadline(deadline):
+                    env = load_env()
+                    session = _statusline_resolve(env, pair_id, strict=False)
+                    line = _statusline_format(_statusline_state(session, env), color) if session else ""
                 if not line:
                     line = _sl_paint("relay · (no bound/active pair)", "2", color)
-            except (Exception, SystemExit):  # incl. no-shared-root hard-exit
+            except (Exception, SystemExit):
+                # no-shared-root hard-exit OR a stalled frame (_StatuslineDeadline):
+                # show an idle line and keep looping so the pane stays LIVE rather
+                # than freezing on a hung mount/git.
                 line = _sl_paint("relay · (unavailable)", "2", color)
             out.write("\r\033[2K" + line)
             out.flush()

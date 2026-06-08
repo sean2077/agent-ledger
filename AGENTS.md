@@ -215,7 +215,15 @@ relative `touched_paths` are read under `worktree_root`. Full semantics:
   command-backed statusline yet, openai/codex#20140; there it stays on `relay
   statusline --watch` in a side pane or the Stop hook's `[relay-state]` line).
   Because `statusLine` is a single config slot, install never clobbers a user's
-  own statusline — it refuses with a compose recipe unless `--force`.
+  own statusline — it refuses with a compose recipe unless `--force`. The render
+  is **self-bounded** (v1.4.2): a best-effort SIGALRM wall
+  (`RELAY_STATUSLINE_DEADLINE`, default 1s) caps each paint and every `git`
+  subprocess is bounded (`RELAY_GIT_TIMEOUT`, default 10s), so a hung `git` or a
+  stalled sshfs `.shared/` can't wedge non-agent surfaces (`--watch`, a user's
+  own statusline script) that lack the host's `statusLine` timeout — a stalled
+  `--watch` frame shows an idle line and keeps repainting instead of freezing.
+  (Set either knob to `0` to disable; a true D-state syscall is unkillable by any
+  userspace bound.)
 
 ## 8. Testing & dev conventions
 

@@ -4,7 +4,21 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
-## Unreleased
+## 1.4.2 — 2026-06-08
+
+### Fixed
+
+- `relay statusline` no longer hangs on non-agent surfaces when git or the
+  shared mount stalls. The render relied on the agent host's ~1s `statusLine`
+  timeout to bound it; surfaces without that reaper (`--watch` in a pane next to
+  Codex, a user's own statusline script) could wedge indefinitely on a hung
+  `git` (default `.shared/` anchoring shells out to git on every paint) or a
+  stalled sshfs `.shared/` read — and the fail-quiet `try/except` cannot catch a
+  blocked syscall. Two bounds now apply: a best-effort SIGALRM **render wall**
+  (`RELAY_STATUSLINE_DEADLINE`, default `1.0`s) caps each paint, so `--watch`
+  shows an idle line and keeps repainting instead of freezing; and every `git`
+  subprocess is bounded (`RELAY_GIT_TIMEOUT`, default `10`s). Set either knob to
+  `0` to disable. (D-state syscalls remain unkillable by any userspace bound.)
 
 ### Docs
 

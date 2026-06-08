@@ -3,7 +3,7 @@
 `agent-relay` connects interactive Claude Code and Codex CLI sessions through
 an append-only shared file ledger so they can cross-review work without
 writing API glue. The protocol is markdown + sidecars, so other agents can
-participate too. Current: **v1.4.1**.
+participate too. Current: **v1.4.2**.
 
 See [`docs/why.md`](docs/why.md) for the longer take on what this is, what it
 isn't, and what running it through interactive Claude Code + Codex actually

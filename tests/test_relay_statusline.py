@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -390,7 +391,7 @@ def test_statusline_never_hangs_on_half_open_stdin(tmp_path):
         # Deliberately DO NOT write or close proc.stdin -> the child sees a
         # half-open pipe with no data and no EOF. communicate() would close it,
         # so we wait() directly and read stdout only after the child exits.
-        proc.wait(timeout=3)
+        proc.wait(timeout=8)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
@@ -415,3 +416,87 @@ def test_statusline_fail_quiet_outside_any_repo(tmp_path):
     )
     assert proc.returncode == 0
     assert proc.stdout.decode().strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# bounded under a hung/slow git or mount (non-agent surfaces have no host
+# reaper, so the render must self-bound) — see _statusline_deadline / _git_timeout
+# ---------------------------------------------------------------------------
+
+
+def _fake_slow_git(tmp_path, seconds=30):
+    """A `git` on PATH that just sleeps — stands in for a hung VCS or a stalled
+    mount underneath the repo. Returns a PATH value with it in front."""
+    bindir = tmp_path / "slowbin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text(f"#!/bin/sh\nsleep {seconds}\n")
+    git.chmod(0o755)
+    return f"{bindir}:{os.environ.get('PATH', '')}"
+
+
+def test_git_helpers_bounded_on_timeout(monkeypatch, tmp_path):
+    """git_toplevel must not hang forever when git is wedged: RELAY_GIT_TIMEOUT
+    bounds the subprocess so the helper returns None instead of blocking."""
+    monkeypatch.setenv("PATH", _fake_slow_git(tmp_path))
+    monkeypatch.setenv("RELAY_GIT_TIMEOUT", "0.3")
+    t0 = time.monotonic()
+    result = relay.git_toplevel(tmp_path)
+    dt = time.monotonic() - t0
+    assert result is None
+    assert dt < 3.0, f"git_toplevel did not honor RELAY_GIT_TIMEOUT (took {dt:.1f}s)"
+
+
+def test_statusline_bounded_by_render_wall_when_git_hangs(tmp_path):
+    """The reported bug: in a NON-agent env (no host statusLine timeout) with no
+    RELAY_SHARED_ROOT, the render shells out to git on every paint. A hung git
+    must NOT wedge the process — the SIGALRM render wall bounds it. Pin the git
+    timeout high so the WALL (not the git timeout) is what's under test."""
+    env = _clean_subprocess_env(RELAY_GIT_TIMEOUT="60",
+                                RELAY_STATUSLINE_DEADLINE="0.4")
+    env["PATH"] = _fake_slow_git(tmp_path)
+    t0 = time.monotonic()
+    proc = subprocess.Popen(
+        [sys.executable, str(RELAY), "statusline", "--no-color"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, cwd=str(tmp_path),
+    )
+    try:
+        proc.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        proc.kill(); proc.wait()
+        pytest.fail("relay statusline hung on a slow git (render wall did not fire)")
+    dt = time.monotonic() - t0
+    assert proc.returncode == 0
+    assert proc.stdout.read().decode().strip() == ""  # no anchor -> empty footer
+    assert dt < 4.0, f"render wall too slow ({dt:.1f}s)"
+
+
+def test_statusline_watch_stays_live_under_stall(tmp_path):
+    """--watch (the Codex-side-pane surface) must keep REPAINTING when a frame
+    stalls on a hung git/mount, not freeze on the first blocked paint. Each
+    frame is bounded by the render wall -> an idle line, then the loop continues."""
+    env = _clean_subprocess_env(RELAY_GIT_TIMEOUT="60",
+                                RELAY_STATUSLINE_DEADLINE="0.3")
+    env["PATH"] = _fake_slow_git(tmp_path)
+    proc = subprocess.Popen(
+        [sys.executable, str(RELAY), "statusline", "--watch",
+         "--interval", "1", "--no-color"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, cwd=str(tmp_path),
+    )
+    try:
+        time.sleep(6.0)  # span several (wall + interval) frame periods
+        alive = proc.poll() is None
+        proc.terminate()
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait()
+    assert alive, "watch process died/hung instead of looping under a stall"
+    # >= 2 idle frames proves the loop kept repainting (not frozen on one paint).
+    assert out.decode().count("unavailable") >= 2

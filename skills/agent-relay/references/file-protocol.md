@@ -1,6 +1,6 @@
 # agent-relay file protocol
 
-> Source spec for the `relay` CLI implementation. v1.4.1; session schema v3.
+> Source spec for the `relay` CLI implementation. v1.4.2; session schema v3.
 > The binding 1.0 frozen-contract and compatibility policy is in §15.
 > Security model and untrusted-peer policy: `docs/threat-model.md`.
 
