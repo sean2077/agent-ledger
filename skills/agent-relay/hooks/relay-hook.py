@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 
 def now_iso() -> str:

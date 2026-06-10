@@ -55,7 +55,7 @@ from typing import Callable, Optional
 
 RELAY_PACKAGE_DIR = Path(__file__).resolve().parent.parent
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 SCHEMA_VERSION = 3
 BINDING_SCHEMA_VERSION = 1
 
