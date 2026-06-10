@@ -292,18 +292,20 @@ def test_skill_prefers_background_wait_and_forbids_break_out_to_ask():
     wait time, not user time: SKILL.md step 10 must (a) forbid ending a turn
     just to ask the user "should I wait?", (b) make background wait the preferred
     form on runtimes that support it (Claude Code: Bash `run_in_background`), and
-    (c) give Codex — which has no backgroundable shell task — its
-    foreground/Stop-hook equivalent instead of a break-out."""
+    (c) give Codex unified-exec surfaces their poll-without-commentary
+    equivalent instead of a break-out."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
     # (a) never end a turn merely to ask permission to wait
     assert "wait time, not user time" in text
     # (b) background wait is the preferred form, via run_in_background
     assert "wait --require-binding` in the background" in text
     assert "run_in_background" in text
-    # (c) Codex's honest no-background reality is spelled out
-    assert "no `run_in_background` equivalent" in text
-    assert "wait --require-binding` in the" in text
-    assert "**foreground**" in text
+    # (c) Codex's unified-exec reality is spelled out
+    assert "Codex CLI / Codex App (unified exec background terminal)" in text
+    assert "long `\"$RELAY\" wait --require-binding`" in text
+    assert "immediately poll the same session" in text
+    assert "with no assistant commentary" in text
+    assert "model-held poll loop" in text
     # the mutating guard during a pending background wait survives (reframed)
     assert "do not start another relay round" in text
     # the retired Q3 framing must be gone

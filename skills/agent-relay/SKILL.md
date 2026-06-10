@@ -220,17 +220,23 @@ This is the core 95% case. Take one full turn in the relay.
       hour. **While a background wait is pending, do not start another relay round**
       (claim / publish / sync / close) — the pending wait owns the next
       transition; read-only work and unrelated user requests are fine.
-    - **Codex CLI (no backgroundable task): lean on the Stop hook, or wait in
-      the foreground.** Codex tears down its exec PTY at turn end, so it has
-      **no `run_in_background` equivalent** — a detached wait can neither
-      survive the turn nor notify on completion. With hooks installed, publish
-      and let the Stop hook's `decision: "block"` carry the loop (it
-      auto-continues only when the peer has already published). When the peer has
-      not yet published, run `"$RELAY" wait --require-binding` in the
-      **foreground**: it blocks this turn (Ctrl-C to break;
-      `RELAY_WAIT_TIMEOUT` bounds it), but blocking on the peer is the correct
-      move. **Breaking out to ask the user "should I wait?" is never the Codex
-      fallback** — that is the very stall this rule exists to prevent.
+    - **Codex CLI / Codex App (unified exec background terminal): let the relay
+      wait own the turn, but do not narrate poll wakes.** Current Codex surfaces
+      may turn a long `"$RELAY" wait --require-binding` into an ongoing
+      background-terminal session instead of a truly blocking foreground
+      command. When the peer has not published yet, start or continue that wait,
+      request the longest per-call wait window the harness permits (read the
+      ceiling from the wait tool's schema — e.g. `write_stdin.yield_time_ms`
+      caps at 300000 ms on codex-cli 0.139.x — rather than picking shorter
+      ad-hoc windows), and on an empty wake immediately poll the same session
+      again with no assistant commentary and no new relay claim / publish /
+      close. The harness may still render a tool-wait line for each poll;
+      reducing poll frequency is the available mitigation. Esc/Ctrl-C remains
+      the user interrupt. With hooks installed, the Stop hook only helps after a
+      turn ends or when the peer has already published; a model-held poll loop
+      does not fire Stop. **Breaking out to ask the user "should I wait?" is
+      never the Codex fallback** — that is the very stall this rule exists to
+      prevent.
 
     **When hooks are installed**: the Stop hook auto-continues the turn via `decision: "block"` whenever the peer published an artifact addressed to you, so that already-published case happens implicitly between turns; if the peer has not published yet, keep the manual wait above. Rely on the `[relay-state]` / `[relay-action]` prefixes injected as `reason` rather than re-running `relay status`. The `RELAY_AUTO_ROUND_CAP` backstop still applies. Without hooks, follow the manual auto-loop above.
 

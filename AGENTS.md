@@ -172,12 +172,13 @@ relative `touched_paths` are read under `worktree_root`. Full semantics:
    gate is the interruption the loop exists to remove. **Prefer waiting in the
    background** where the runtime allows it (Claude Code: Bash
    `run_in_background` — the user stays interactive and the harness re-invokes
-   you when the wait exits). Codex CLI has no backgroundable task (its exec PTY
-   is torn down at turn end), so it uses the Stop hook only when the peer has
-   already published, otherwise it runs `relay wait --require-binding` in the
-   foreground instead of breaking out. The goal is an un-interrupted multi-round
-   cross-review that still hands back on real decisions and stays interruptible
-   (Ctrl-C any time).
+   you when the wait exits). On Codex CLI / Codex App surfaces with unified exec,
+   a long `relay wait --require-binding` may become an ongoing
+   background-terminal session; Codex should keep polling that wait with the
+   longest available per-call interval and zero assistant commentary on empty
+   wakes, because Stop hooks do not fire while the turn is held. The goal is an
+   un-interrupted multi-round cross-review that still hands back on real
+   decisions and stays interruptible (Ctrl-C any time).
 
 **Hard rules:** never edit a `.md` that has a `.ready` sidecar (append a
 `kind: correction` instead); never hand-write `.sha256`/`.ready`; never bypass

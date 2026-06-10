@@ -4,6 +4,14 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## Unreleased
+
+### Docs
+
+- Clarify Codex unified-exec relay waiting guidance: a long `relay wait` may
+  become a background-terminal session, so Codex should poll with the longest
+  available wait window and avoid assistant commentary on empty wakes.
+
 ## 1.5.1 — 2026-06-08
 
 ### Fixed
