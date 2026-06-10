@@ -500,3 +500,28 @@ def test_v07_wait_hint_paths_include_doctor_or_sessions():
         window = src[nas_idx:nas_idx + 400]
         assert "relay pairs list" in window
         assert "relay bootstrap" in window
+
+
+def test_skill_routes_on_demand_references():
+    """Unreleased restructure: SKILL.md is a hot core + on-demand references.
+    The router must name every reference file, and each must exist — including
+    the troubleshooting playbook that absorbed the inline taxonomy/failure
+    sections."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    for rel in (
+        "references/troubleshooting.md",
+        "references/file-protocol.md",
+        "references/rsync-recipes.md",
+        "references/hook-protocol.md",
+    ):
+        assert rel in text
+        assert (ROOT / "skills/agent-relay" / rel).is_file()
+
+
+def test_skill_fill_step_uses_draft_set():
+    """Unreleased: the fill step is `relay draft set` (atomic, CLI-validated)
+    — not hand-editing the draft with Edit/Write, which the CLI superseded."""
+    text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    assert "draft set" in text
+    assert "--body-file" in text
+    assert "--prompt-for-next-file" in text

@@ -4,6 +4,14 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
+## Unreleased
+
+### Docs
+
+- Restructure `SKILL.md` into an always-loaded core plus on-demand references;
+  add `references/troubleshooting.md`; the fill step now uses
+  `relay draft set` instead of hand-editing the draft.
+
 ## 1.5.2 — 2026-06-10
 
 ### Docs

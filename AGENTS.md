@@ -36,7 +36,7 @@ the option that can't deadlock and that a user can always interrupt.
 skills/agent-relay/
   bin/relay              # the entire CLI — one Python file, stdlib only, 3.10+
   SKILL.md               # workflow guide loaded by Claude Code / Codex
-  references/            # file-protocol.md, hook-protocol.md, rsync-recipes.md
+  references/            # file-protocol.md, hook-protocol.md, rsync-recipes.md, troubleshooting.md
   templates/             # envrc.dispatcher.example (per-host env, optional)
   hooks/                 # relay-hook.py dispatcher + install-target fragments
 tests/                   # pytest; one test_relay_<area>.py per area, conftest.py
@@ -50,6 +50,10 @@ package or add third-party deps without a strong reason — the single-file,
 zero-install property is load-bearing for the "drop it on any host" use case.
 When the file feels big, extract *helpers with clear boundaries* (identity /
 pair / heartbeat), not a package.
+
+`SKILL.md` is the always-loaded core; operational detail lives in
+`references/*` loaded on demand — keep new detail out of the core unless it is
+needed on every turn.
 
 ## 3. Architecture — four layers
 
