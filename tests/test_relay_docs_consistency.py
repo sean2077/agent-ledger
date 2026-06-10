@@ -224,35 +224,32 @@ def test_first_brief_template_removed_from_surface():
 
 
 def test_skill_relay_lookup_guidance_documents_priority_contract():
-    """F5: SKILL.md documents the supported lookup priority without requiring
-    relay to be globally installed on PATH."""
+    """F5 (amended): SKILL.md keeps the one-line priority summary + the
+    compact lookup loop; the full rationale moved to
+    references/troubleshooting.md ("Locating relay")."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    ts = (ROOT / "skills/agent-relay/references/troubleshooting.md").read_text(encoding="utf-8")
     hook_src = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
     for needle in (
         'bins: ["bash"]',
-        "the skill runtime does not expose a",
-        "portable `$SKILL_DIR`",
         "Priority: explicit `RELAY_BIN`",
         "project-local",
         "skill installs",
-        "this repo's",
-        "`skills/agent-relay/bin/relay`",
-        "`PATH`",
-        "common per-user skill installs",
         "older global",
         "symlink cannot shadow",
         "${RELAY_BIN:-}",
-        "$ROOT/.agents/skills/agent-relay/bin/relay",
-        "$ROOT/.claude/skills/agent-relay/bin/relay",
-        "$ROOT/.codex/skills/agent-relay/bin/relay",
-        "$ROOT/skills/agent-relay/bin/relay",
-        "$(command -v relay 2>/dev/null)",
-        "$HOME/.codex/skills/agent-relay/bin/relay",
-        "$HOME/.claude/skills/agent-relay/bin/relay",
-        "$HOME/.agents/skills/agent-relay/bin/relay",
+        '"$ROOT"/{.agents,.claude,.codex}/skills/agent-relay/bin/relay',
+        '"$ROOT/skills/agent-relay/bin/relay"',
+        '"$(command -v relay 2>/dev/null)"',
+        '"$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay',
         "npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y",
     ):
         assert needle in text
+    for needle in (
+        "the skill runtime does not expose a",
+        "portable `$SKILL_DIR`",
+    ):
+        assert needle in ts
     assert 'bins: ["relay", "bash"]' not in text
     for needle in (
         '".agents/skills/agent-relay/bin/relay"',

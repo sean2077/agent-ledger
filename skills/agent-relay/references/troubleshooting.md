@@ -5,6 +5,19 @@ something you don't understand. It complements — never overrides — the hard
 rules in SKILL.md, and the CLI's own stderr hints always name the immediate
 next step: follow those first.
 
+## 0. Locating relay
+
+Because the skill runtime does not expose a portable `$SKILL_DIR`, SKILL.md
+resolves the binary fresh each turn with a compact priority loop: explicit
+`RELAY_BIN` → project-local skill installs
+(`$ROOT/{.agents,.claude,.codex}/skills/agent-relay/bin/relay`) → this repo's
+`skills/agent-relay/bin/relay` (when developing relay itself, the checked-out
+CLI must win over an older global symlink) → `PATH` → common per-user skill
+installs (`$HOME/{.codex,.claude,.agents}/…`, where `npx skills add … -g`
+lands when the binary is not separately put on `PATH`). If the loop misses
+everywhere, relay is not installed on this host — surface the `npx skills
+add` command from the loop's error message to the user.
+
 ## 1. Preflight results
 
 Exit levels: `0` ok (may still carry non-blocking warns), `1` blocking
