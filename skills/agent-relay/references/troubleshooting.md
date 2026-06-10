@@ -7,16 +7,30 @@ next step: follow those first.
 
 ## 0. Locating relay
 
-SKILL.md resolves the binary fresh each turn because the skill runtime does not expose a
-portable `$SKILL_DIR`: explicit `RELAY_BIN`, then `PATH`, then — only when both
-miss — fallback candidates for installs that never put `relay` on `PATH`:
-project-local skill installs
-(`$ROOT/{.agents,.claude,.codex}/skills/agent-relay/bin/relay`), a repo that
-vendors the skill (`$ROOT/skills/agent-relay/bin/relay`), and per-user skill
-installs (`$HOME/{.codex,.claude,.agents}/…`, where `npx skills add … -g`
-lands). If everything misses, relay is not installed on this host — surface
-the `npx skills add` command from the error to the user. To pin a specific
-build (e.g. a development checkout), export `RELAY_BIN`; it always wins.
+SKILL.md assumes an installed `relay` reachable as `RELAY_BIN` or on `PATH`
+(the skill runtime does not expose a portable `$SKILL_DIR`, so the binary is
+resolved fresh each turn). When both miss, probe the skill-install locations
+that never reach `PATH`:
+
+```bash
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+for c in \
+    "$ROOT"/{.agents,.claude,.codex}/skills/agent-relay/bin/relay \
+    "$ROOT/skills/agent-relay/bin/relay" \
+    "$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay ; do
+  [ -x "$c" ] && { RELAY="$c"; break; }
+done
+```
+
+Still nothing? `relay` is not installed on this host — surface the install
+command to the user:
+
+```bash
+npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y
+```
+
+To pin a specific build (e.g. a development checkout), export `RELAY_BIN`; it
+always wins.
 
 ## 1. Preflight results
 

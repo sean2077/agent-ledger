@@ -18,10 +18,12 @@ The core loop below is self-sufficient for a normal turn. Open a reference only 
 
 | Trigger | Read |
 |---|---|
-| A relay command fails or surprises you; preflight warn/fail you don't understand; stuck drafts / stale state; `unsupported_schema`; archive maintenance | `references/troubleshooting.md` |
-| Frontmatter / `status` / seq semantics; `timed_out` resume details; worktree (`worktree_root`) semantics | `references/file-protocol.md` (§4.3–4.4) |
-| Running `relay sync` (flags, `--strict-gitignore`, `--delete`, shape A/B, first-sync safety) | `references/rsync-recipes.md` |
-| Hook internals (Stop scoping, dedup, trail log, Codex trust) | `references/hook-protocol.md` |
+| A relay command fails or surprises you; preflight warn/fail you don't understand; stuck drafts / stale state; `unsupported_schema`; archive maintenance | `references/troubleshooting.md` — by symptom: §0 locating relay, §1 preflight, §2 binding/pairs, §3 claim/publish, §4 sync, §5 unsupported_schema, §6 doctor, §7 archive |
+| Frontmatter / `status` / seq semantics; `timed_out` resume details; worktree (`worktree_root`) semantics | `references/file-protocol.md` — §4.3 status/terminal semantics, §4.4 worktrees; bindings §13, issue ledger §14 |
+| Running `relay sync` (flags, `--strict-gitignore`, `--delete`, shape A/B, first-sync safety) | `references/rsync-recipes.md` — headers by topic (default vs strict, Shape A/B, `--delete`, SSH) |
+| Hook internals (Stop scoping, dedup, trail log, Codex trust) | `references/hook-protocol.md` — §4 event handlers, §6 trail log, §7 installation |
+
+References are section-numbered. Don't read a whole reference file: locate the target section (the § given in the row, or `grep -n '^#' <file>`) and read just that section.
 
 ## Hooks (optional autopilot)
 
@@ -29,24 +31,13 @@ If the user ran `relay hooks install --target both`: SessionStart prints an earl
 
 ## Resolve `relay` once per turn
 
-Resolve the binary once per turn and use `"$RELAY"` everywhere below. Priority: explicit `RELAY_BIN`, then `PATH`; only when both miss, fall back to common skill-install locations (rationale: `references/troubleshooting.md`, "Locating relay").
+Assume `relay` is installed; resolve it once per turn and use `"$RELAY"` everywhere below:
 
 ```bash
 RELAY="${RELAY_BIN:-$(command -v relay 2>/dev/null)}"
-if ! [ -x "${RELAY:-}" ]; then
-  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  for c in \
-      "$ROOT"/{.agents,.claude,.codex}/skills/agent-relay/bin/relay \
-      "$ROOT/skills/agent-relay/bin/relay" \
-      "$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay ; do
-    [ -x "$c" ] && { RELAY="$c"; break; }
-  done
-fi
-[ -n "${RELAY:-}" ] && [ -x "$RELAY" ] && export RELAY || {
-  echo 'cannot locate relay CLI; install with: npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y' >&2
-  exit 2
-}
 ```
+
+If that resolves to nothing executable, stop and read `references/troubleshooting.md` ("Locating relay"): it has the fallback lookup for skill installs that never reached `PATH`, and the install command to surface to the user.
 
 ## Every turn: init + preflight, then bind
 

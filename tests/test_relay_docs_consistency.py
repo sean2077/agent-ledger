@@ -224,33 +224,34 @@ def test_first_brief_template_removed_from_surface():
 
 
 def test_skill_relay_lookup_guidance_documents_priority_contract():
-    """F5 (amended, user-directed): the generic skill prefers RELAY_BIN then
-    PATH; install-location candidates are fallback only. The dev-repo
-    "checkout must win" rule is this repo's special case and lives in
-    AGENTS.md — it must NOT leak into the project-agnostic SKILL.md."""
+    """F5 (amended, user-directed v3): the generic skill assumes an installed
+    relay — a RELAY_BIN-or-PATH one-liner plus a troubleshoot pointer. The
+    fallback lookup, install command, and rationale live in
+    references/troubleshooting.md; the dev-repo "checkout must win" rule
+    stays in AGENTS.md, never in the generic skill."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
     ts = (ROOT / "skills/agent-relay/references/troubleshooting.md").read_text(encoding="utf-8")
     agents_md = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     hook_src = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
+    assert 'bins: ["bash"]' in text
+    assert '"${RELAY_BIN:-$(command -v relay 2>/dev/null)}"' in text
+    assert "Locating relay" in text
+    # The lookup long tail stays out of the hot core.
+    assert '"$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay' not in text
+    assert "npx skills add sean2077/agent-ledger" not in text
+    assert "cannot shadow" not in text
+    # ...and lives in the cold reference instead.
     for needle in (
-        'bins: ["bash"]',
-        "Priority: explicit `RELAY_BIN`, then `PATH`",
-        '"${RELAY_BIN:-$(command -v relay 2>/dev/null)}"',
+        "the skill runtime does not expose a",
+        "portable `$SKILL_DIR`",
         '"$ROOT"/{.agents,.claude,.codex}/skills/agent-relay/bin/relay',
         '"$ROOT/skills/agent-relay/bin/relay"',
         '"$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay',
         "npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y",
-    ):
-        assert needle in text
-    # The dev-repo shadowing rule must not leak into the generic skill…
-    assert "cannot shadow" not in text
-    for needle in (
-        "the skill runtime does not expose a",
-        "portable `$SKILL_DIR`",
         "RELAY_BIN",
     ):
         assert needle in ts
-    # …it lives in AGENTS.md (this repo pins its checkout / RELAY_BIN).
+    # Dev-repo pinning stays in AGENTS.md.
     assert "skills/agent-relay/bin/relay" in agents_md
     assert "RELAY_BIN" in agents_md
     assert 'bins: ["relay", "bash"]' not in text
@@ -508,6 +509,7 @@ def test_skill_routes_on_demand_references():
     the troubleshooting playbook that absorbed the inline taxonomy/failure
     sections."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
+    assert "read just that section" in text
     for rel in (
         "references/troubleshooting.md",
         "references/file-protocol.md",
