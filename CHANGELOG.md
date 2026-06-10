@@ -4,7 +4,7 @@ All notable changes to `agent-ledger` / `agent-relay` are tracked here.
 Starting at 1.0.0, compatibility follows the frozen contract in
 `skills/agent-relay/references/file-protocol.md` §15.
 
-## Unreleased
+## 1.5.3 — 2026-06-10
 
 ### Docs
 
