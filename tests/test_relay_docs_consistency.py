@@ -224,32 +224,35 @@ def test_first_brief_template_removed_from_surface():
 
 
 def test_skill_relay_lookup_guidance_documents_priority_contract():
-    """F5 (amended): SKILL.md keeps the one-line priority summary + the
-    compact lookup loop; the full rationale moved to
-    references/troubleshooting.md ("Locating relay")."""
+    """F5 (amended, user-directed): the generic skill prefers RELAY_BIN then
+    PATH; install-location candidates are fallback only. The dev-repo
+    "checkout must win" rule is this repo's special case and lives in
+    AGENTS.md — it must NOT leak into the project-agnostic SKILL.md."""
     text = (ROOT / "skills/agent-relay/SKILL.md").read_text(encoding="utf-8")
     ts = (ROOT / "skills/agent-relay/references/troubleshooting.md").read_text(encoding="utf-8")
+    agents_md = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     hook_src = (ROOT / "skills/agent-relay/hooks/relay-hook.py").read_text(encoding="utf-8")
     for needle in (
         'bins: ["bash"]',
-        "Priority: explicit `RELAY_BIN`",
-        "project-local",
-        "skill installs",
-        "older global",
-        "symlink cannot shadow",
-        "${RELAY_BIN:-}",
+        "Priority: explicit `RELAY_BIN`, then `PATH`",
+        '"${RELAY_BIN:-$(command -v relay 2>/dev/null)}"',
         '"$ROOT"/{.agents,.claude,.codex}/skills/agent-relay/bin/relay',
         '"$ROOT/skills/agent-relay/bin/relay"',
-        '"$(command -v relay 2>/dev/null)"',
         '"$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay',
         "npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y",
     ):
         assert needle in text
+    # The dev-repo shadowing rule must not leak into the generic skill…
+    assert "cannot shadow" not in text
     for needle in (
         "the skill runtime does not expose a",
         "portable `$SKILL_DIR`",
+        "RELAY_BIN",
     ):
         assert needle in ts
+    # …it lives in AGENTS.md (this repo pins its checkout / RELAY_BIN).
+    assert "skills/agent-relay/bin/relay" in agents_md
+    assert "RELAY_BIN" in agents_md
     assert 'bins: ["relay", "bash"]' not in text
     for needle in (
         '".agents/skills/agent-relay/bin/relay"',

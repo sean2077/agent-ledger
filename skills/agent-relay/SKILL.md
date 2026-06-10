@@ -29,19 +29,20 @@ If the user ran `relay hooks install --target both`: SessionStart prints an earl
 
 ## Resolve `relay` once per turn
 
-`relay` may not be on `$PATH`; resolve it once per turn and use `"$RELAY"` everywhere below. Priority: explicit `RELAY_BIN`, project-local skill installs, this repo's checkout, `PATH`, then common per-user skill installs — a project-local copy wins so an older global symlink cannot shadow the checked-out CLI (full rationale: `references/troubleshooting.md`, "Locating relay").
+Resolve the binary once per turn and use `"$RELAY"` everywhere below. Priority: explicit `RELAY_BIN`, then `PATH`; only when both miss, fall back to common skill-install locations (rationale: `references/troubleshooting.md`, "Locating relay").
 
 ```bash
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-RELAY="${RELAY_BIN:-}"
-[ -x "$RELAY" ] || for c in \
-    "$ROOT"/{.agents,.claude,.codex}/skills/agent-relay/bin/relay \
-    "$ROOT/skills/agent-relay/bin/relay" \
-    "$(command -v relay 2>/dev/null)" \
-    "$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay ; do
-  [ -n "$c" ] && [ -x "$c" ] && { RELAY="$c"; break; }
-done
-[ -n "${RELAY:-}" ] && export RELAY || {
+RELAY="${RELAY_BIN:-$(command -v relay 2>/dev/null)}"
+if ! [ -x "${RELAY:-}" ]; then
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  for c in \
+      "$ROOT"/{.agents,.claude,.codex}/skills/agent-relay/bin/relay \
+      "$ROOT/skills/agent-relay/bin/relay" \
+      "$HOME"/{.codex,.claude,.agents}/skills/agent-relay/bin/relay ; do
+    [ -x "$c" ] && { RELAY="$c"; break; }
+  done
+fi
+[ -n "${RELAY:-}" ] && [ -x "$RELAY" ] && export RELAY || {
   echo 'cannot locate relay CLI; install with: npx skills add sean2077/agent-ledger -g --agent claude-code codex --skill agent-relay -y' >&2
   exit 2
 }

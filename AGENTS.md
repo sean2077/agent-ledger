@@ -74,8 +74,10 @@ needed on every turn.
 
 ## 4. Command surface (quick reference)
 
-Resolve the binary first (`relay` may not be on `$PATH`): prefer
-`$(git rev-parse --show-toplevel)/skills/agent-relay/bin/relay`.
+Resolve the binary first. **In this repo, always use the checkout:**
+`$(git rev-parse --show-toplevel)/skills/agent-relay/bin/relay` (or export
+`RELAY_BIN` to it). The generic skill prefers `PATH`, which on a dev host
+typically points at an installed snapshot, not your working tree.
 
 | Command | Purpose |
 |---|---|

@@ -7,16 +7,16 @@ next step: follow those first.
 
 ## 0. Locating relay
 
-Because the skill runtime does not expose a portable `$SKILL_DIR`, SKILL.md
-resolves the binary fresh each turn with a compact priority loop: explicit
-`RELAY_BIN` → project-local skill installs
-(`$ROOT/{.agents,.claude,.codex}/skills/agent-relay/bin/relay`) → this repo's
-`skills/agent-relay/bin/relay` (when developing relay itself, the checked-out
-CLI must win over an older global symlink) → `PATH` → common per-user skill
+SKILL.md resolves the binary fresh each turn because the skill runtime does not expose a
+portable `$SKILL_DIR`: explicit `RELAY_BIN`, then `PATH`, then — only when both
+miss — fallback candidates for installs that never put `relay` on `PATH`:
+project-local skill installs
+(`$ROOT/{.agents,.claude,.codex}/skills/agent-relay/bin/relay`), a repo that
+vendors the skill (`$ROOT/skills/agent-relay/bin/relay`), and per-user skill
 installs (`$HOME/{.codex,.claude,.agents}/…`, where `npx skills add … -g`
-lands when the binary is not separately put on `PATH`). If the loop misses
-everywhere, relay is not installed on this host — surface the `npx skills
-add` command from the loop's error message to the user.
+lands). If everything misses, relay is not installed on this host — surface
+the `npx skills add` command from the error to the user. To pin a specific
+build (e.g. a development checkout), export `RELAY_BIN`; it always wins.
 
 ## 1. Preflight results
 

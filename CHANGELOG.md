@@ -11,8 +11,10 @@ Starting at 1.0.0, compatibility follows the frozen contract in
 - Restructure `SKILL.md` into an always-loaded core plus on-demand references;
   add `references/troubleshooting.md`; the fill step now uses
   `relay draft set` instead of hand-editing the draft.
-- Compact the always-loaded `relay` resolver block while preserving its lookup
-  priority; move the longer rationale into `references/troubleshooting.md`.
+- Compact the always-loaded `relay` resolver block and make the generic skill
+  prefer `PATH` after `RELAY_BIN`; move the longer rationale into
+  `references/troubleshooting.md` and document this repo's checkout pin in
+  `AGENTS.md`.
 
 ## 1.5.2 — 2026-06-10
 
