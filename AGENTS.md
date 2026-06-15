@@ -1,5 +1,11 @@
 # AGENTS.md — agent-ledger / agent-relay
 
+> [!IMPORTANT]
+> **Superseded — integrated into [oma (oh-my-agents)](https://github.com/sean2077/oh-my-agents).**
+> The relay pairing here has been reimplemented as native `oma relay` v2. For new
+> work use `sean2077/oh-my-agents`; this repo is in maintenance mode (v1 `.shared/`
+> ledgers stay valid for reference but are not read or migrated by oma).
+
 > Authoritative onboarding for an AI agent (or human) joining this repo to
 > **review or develop**. Read this top-to-bottom once; it is the fastest path
 > to being productive. Deeper rationale lives in [`docs/why.md`](docs/why.md);

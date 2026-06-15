@@ -1,5 +1,19 @@
 # agent-ledger
 
+> [!IMPORTANT]
+> **Superseded — now integrated into [oma (oh-my-agents)](https://github.com/sean2077/oh-my-agents).**
+> agent-ledger's cross-review pairing has been reimplemented as the native
+> `oma relay` v2 inside the `oma` single-binary CLI. **For new work, use
+> [`sean2077/oh-my-agents`](https://github.com/sean2077/oh-my-agents)** — it
+> ships the same pair-delivery flow (plan → review → implement → review →
+> decision) plus a statusline and auto-continue hooks, as a fail-closed Go
+> binary (no Python runtime).
+>
+> This repository stays in **maintenance mode** for reference and for existing
+> v1 `.shared/` ledgers. Note: `oma relay` v2 uses a fresh on-disk format
+> (`.oma/relay/`) and deliberately does **not** read or migrate v1 `.shared/`
+> ledgers — they remain valid for archival/manual reference only.
+
 `agent-relay` connects interactive Claude Code and Codex CLI sessions through
 an append-only shared file ledger so they can cross-review work without
 writing API glue. The protocol is markdown + sidecars, so other agents can
